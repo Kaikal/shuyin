@@ -1,0 +1,95 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+/*
+ * 两个「口味」= 两个 APK，同一个代码库：
+ *   phone  给手机 / 平板          applicationId cn.shuyin.player
+ *   car    给车机（横屏大屏）      applicationId cn.shuyin.player.car
+ *
+ * 两者可以同时安装在一台设备上（applicationId 不同），这正符合「车机版单独打包」。
+ * 界面差异不靠两套前端，而是把 BuildConfig.CAR 传给前端，由 CSS/组件按 car 模式排布。
+ */
+android {
+    namespace 'cn.shuyin.player'
+    compileSdk 35
+
+    defaultConfig {
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '0.6.0'
+        resValue "string", "app_name", "疏音"
+    }
+
+    flavorDimensions "target"
+    productFlavors {
+        phone {
+            dimension "target"
+            applicationId 'cn.shuyin.player'
+            resValue "string", "app_name", "疏音"
+            buildConfigField "boolean", "CAR", "false"
+        }
+        car {
+            dimension "target"
+            applicationId 'cn.shuyin.player.car'
+            resValue "string", "app_name", "疏音车机"
+            buildConfigField "boolean", "CAR", "true"
+        }
+    }
+
+    signingConfigs {
+        // 交付用的自签名：debug 密钥即可安装。上架换成自己的 keystore 就行
+        release {
+            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        buildConfig true
+    }
+
+    packagingOptions {
+        resources.excludes += ['META-INF/*']
+    }
+}
+
+/*
+ * 前端产物由 apps/desktop 的 Vite 打到 app/src/main/assets/www，
+ * 这里把「构建前必须先有 www/index.html」变成硬性检查：
+ * 忘了跑前端构建时，报错要直说，而不是打出一个白屏 APK。
+ */
+tasks.register('checkWebAssets') {
+    doFirst {
+        def idx = file('src/main/assets/www/index.html')
+        if (!idx.exists()) {
+            throw new GradleException(
+                "缺少前端产物：src/main/assets/www/index.html\n" +
+                "先执行 apps/android/build-web.sh（或 npm run android:web）生成。")
+        }
+    }
+}
+tasks.named('preBuild') { dependsOn 'checkWebAssets' }

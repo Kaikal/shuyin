@@ -1,0 +1,73 @@
+[package]
+name = "shuyin-desktop"
+version = "0.5.8"
+description = "疏音 · 本地音乐播放器（桌面端）"
+authors = ["shuyin"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "shuyin_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+# 全局快捷键 / 媒体键：只用 Win32 那几个消息与热键 API，不引第三方热键框架
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+# 系统媒体会话（SMTC）：耳机线控 / 蓝牙 AVRCP 按键走的就是它。
+# 只用到 Media + Foundation，版本与 tauri 自己带的 windows 保持一致（0.62），
+# 否则 HWND 这类类型在两边不是同一个，编译期就对不上。
+windows = { version = "0.62", features = ["Foundation", "Media", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_RemoteDesktop"] }
+# 无边框窗口取 HWND 用（Win11 圆角 / DWM 阴影）
+raw-window-handle = "0.6"
+tauri-plugin-store = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+# 国产 APP 导出的 txt 歌单多为 GBK：UTF-8 失败时回落 GB18030
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 扫描：目录遍历 + 元数据
+walkdir = "2"
+lofty = "0.21"
+
+# 数据库
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 播放：原生解码与输出（不经 WebView <audio>）
+# 0.21 起 Decoder::builder 支持带 byte_len 构造：symphonia 的 isomp4 初始化
+# 必须知道流总长度，rodio 0.20 的包装层恒报 None，M4A/MP4 一律 panic（稻香翻车的根因）
+rodio = "0.21.1"
+# 频谱可视化：对解码后的采样做实时 FFT
+rustfft = "6"
+# rodio 内部已依赖 symphonia；这里只为启用全部格式 feature
+symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+# opus 在 symphonia 0.5 中位于 opus-metadata / 依赖 ogg 容器（rodio 内部启用）
+
+# 工具
+sha2 = "0.10"
+hex = "0.4"
+rayon = "1.10"
+
+# 出网：平台 API 代理（绕 CORS）+ 在线曲目流式读取（HTTP Range）
+# 用系统 TLS（Windows=schannel），不额外打包根证书
+ureq = { version = "2", default-features = false, features = ["native-tls", "gzip"] }
+
+[profile.release]
+# 保留 unwind：单个解码/元数据异常不应杀掉整个进程（声音线程内部另有 catch_unwind）
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

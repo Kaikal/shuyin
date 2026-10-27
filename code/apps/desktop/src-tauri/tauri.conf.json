@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Shuyin",
+  "version": "0.5.8",
+  "identifier": "cn.shuyin.player",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPLOCALDATA/covers/**",
+          "$APPLOCALDATA/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "languages": [
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": false
+      }
+    },
+    "icon": [
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {}
+}

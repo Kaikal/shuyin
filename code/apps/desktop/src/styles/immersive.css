@@ -1,0 +1,2413 @@
+/* ============================================================
+   沉浸式播放页 + 桌面歌词窗口
+   规范延续：单一强调色、实体磨砂、静态光斑（不做漂移动效）
+   ============================================================ */
+
+/* ---------- 沉浸式播放页 ---------- */
+.imm {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  overflow: hidden;
+  background: var(--sy-bg-base);
+  opacity: 0;
+  transform: scale(1.02);
+  pointer-events: none;
+  transition:
+    opacity 260ms var(--sy-ease-soft),
+    transform 460ms var(--sy-ease-panel);
+}
+.imm[data-open='true'] {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.imm:focus { outline: none; }
+
+/* 背景 = 当前封面模糊放大。
+   v0.1.9：亮了一档——之前压得太狠，整屏发黑，「专辑图当背景」这件事看不出来。
+   亮度交给 scrim 控（不同模式下 scrim 不同），底层保留颜色和层次。 */
+.imm-bg {
+  position: absolute;
+  inset: -16%;
+  background-position: center;
+  background-size: cover;
+  /* --imm-bright 由 useCoverBrightness 按封面亮度算：白封面压到 0.4，深色封面不动 */
+  filter: blur(64px) saturate(1.7) brightness(var(--imm-bright, 0.8));
+  transform: scale(1.1);
+  opacity: 1;
+}
+.imm-bg[data-glass-degraded='true'] { filter: brightness(calc(var(--imm-bright, 0.8) * 0.8)); }
+/* 无封面：用强调色光斑 + 渐变底兜住氛围，避免整屏发灰 */
+.imm[data-cover='false'] .imm-bg {
+  background-image:
+    radial-gradient(780px 640px at 20% 16%, color-mix(in srgb, var(--sy-accent) 46%, transparent), transparent 62%),
+    radial-gradient(640px 560px at 90% 86%, color-mix(in srgb, var(--sy-accent) 22%, transparent), transparent 68%),
+    linear-gradient(160deg, var(--sy-bg-base), var(--sy-bg-elevated));
+  filter: none;
+  opacity: 1;
+}
+
+.imm-scrim {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--sy-bg-base) 44%, transparent) 0%,
+    color-mix(in srgb, var(--sy-bg-base) 58%, transparent) 48%,
+    color-mix(in srgb, var(--sy-bg-base) 88%, transparent) 100%
+  );
+}
+.imm-flare {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(720px 600px at 18% 14%, color-mix(in srgb, var(--sy-accent) 22%, transparent), transparent 64%),
+    radial-gradient(560px 520px at 94% 92%, color-mix(in srgb, var(--sy-accent) 12%, transparent), transparent 70%);
+  pointer-events: none;
+}
+
+/* 封面里的一束主轴光：让模糊的专辑图不像一块糊掉的色块。
+   注意不能用 screen 混合——底色一旦偏亮，screen 会把它推到接近纯白，
+   白字歌词就糊在背景里了。这里只用普通混合的淡色光。 */
+.imm-beam {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  width: min(92%, 1180px);
+  height: 62%;
+  transform: translate(-50%, -50%) rotate(-6deg);
+  background: radial-gradient(
+    60% 50% at 50% 50%,
+    color-mix(in srgb, var(--sy-accent) 13%, transparent),
+    transparent 72%
+  );
+  pointer-events: none;
+  opacity: 0.62;
+}
+
+/* 主题色统一一层：专辑图的颜色可能和主题完全无关（红封面 + 蓝主题），
+   压一层极淡的强调色，整屏才像「同一个应用」而不是「一张照片」 */
+.imm-tint {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    205deg,
+    color-mix(in srgb, var(--sy-accent) 24%, transparent) 0%,
+    transparent 46%,
+    color-mix(in srgb, var(--sy-accent) 14%, transparent) 100%
+  );
+  mix-blend-mode: soft-light;
+  pointer-events: none;
+}
+
+.imm-shell {
+  position: relative;
+  z-index: 2;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* 底部只需要让开通栏频谱（66px），不是让开播放条——播放条被这一层盖住了。
+     以前这里写 104（照抄主界面的 `inset ... 104px`），多留的 30 多 px 让整组
+     内容在窗口里明显偏上：1440×900 下上方空 125、下方空 208。76 大致等于
+     上边距（22）＋顶栏高度（30），内容就在窗口里真正居中了。 */
+  padding: 22px 40px 76px;
+}
+
+.imm-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: none;
+}
+.imm-top-l { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.imm-mark {
+  font-family: var(--sy-font-serif);
+  font-size: 15px;
+  letter-spacing: 0.16em;
+  color: var(--sy-text-1);
+}
+.imm-sep { width: 1px; height: 12px; background: color-mix(in srgb, var(--sy-text-1) 18%, transparent); }
+.imm-kicker { font-size: 11px; color: var(--sy-text-2); letter-spacing: 0.04em; }
+.imm-pos { font-size: 10.5px; color: var(--sy-text-3); }
+/* 右上是「设置类」下拉芯片 + 收起按钮；窗口窄的时候允许换行，别把标题挤没 */
+.imm-top-r { display: flex; align-items: center; gap: 8px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+/* 芯片组：与收起按钮分开一小段，视觉上是两簇 */
+.imm-top-menus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-right: 4px;
+  max-width: 62vw;
+}
+
+/*
+ * 芯片的底色与文字。
+ * 播放页背后是一张模糊封面 + 光斑，`--sy-surface` 半透明压在亮处会"化掉"，
+ * 于是「音效 / 频谱 / 位置」这些小字几乎读不出来。这里换成：
+ *   · 深一档的实底（bg-2 74%）+ 轻模糊 —— 保证任何封面下都是同一块底板
+ *   · 标签用 text-2、取值用 text-1 —— 两级都能读清，又还分得出主次
+ */
+.imm-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 16%, transparent);
+  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 76%, transparent);
+  backdrop-filter: blur(14px) saturate(1.3);
+  color: var(--sy-text-1);
+  font: 500 11.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.imm-chip:hover {
+  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 92%, transparent);
+  color: var(--sy-text-1);
+  border-color: color-mix(in srgb, var(--sy-text-1) 26%, transparent);
+}
+.imm-chip[aria-pressed='true'] {
+  color: var(--sy-accent-soft);
+  border-color: color-mix(in srgb, var(--sy-accent) 52%, transparent);
+  background: color-mix(in srgb, var(--sy-accent) 20%, var(--sy-bg-2, #14161d));
+}
+.imm-close { width: 30px; height: 30px; border-radius: 999px; background: var(--sy-surface); }
+.imm-close:hover { background: color-mix(in srgb, var(--sy-text-1) 10%, transparent); }
+/* 只有图标的小圆钮（下载 / 全屏）：跟芯片同一块底板 */
+.imm-icobtn {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 16%, transparent);
+  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 76%, transparent);
+  backdrop-filter: blur(14px) saturate(1.3);
+  color: var(--sy-text-1);
+  display: grid;
+  place-items: center;
+}
+.imm-icobtn:hover {
+  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 92%, transparent);
+  color: var(--sy-text-1);
+}
+.imm-icobtn[aria-pressed='true'] {
+  color: var(--sy-accent-soft);
+  border-color: color-mix(in srgb, var(--sy-accent) 50%, transparent);
+}
+.imm-icobtn.busy { color: var(--sy-accent-soft); }
+
+/* ---------- 下拉芯片（频谱 / 位置 / 音效 / 音质 / 歌词） ---------- */
+.chip-menu { position: relative; display: inline-flex; }
+.chip-menu-btn { padding-right: 8px; }
+.chip-menu-btn.on {
+  color: var(--sy-text-1);
+  border-color: color-mix(in srgb, var(--sy-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--sy-accent) 12%, transparent);
+}
+.cm-label { color: var(--sy-text-2); font-weight: 400; }
+.cm-value { color: inherit; font-weight: 500; }
+
+.chip-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid var(--sy-surface-border);
+  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 92%, transparent);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  overflow-y: auto;
+  animation: chip-pop-in 120ms var(--sy-ease-soft);
+}
+@keyframes chip-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.chip-menu.end .chip-pop { left: auto; right: 0; }
+/* 芯片贴近页面底部时向上展开，否则弹出层会被裁在屏幕外 */
+.chip-menu.up .chip-pop {
+  top: auto;
+  bottom: calc(100% + 8px);
+  animation: chip-pop-up 120ms var(--sy-ease-soft);
+}
+@keyframes chip-pop-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- 播放页工具带（播放按钮下面那一排） ---------- */
+/*
+ * 悬浮胶囊条。
+ *
+ * 用户给参考图时标了一句「做成类似悬浮式的按钮」：散在页面上的几颗小胶囊
+ * 读起来像「一排附属控件」，收进一条半透明底板里才像一块浮在封面上的工具条。
+ * 底板用纯黑 + 低透明，不跟着主题变——底板永远压在封面/背景上，浅色主题下
+ * 用亮色底板会糊成一片。
+ */
+.imm-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  margin-top: 14px;
+  padding: 5px;
+  border-radius: 999px;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  background: color-mix(in srgb, #05060a 42%, transparent);
+  box-shadow:
+    0 14px 30px rgba(0, 0, 0, 0.36),
+    inset 0 0 0 1px color-mix(in srgb, #ffffff 9%, transparent);
+  /* 弹出层要压在歌词 / 进度条上面 */
+  position: relative;
+  z-index: 6;
+}
+/*
+ * 每一颗都 grow：flex 换行最常见的毛病是「最后一行只剩一颗，右边空一大片，看着像漏了一格」。
+ * grow=1 之后**每一行都会铺满整行**，行尾永远对齐；宽度仍然跟着文字走，只是把剩余空间分掉。
+ */
+.imm-tools > * { flex: 1 1 auto; min-width: 0; }
+/*
+ * 换行时的「落单那颗」不要被拉满整行。
+ * `flex: 1 1 auto` 是为了几颗并排时均分宽度（不然长短不齐），但一换行，
+ * 第二行只剩一颗时它会从 60px 长到整列宽——截图里就是「列表」独占一行、特别突兀。
+ * 用 `max-width: 100%` + `flex-grow` 收一档：单独一行时也就不超过内容宽的两倍。
+ */
+.imm-tools > .imm-tool { flex: 0 1 auto; }
+.imm-tools > .chip-menu { flex: 1 1 auto; }
+.imm-tools .chip-menu { display: flex; }
+/* 只有「包在 .chip-menu 里的按钮」需要撑满外层包壳；
+   普通 .imm-tool 按钮本身就是直接子项，再写 width:100% 会等于整行宽 → 一颗占一行（踩过） */
+.imm-tools .chip-menu > button { width: 100%; }
+.imm-tools .imm-tool,
+.imm-tools .chip-menu > button { justify-content: center; }
+/*
+ * 不换行：芯片被挤窄时，中文默认「任意处可断行」，label/value 会被压成一列竖排的单字
+ * （实测 96px 格宽下「音效 / 摇滚」变成两个字上下叠）。这里禁止断行，
+ * 真挤不下就省略号收尾 / 整颗换行，而不是把字拧成两行。
+ */
+.imm-tools .imm-chip,
+.imm-tools .imm-tool { white-space: nowrap; }
+/*
+ * 窄窗（封面列只有 264）：4 颗芯片带文字肯定放不下，会换行。
+ * 这里只留图标——图标本身有 title，悬停能看到含义，一行排得干干净净。
+ */
+@media (max-width: 1180px) {
+  .imm-tools > .imm-tool { padding: 0 9px; gap: 0; }
+  .imm-tools .it-lbl { display: none; }
+  .imm-tools { gap: 5px; }
+}
+/*
+ * 芯片文字不换行 + 挤不下就省略。
+ *
+ * 中文默认「任意处可断行」：芯片被 flex 行挤窄时，label/value 会按字折断，
+ * 竖成一列单字（播放页工具带 96px 格宽下的「音效 / 摇滚」、设置页最小窗
+ * 1108 宽下的「音质 母带」，都是这一个坑）。这里对所有 ChipMenu 生效——
+ * 设置页、播放条、播放页顶部共用同一颗组件，别只在某一处修。
+ */
+.chip-menu-btn { white-space: nowrap; }
+.chip-menu-btn .cm-label,
+.chip-menu-btn .cm-value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip-menu-btn > svg { flex: 0 0 auto; }
+.imm-tool {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 11%, transparent);
+  background: color-mix(in srgb, var(--sy-text-1) 5%, transparent);
+  color: var(--sy-text-2);
+  font: 500 11.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  transition: background 140ms var(--sy-ease-soft), color 140ms var(--sy-ease-soft);
+}
+.imm-tool:hover { background: color-mix(in srgb, var(--sy-text-1) 9%, transparent); color: var(--sy-text-1); }
+/*
+ * 置灰态。明确压暗 + 禁掉 hover 的提亮，否则鼠标一划过又亮回来，用户会以为能点。
+ * （下载已经挪到播放控制行，这条留着给以后放进工具带的开关用）
+ */
+.imm-tool:disabled,
+.imm-tool:disabled:hover {
+  opacity: 0.36;
+  cursor: default;
+  color: var(--sy-text-3);
+  background: color-mix(in srgb, var(--sy-text-1) 4%, transparent);
+  border-color: color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+.imm-tool[aria-pressed='true'] {
+  color: var(--sy-accent-soft);
+  border-color: color-mix(in srgb, var(--sy-accent) 46%, transparent);
+  background: color-mix(in srgb, var(--sy-accent) 13%, transparent);
+}
+/* 工具带里的按钮不再自己描边/铺底：外层已经是一条胶囊底板，
+   里面每颗再套一层边框就变成「胶囊里套胶囊」，格子感很重 */
+.imm-tools .imm-tool {
+  border-color: transparent;
+  background: transparent;
+}
+.imm-tools .imm-tool:hover { background: color-mix(in srgb, #ffffff 9%, transparent); }
+.imm-tools .imm-tool[aria-pressed='true'] {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
+}
+/* 工具带里的芯片比顶部那些更「平」一点，跟播放控制是一家人 */
+.imm-tools .imm-chip {
+  height: 26px;
+  font-size: 11.5px;
+  gap: 5px;
+  padding: 0 10px;
+}
+/* 沉浸式（只留歌词）时工具带居中；限宽是因为这里是整屏宽度，
+   不限的话四列会被拉到很宽，芯片里就剩两个字加一截空白 */
+.imm-solo-foot .imm-tools { margin-top: 10px; max-width: 460px; margin-inline: auto; }
+
+.chip-opt {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--sy-text-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.chip-opt:hover:not(:disabled) { background: color-mix(in srgb, var(--sy-text-1) 8%, transparent); color: var(--sy-text-1); }
+.chip-opt.on { color: var(--sy-accent-soft); background: color-mix(in srgb, var(--sy-accent) 12%, transparent); }
+.chip-opt:disabled { opacity: 0.38; cursor: default; }
+/* 已下载的那一行要看得见：整行照常压暗（说明不能点），
+   但「已下载」三个字保持强调色 —— 压暗到 0.38 之后灰字和背景几乎一个色，
+   用户会以为这一行本来就是空的。
+   （用 .done 类而不是 :has()，老版本 WebView2 不认 :has。） */
+.chip-opt.done { opacity: 0.8; }
+.chip-opt.done .co-note.done { color: var(--sy-accent-soft); }
+.co-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.co-name { font: 500 12px/1.3 var(--sy-font-cn); }
+.co-desc { font: 400 10.5px/1.35 var(--sy-font-cn); color: var(--sy-text-4); }
+.co-note { font: 400 10px/1 var(--sy-font-num); color: var(--sy-text-4); flex: none; }
+.chip-opt svg { flex: none; }
+
+/*
+ * 主排布：唱片 | 歌词，**整组真的居中**。
+ *
+ * 走过两次弯路，都记在这儿：
+ *
+ * 1. v0.3.3 用 `minmax(0,320) minmax(0,600)` + `justify-content: center`：
+ *    两列各有上限，加起来比容器窄，于是**两列作为一个整体**被居中，
+ *    右列自己那点内容又只占左半边 —— 看起来就是「一坨挤在左边，右边大片空地」。
+ *    现在右列用 `1fr` 吃满剩余宽度，网格本身 `max-width + margin: auto` 居中，
+ *    左右留白对称，内容不再靠着某一边。
+ * 2. 左右 padding 故意不等（72/40）做的那 16px「光学补偿」也去掉了：
+ *    它只在「两列整体居中」那种错位布局里才有意义，现在反而把整块往右推歪。
+ */
+.imm-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /*
+   * 左列加宽（320 → 380）：封面是这一页的视觉主体，之前的尺寸配上 26px 的歌名，
+   * 整块读起来像「缩略图 + 一堆小字」。右列用 1fr 吃满，歌词才有地方铺开。
+   */
+  grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
+  justify-content: center;
+  align-content: center;
+  /* stretch：左右两列各自撑满行高，左列才能「封面靠上、控制贴底」（见 .imm-art） */
+  align-items: stretch;
+  /* 这一行必须显式给 1fr：只写 align-content: center 时，行高是「内容高度」再居中，
+     左列只有内容那么高 → 封面钉不住顶部、`margin-top: auto` 推不动控制条（实测
+     封面和进度条贴着、下面反而空 80px）。1fr 让行吃满列高，左右两列才都撑到底。 */
+  grid-template-rows: minmax(0, 1fr);
+  gap: 64px;
+  width: 100%;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 8px 40px 0;
+}
+@media (min-width: 1440px) {
+  .imm-grid {
+    grid-template-columns: minmax(0, 430px) minmax(0, 1fr);
+    gap: 88px;
+  }
+}
+@media (max-width: 1180px) {
+  .imm-grid {
+    grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+    gap: 44px;
+    padding: 8px 28px 0;
+  }
+}
+/*
+ * 布局永远是两列，不随「有没有歌词」变。
+ *
+ * 曾经没歌词时并成一列居中（右列只剩一句「暂无歌词」，视觉重量全偏左）。
+ * 用户反馈：不要这样晃来晃去、容易误点——没歌词也按有歌词那套排，
+ * 右栏照样是「暂无歌词 + 在线搜索歌词」，位置和看歌词时一致。
+ */
+
+/* ---------- 黑胶唱片（播放页默认视图） ---------- */
+/*
+ * 构成：一整块圆盘（纹路 + 专辑封面做标签 + 中心孔 + 高光）+ 一支唱臂。
+ * 转动的是内层 `.imm-disc-spin`：外层不转，唱臂和高光才不会被带着一起转。
+ * 暂停时 `animation-play-state: paused` —— 不是把角度归零，唱片就该停在原地。
+ */
+.imm-disc {
+  position: relative;
+  /* 跟着列宽走：列 380 就吃满 380，窄窗自动缩到列宽，不会溢出。
+     钉顶 + 控制贴底之后左列有富余高度，所以上限放到 400 —— 唱片是这一页的主体。 */
+  width: min(400px, 100%);
+  aspect-ratio: 1;
+  height: auto;
+  flex: none;
+  border-radius: 50%;
+  background: #0c0d11;
+  box-shadow:
+    0 34px 70px rgba(0, 0, 0, 0.62),
+    0 2px 0 rgba(255, 255, 255, 0.04) inset,
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+.imm-disc-spin {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: imm-vinyl 26s linear infinite;
+  animation-play-state: paused;
+}
+.imm-disc[data-playing='true'] .imm-disc-spin { animation-play-state: running; }
+@keyframes imm-vinyl {
+  to { transform: rotate(360deg); }
+}
+/* 纹路：一圈圈同心圆。用 repeating-radial-gradient 而不是图片，缩放不糊 */
+.imm-disc-grooves {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      rgba(255, 255, 255, 0.055) 0 1px,
+      rgba(0, 0, 0, 0) 1px 3px
+    ),
+    radial-gradient(circle at 50% 50%, #17181d 0 62%, #0b0c10 100%);
+}
+/* 标签（专辑图）：直径 58%，外面一圈黑边把纹路隔开 */
+.imm-disc-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 58%;
+  height: 58%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 5px #08090c,
+    0 0 0 6px rgba(255, 255, 255, 0.08),
+    0 10px 26px rgba(0, 0, 0, 0.5);
+}
+/* 中心孔 */
+.imm-disc-hole {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  border-radius: 50%;
+  background: #05060a;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 0 0 3px rgba(0, 0, 0, 0.55);
+}
+/* 斜向高光：不做混合模式（本机 GPU 关掉时 screen 会糊成一片白） */
+.imm-disc-gloss {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: linear-gradient(
+    128deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(255, 255, 255, 0.05) 26%,
+    rgba(255, 255, 255, 0) 46% 100%
+  );
+}
+/*
+ * 唱臂：转轴钉在圆盘右上角，臂头斜插进唱片——**针是搭在唱片上**的。
+ *
+ * 以前用固定像素（right:-34 / top:-26 / width:160）配固定角度（暂停 -9°、
+ * 播放 +2°），圆盘一缩小（矮窗 320/280）臂就够不着唱片：实测针尖落在
+ * 圆盘右缘外 11~18%，「只到边边上、看着好假」（用户原话）。
+ * 现在几何全部改成**跟着圆盘走**的比例，任何尺寸下关系都不变：
+ *   · width 44%，right/top 用百分比 —— 转轴圆心落在 (98.8%, 1.2%)，
+ *     即圆盘右上角外侧（离圆心 1.38 倍半径，正好是唱臂座该在的位置）；
+ *   · transform-origin 是 SVG 里转轴圆心 (30,24) 的相对位置（30/160、24/132）；
+ *   · 角度让针尖落在半径 65% 处（外圈纹路上；标签只占到 29%）。
+ *
+ * **暂停要停在盘外**（用户：「暂停的时候要移动到唱片外面啊，参考网易云」）。
+ * 实测几何：转轴在盘外 1.15R、臂长只有 0.6R，所以从 +100° 转到 +60° 针尖都还在盘里
+ * （55%~72%R）——必须一路逆时针转到 +8° 附近针尖才越过盘缘。
+ * 取 −6°：针尖离圆心 1.18R（离盘缘约 0.18R ≈ 27px），臂指向右下、明显离开唱片，
+ * 又不会离得太远看着脱节；播放回 90° 压到纹路上。
+ */
+.imm-arm {
+  position: absolute;
+  right: -34.5%;
+  top: -5.4%;
+  width: 44%;
+  aspect-ratio: 160 / 132;
+  height: auto;
+  transform-origin: 18.75% 18.18%;
+  /* 暂停：唱臂架在盘外（见上面几何说明） */
+  transform: rotate(-6deg);
+  transition: transform 520ms var(--sy-ease-soft);
+  filter: drop-shadow(0 10px 18px rgba(0, 0, 0, 0.5));
+  pointer-events: none;
+}
+.imm-disc[data-playing='true'] .imm-arm { transform: rotate(90deg); }
+
+/* 窄窗 / 矮窗收一档：圆盘在窄列里会溢出，矮窗还会把控制条挤出屏幕。
+   宽度已经跟着列宽自适应，这里只处理**高度**不够时的情况（矮屏上 380 会顶掉控制条）。
+   唱臂是百分比尺寸，跟着圆盘一起缩，不用在这儿另写。 */
+@media (min-width: 1440px) {
+  .imm-disc { width: min(430px, 100%); }
+}
+@media (max-height: 820px) {
+  .imm-disc { width: min(360px, 100%); }
+}
+@media (max-height: 720px) {
+  .imm-disc { width: min(320px, 100%); }
+}
+@media (max-height: 660px) {
+  .imm-disc { width: min(280px, 100%); }
+}
+
+/* 唱片模式的右栏顶部：标题 / 专辑·歌手·来源 / 标签行 */
+.imm-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+.imm-head-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+  font: 600 26px/1.25 var(--sy-font-cn);
+  letter-spacing: 0.01em;
+  color: var(--sy-text-1);
+}
+.imm-head-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.imm-badges { display: inline-flex; gap: 5px; flex: none; }
+.imm-badge {
+  font: 500 10px/1 var(--sy-font-num);
+  font-style: normal;
+  letter-spacing: 0.04em;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--sy-accent-soft);
+  background: color-mix(in srgb, var(--sy-accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-accent) 26%, transparent);
+}
+/* 「翻唱」：标题写了「原唱 X」但歌手不是 X 时挂出来。用中性色，不跟音质徽章抢。 */
+.imm-badge.cov {
+  color: var(--sy-text-2);
+  background: color-mix(in srgb, var(--sy-text-1) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 20%, transparent);
+}
+.imm-cov { margin-left: 7px; vertical-align: 1px; }
+.imm-head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 0;
+  font: 400 12px/1.5 var(--sy-font-cn);
+  color: var(--sy-text-3);
+}
+.imm-tagrow { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 非唱片模式下单独占一行的那条标签（只有「歌词 / 评论」）。
+   flex:none 是必须的——`.imm-lyric` 是 flex 列，漏了会被歌词挤扁。 */
+.imm-tabrow-solo {
+  flex: none;
+  padding-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+}
+.imm-tag {
+  font: 500 11.5px/1 var(--sy-font-cn);
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  background: transparent;
+  color: var(--sy-text-2);
+  cursor: pointer;
+  transition: color 140ms var(--sy-ease-soft), border-color 140ms var(--sy-ease-soft);
+}
+.imm-tag:hover { color: var(--sy-text-1); border-color: color-mix(in srgb, var(--sy-text-1) 22%, transparent); }
+.imm-tag.on {
+  color: var(--sy-text-1);
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  border-color: transparent;
+}
+
+/* 右栏：顶部信息 + 歌词本体。歌词这块要能自己滚，所以必须 min-height: 0 */
+.imm-lyric-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  width: 100%;
+}
+
+/* ---------- 下载弹层（右上角那颗下载图标） ---------- */
+.dl-pop { padding: 8px; }
+.dl-pop-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 8px 8px;
+  font: 500 11.5px/1.2 var(--sy-font-cn);
+  color: var(--sy-text-2);
+}
+.dl-pop-sub { font: 400 10.5px/1.2 var(--sy-font-cn); color: var(--sy-text-3); }
+/* 「已下载」：整行不再可点，用强调色标出来，比灰掉一行更好读 */
+.chip-opt .co-note.done { color: var(--sy-accent-soft); }
+.dl-status {
+  margin: 8px 4px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font: 400 11px/1.4 var(--sy-font-cn);
+  color: var(--sy-text-3);
+}
+.dl-status.bad { color: var(--sy-error); }
+.dl-status-text { word-break: break-all; }
+
+.side-dl-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  overflow: hidden;
+}
+.side-dl-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--sy-accent);
+  transition: width 320ms var(--sy-ease-soft);
+}
+/* 弹层底部：一条通向下载页的路。下载本来就是「放下就走」的操作，
+   弹层只负责开个头，进度和结果都在下载页 */
+.dl-pop-foot {
+  margin: 6px 4px 2px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+
+/*
+ * 左：封面靠上 + 控制贴底。
+ *
+ * 用户的原话是「专辑封面再大一些，往上移动一些，现在和下面的按钮太近了」。
+ * 之前整列 `justify-content: center`，封面浮在中间、离下面那排按钮只有一个 gap，
+ * 上下都空、中间挤成一坨。现在把封面钉在列的顶部，进度条及其之后的内容用
+ * `margin-top: auto` 压到底部——中间那段空白就是自然拉开的距离，
+ * 窗口越高，封面和控制条离得越开。
+ */
+.imm-art {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  text-align: center;
+  min-width: 0;
+  min-height: 0;
+  padding-top: 4px;
+}
+/* 唱片模式：唱臂会从圆盘顶上伸出去一截，这里替它让出位置，别顶着顶栏的芯片 */
+.imm-grid[data-view='vinyl'] .imm-art { padding-top: 28px; }
+/* 这两块必须撑满列宽：`align-items: center` 会让 flex 子项按内容收缩，
+   进度条会缩成一小段、工具带会挤成一坨 */
+.imm-art > .imm-progress { width: 100%; margin-top: auto; }
+/* 工具带是悬浮胶囊，宽度跟着内容走（见 .imm-tools），这里不能给 100% */
+.imm-art > .imm-tools { width: auto; max-width: 100%; }
+.imm-cover {
+  position: relative;
+  margin-bottom: 26px;
+  /* 列宽已经跟着布局走，封面本身由组件里的 size 决定，居中才不会重心偏左 */
+  align-self: center;
+  filter: drop-shadow(0 34px 60px rgba(0, 0, 0, 0.62));
+  transition: transform 520ms var(--sy-ease-panel);
+}
+.imm-cover .cover-art { box-shadow: var(--sy-shadow-cover); }
+.imm[data-open='true'] .imm-cover { transform: translateY(0); }
+.imm[data-open='false'] .imm-cover { transform: translateY(14px); }
+html:not([data-reduced-motion='true']) .imm-cover[data-playing='true'] {
+  animation: imm-breathe 7.5s ease-in-out infinite;
+}
+@keyframes imm-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.imm-title {
+  margin: 0 0 8px;
+  font-size: 30px;
+  line-height: 1.24;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--sy-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.imm-artist { margin: 0 0 4px; font-size: 13.5px; color: var(--sy-text-2); }
+.imm-album {
+  margin: 0 0 18px;
+  font-size: 11.5px;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.imm-progress { max-width: 400px; margin-bottom: 12px; }
+
+/*
+ * 播放控制行：三格网格，播放键钉在列中线上。
+ *
+ * 以前是一排 flex：左边循环+上一首（两颗）、右边下一首（加了下载之后四颗），
+ * 播放键实际落在列中心左边 60 多 px，和上面封面的中线对不上——整排看着是歪的。
+ * `1fr auto 1fr` + 两侧各自对齐，播放键永远在列中线，两侧内容多寡不影响它。
+ */
+.imm-ctl {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.imm-ctl-l { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.imm-ctl-r { display: flex; align-items: center; justify-content: flex-start; gap: 10px; min-width: 0; }
+/*
+ * 下载：播放控制行里的一颗纯图标，跟循环/上一首/下一首同一套 `.icon-btn`。
+ * 没有底板、没有外圈——用户明确要求「和其他按钮保持样式统一」。
+ * `flex: none` 是必要的：`.chip-menu` 默认 inline-flex，放在 flex 行里会被压窄，
+ * 图标会被裁掉一半。
+ */
+.imm-dl-wrap { flex: none; }
+.imm-dl { width: 28px; height: 28px; }
+.imm-dl.busy { color: var(--sy-accent-soft); }
+/*
+ * 已下载：保留下载图标，右下角叠一个小勾。
+ * 以前是整颗换成勾——一排图标里「下载」就消失了，用户找不到这个功能。
+ */
+.imm-dl-done { position: relative; display: inline-flex; align-items: center; justify-content: center; }
+.imm-dl-tick {
+  position: absolute;
+  right: -5px;
+  bottom: -4px;
+  width: 9px;
+  height: 9px;
+  padding: 1px;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--sy-accent);
+  /* 盖住底下图标的笔画，保证小勾在深色背景上也认得出来 */
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, #000 45%, transparent);
+}
+/* 本地曲目：置灰且不响应 hover 提亮，否则一划过就亮，看着像能点。
+   0.28 在深色主题下几乎看不见（像按钮没渲染出来），0.34 才既「灰」又「在」 */
+.imm-dl:disabled,
+.imm-dl:disabled:hover {
+  opacity: 0.34;
+  cursor: default;
+  background: none;
+  color: var(--sy-text-2);
+}
+
+.imm-step { width: 34px; height: 34px; }
+.imm-play {
+  width: 54px; height: 54px;
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--sy-accent) 46%, transparent);
+}
+.imm-vol { display: inline-flex; align-items: center; gap: 6px; margin-left: 2px; flex: 0 0 auto; min-width: 0; }
+/*
+ * 音量条：**命中区**要够高。
+ * `<input type=range>` 的可点区域就是元素盒子本身——视觉上是一条 4px 的细线，
+ * 鼠标稍微偏上偏下就按空，表现为「不能滑动调节」（用户原话）。
+ * 所以把元素抬高到 18px，细条交给 `::-webkit-slider-runnable-track` 画，
+ * 粗细不变、好按多了。宽度只从 34 放到 44：控制行一共 300px，再宽会挤掉下载按钮。
+ */
+.imm-vol .slider {
+  width: 72px;
+  min-width: 44px;
+  flex: 0 0 auto;
+  height: 18px;
+  background: none;
+}
+.imm-vol .slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+}
+@media (max-width: 1080px) {
+  .imm-ctl,
+  .imm-ctl-l,
+  .imm-ctl-r { gap: 6px; }
+  .imm-vol .slider { width: 44px; }
+}
+
+.imm-meta-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 400px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #05060a 24%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #ffffff 7%, transparent);
+}
+
+/* 矮屏（笔记本 768 高度常见）：封面与频谱各收一档，别把控制条顶出可视区 */
+@media (max-height: 720px) {
+  .imm-cover { margin-bottom: 16px; }
+  .imm-cover .cover-art { width: 196px !important; height: 196px !important; }
+  .imm-album { margin-bottom: 14px; }
+  .imm-title { font-size: 26px; }
+  .imm-play { width: 48px; height: 48px; }
+}
+.imm-dur { font-size: 10.5px; color: var(--sy-text-4); }
+
+/* 右：歌词（比常规页更大、更透气） */
+.imm-lyric {
+  /* 撑满整行高度：歌词要占住右侧这一整块（用户参考图里圈的就是这个范围），
+     而不是缩成 620px 的一条、上下各留一大块空气 */
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  /* 唱片模式要在歌词上面放标题/专辑，所以是竖排；不这么做的话 header 会变成左侧一列 */
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 14px;
+}
+.imm-lyric > * {
+  width: 100%;
+  /* 列本身已经有上限（600/660），这里不再二次收窄，否则歌词会缩成一条 */
+}
+.imm-lyric .lyrics { mask-image: none; -webkit-mask-image: none; }
+/* 可滚轮 / 可拖动：给一个能抓的手型，拖拽中切换成抓取态 */
+.imm-lyric .lyrics {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.imm-lyric .lyrics[data-dragging='true'] { cursor: grabbing; }
+.imm-lyric .lyrics[data-dragging='true'] .lyric-line { transition: none; }
+.imm-lyric .lyric-line {
+  position: relative;
+  font-size: calc(17px * var(--lf, 1));
+  padding: 0 10px;
+  opacity: 0.38;
+}
+/* 悬停时才出现的时间戳：必须脱离文档流。以前它是第二个 flex 子项（margin-left:auto），
+   一旦整行改成居中/居右，这个「隐形」的时间会把它一起挤偏，看着像没对齐。 */
+.imm-lyric .lyric-time {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  margin: 0;
+  padding: 1px 6px;
+  border-radius: 5px;
+  transform: translateY(-50%);
+  background: color-mix(in srgb, var(--sy-bg-base) 78%, transparent);
+}
+.imm-lyric .lyric-line.active {
+  font-size: calc(22px * var(--lf, 1));
+  opacity: 1;
+  color: var(--sy-text-1);
+}
+.imm-lyric .lyric-line:hover { opacity: 0.6; }
+.imm-lyric .lyrics-source { left: 10px; }
+
+/* 歌词对齐（居左 / 居中 / 居右）——
+ * 右栏实测有 641px 宽（1121 宽的窗口），可每句只有 120px 左右、还一律顶在最左边，
+ * 于是整块读起来「只用了左边一小条，右边空着」。三种对齐让这块区域真正被用上。
+ * 只动整行的主轴对齐，不动字号与行距。
+ */
+.imm-lyric .lyrics[data-align='center'] .lyric-line { justify-content: center; text-align: center; }
+.imm-lyric .lyrics[data-align='right'] .lyric-line { justify-content: flex-end; text-align: right; }
+
+/* 标题区右收一档（固定值，不跟歌词对齐走）。
+ * 歌词居中时标题还钉在栏的最左边，和中间那几行字之间空出半个屏幕，
+ * 读起来像「标题属于另一个地方」。这里固定收 40px：
+ * 不管歌词选居左 / 居中 / 居右，标题都停在同一处，切来切去不晃眼。
+ * 唱片本身（左栏 .imm-art）完全不动。 */
+.imm-head,
+.imm-tabrow-solo { padding-left: 40px; }
+
+/* ---------- 长句：不再缩字号，唱到就横向滚 ----------
+ * 超宽的行在行内裁掉（不做省略号，那等于永远看不见后半句），
+ * 等这一句成为当前句时，文字块按 `--wrap-x` 从 0 平移到「末尾刚好露出来」。
+ * `--wrap-x` 由 LyricsView 按播放进度实时算，暂停 / 拖动 / 跳转都跟着走。
+ */
+.imm-lyric .lyrics[data-wrap='true'] .lyric-line { overflow: hidden; }
+.imm-lyric .lyrics[data-wrap='true'] .lyric-line > .lyric-text {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.imm-lyric .lyrics[data-wrap='true'] .lyric-line.active > .lyric-text {
+  /* 自然宽度：让它撑出整行，位移才有东西可露 */
+  flex: 0 0 auto;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  will-change: transform;
+  transform: translateX(var(--wrap-x, 0px));
+}
+/* 这一句真的溢出时，无论用户选了哪种对齐，都从行首开始排——
+   否则居中/居右会让它左右同时被裁，开唱瞬间连第一个字都看不见 */
+.imm-lyric .lyrics[data-wrap='true'][data-ov='true'] .lyric-line.active {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+/* 歌词区右下角：对齐按钮组 */
+.imm-lyrbar {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+}
+.imm-align {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+.imm-align-btn {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--sy-text-3);
+  cursor: pointer;
+  transition: color 140ms var(--sy-ease-soft), background 140ms var(--sy-ease-soft);
+}
+.imm-align-btn:hover {
+  color: var(--sy-text-1);
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+}
+.imm-align-btn.on {
+  color: var(--sy-text-1);
+  background: color-mix(in srgb, var(--sy-accent) 26%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-accent) 34%, transparent);
+}
+
+/* ---------- 沉浸式歌词：只留歌词的全屏排布（参考 Folia） ---------- */
+/*
+ * 沉浸式歌词的背景：专辑图要看得见，字也要读得清。
+ * 做法不是「压一层黑」，而是「中间透、四周收」：
+ *   中间（歌词区域）几乎不压，颜色全出来；上下两头压暗，工具条和控制条才有落点。
+ * 主题色（--sy-bg-base）跟着深浅主题走，浅色主题下自动变成「白雾」而不是「黑幕」。
+ */
+.imm[data-solo='true'] .imm-bg {
+  /* 比播放页再收一档：歌词是唯一焦点，底下那层只需要留住颜色和层次 */
+  filter: blur(58px) saturate(1.85) brightness(calc(var(--imm-bright, 0.8) * 0.92));
+  transform: scale(1.14);
+}
+/* 没有封面时底层是渐变，不需要再模糊一次（省一次全屏重绘） */
+.imm[data-solo='true'][data-cover='false'] .imm-bg { filter: none; }
+.imm[data-solo='true'] .imm-scrim {
+  background:
+    /* 上下两头压暗：顶部工具条、底部控制条要有落点 */
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--sy-bg-base) 76%, transparent) 0%,
+      color-mix(in srgb, var(--sy-bg-base) 22%, transparent) 9%,
+      transparent 20%,
+      transparent 78%,
+      color-mix(in srgb, var(--sy-bg-base) 34%, transparent) 90%,
+      color-mix(in srgb, var(--sy-bg-base) 72%, transparent) 100%
+    ),
+    /* 中间一圈淡暗角：焦点收到歌词上，但中间不铺色，专辑图该有的颜色全留着 */
+    radial-gradient(
+      116% 82% at 50% 47%,
+      transparent 0%,
+      transparent 38%,
+      color-mix(in srgb, var(--sy-bg-base) 40%, transparent) 80%,
+      color-mix(in srgb, var(--sy-bg-base) 74%, transparent) 100%
+    );
+}
+.imm[data-solo='true'] .imm-flare {
+  background:
+    radial-gradient(760px 520px at 50% 46%, color-mix(in srgb, var(--sy-accent) 16%, transparent), transparent 66%),
+    radial-gradient(560px 460px at 8% 86%, color-mix(in srgb, var(--sy-accent) 14%, transparent), transparent 70%),
+    radial-gradient(480px 400px at 94% 12%, color-mix(in srgb, var(--sy-accent) 12%, transparent), transparent 70%);
+}
+/* 歌词背后再垫一层柔光，字不会直接坐在糊掉的花纹上 */
+.imm[data-solo='true'] .imm-beam { opacity: 1; height: 54%; }
+.imm-solo {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 4px;
+}
+.imm-solo-lyrics {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 960px;
+  display: flex;
+}
+/* 父级 .imm-lyric 的规则会把渐隐清掉，这里单独加回来（只对歌词本体做淡出，
+   不然顶部工具条和底部控制条也会跟着虚） */
+.imm-solo .lyrics.immersive {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 20%, #000 80%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20%, #000 80%, transparent 100%);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.imm-solo .lyrics[data-dragging='true'] { cursor: grabbing; }
+.imm-solo .lyrics[data-dragging='true'] .lyric-line { transition: none; }
+
+.imm-solo-foot {
+  flex: none;
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+.imm-solo-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 11.5px;
+  color: var(--sy-text-3);
+}
+.imm-solo-meta .n {
+  color: var(--sy-text-2);
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.imm-solo-meta .a {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.imm-solo-meta .dot { opacity: 0.45; }
+.imm-solo-foot .progress { width: 100%; }
+.imm-solo-ctl {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-top: 2px;
+}
+.imm-solo-ctl .icon-btn { color: var(--sy-text-2); }
+.imm-solo-ctl .icon-btn:hover { color: var(--sy-text-1); }
+
+/* ============================================================
+   沉浸式歌词舞台（Folia 风）
+   只渲染当前句 ±1~2 行；当前句逐字错落入场、唱到的字变亮、
+   正在唱的那个字带一颗游走的强调色光点；前后句缩小 / 变暗 / 虚化 / 微倾斜。
+   ============================================================ */
+.folia {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  user-select: none;
+}
+.folia-stage {
+  position: absolute;
+  inset: 0;
+  perspective: 1100px;
+  perspective-origin: 50% 50%;
+}
+
+.fline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 48%;
+  transform-origin: 50% 50%;
+  text-align: center;
+  white-space: nowrap;
+  line-height: 1.22;
+  color: var(--sy-text-1);
+  /* 背景现在是专辑图（亮的时候很亮），描一层近距暗影才压得住 */
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.55),
+    0 2px 34px rgba(0, 0, 0, 0.42);
+  /* 只过渡 transform / opacity：filter 动一笔就是一次全屏重绘，
+     WebView2 退回软件渲染时非常贵，虚化直接瞬时切换（前后句本来就在动，看不出来） */
+  transition:
+    transform 760ms var(--sy-ease-panel),
+    opacity 640ms var(--sy-ease-soft),
+    color 400ms var(--sy-ease-soft);
+  will-change: transform, opacity;
+  cursor: pointer;
+}
+.fline.focus {
+  /* 主角：一层同色辉光把字从背景里托起来，但不做描边（描边会显脏） */
+  text-shadow:
+    0 2px 34px rgba(0, 0, 0, 0.3),
+    0 0 60px color-mix(in srgb, var(--sy-accent) 22%, transparent);
+}
+/* 当前句的舞台：整行居中摆放，由一个「呼吸浮动」的内层承载，
+   外层只负责定位，两层分开才不会和逐字的 transform 打架。 */
+.folia-cur {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.folia-line {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  padding: 0 0.04em;
+  line-height: 1.2;
+  cursor: pointer;
+  pointer-events: auto;
+  will-change: transform;
+  animation: fl-breath 8.6s ease-in-out infinite;
+  /* 超长句：先收字号（见 JSX 的 fit），收到下限还不够就换行——
+     nowrap + 停在中间的绝对定位，会让整句直接顶出屏幕两侧。 */
+  flex-wrap: wrap;
+  max-width: 92%;
+  text-align: center;
+}
+/* 整首歌不是一张静止的图：字与字之间也在缓慢升高、落下 */
+@keyframes fl-breath {
+  0%, 100% { transform: translateY(0) scale(1); }
+  28% { transform: translateY(-11px) scale(1.008); }
+  58% { transform: translateY(7px) scale(0.997); }
+  80% { transform: translateY(-4px) scale(1.004); }
+}
+
+/* 逐字三态（Folia 的 waiting / active / passed）：
+   waiting —— 雾里待发：很淡、缩小、甩到一边
+   active  —— 唱到的这一下：弹性曲线弹出、放大、强调色 + 辉光
+   passed  —— 唱过：落回常态大小、颜色回正文色、带一点余辉和固定角度的偏转
+   弹性靠 cubic-bezier 的过冲模拟 spring，不引动画库。
+   v0.1.9 去掉了 waiting 态的 filter: blur —— 一行十几次虚化是卡顿的主因，
+   而且 12% 不透明度 + 0.66 缩放已经足够「还没浮出来」了。 */
+.fw {
+  display: inline-block;
+  position: relative;
+  margin-right: 0.05em;
+  padding: 0 0.02em;
+  white-space: pre;
+  transform-origin: 50% 58%;
+  color: var(--sy-text-1);
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.5),
+    0 2px 30px rgba(0, 0, 0, 0.4);
+  will-change: transform, opacity;
+  transition:
+    transform 430ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 240ms var(--sy-ease-soft),
+    color 240ms linear,
+    text-shadow 300ms var(--sy-ease-soft);
+}
+.fw[data-s='waiting'] {
+  opacity: 0.16;
+  /* 别缩太狠：CJK 每个字都是一个独立的 inline 盒，缩到 0.66 时盒子的宽度还在，
+     看起来就是「字距被拉开」的一行散字。0.8 既保留「还没浮出来」，又不散。 */
+  transform:
+    translate(calc(var(--tx, 0px) * 1.7), calc(var(--ty, 0px) * 1.7))
+    rotate(calc(var(--rot, 0deg) + 16deg))
+    scale(0.8);
+}
+.fw[data-s='active'] {
+  opacity: 1;
+  z-index: 2;
+  color: color-mix(in srgb, var(--sy-accent) 74%, var(--sy-text-1));
+  /* 弹起来要快：一个字在「正在唱」这个状态只停 ~0.3 秒，
+     560ms 的曲线还没落定就切走了，看起来像卡了一下 */
+  transition:
+    transform 260ms cubic-bezier(0.2, 1.7, 0.45, 1),
+    opacity 120ms linear,
+    color 160ms linear,
+    text-shadow 180ms var(--sy-ease-soft);
+  transform:
+    translate(var(--tx, 0px), calc(var(--ty, 0px) - 0.045em))
+    rotate(var(--rot, 0deg))
+    scale(calc(var(--sc, 1) * 1.24));
+  text-shadow:
+    0 0 18px color-mix(in srgb, var(--sy-accent) 74%, transparent),
+    0 0 54px color-mix(in srgb, var(--sy-accent) 42%, transparent),
+    0 2px 26px rgba(0, 0, 0, 0.3);
+}
+.fw[data-s='passed'] {
+  opacity: 0.94;
+  transition:
+    transform 380ms cubic-bezier(0.22, 0.9, 0.3, 1),
+    opacity 300ms var(--sy-ease-soft),
+    color 300ms linear,
+    text-shadow 340ms var(--sy-ease-soft);
+  color: var(--sy-text-1);
+  transform:
+    translate(var(--tx, 0px), var(--ty, 0px))
+    rotate(calc(var(--rot, 0deg) + var(--rp, 0deg)))
+    scale(var(--sc, 1));
+  text-shadow:
+    0 0 20px color-mix(in srgb, var(--sy-accent) 20%, transparent),
+    0 2px 26px rgba(0, 0, 0, 0.3);
+}
+
+/* 前奏（还没到第一句）：整句都还是 waiting，0.16 的透明度等于看不见。
+   这时它就是「下一句的预告」，给到 0.42 才读得出来。 */
+.folia-line[data-prelude='true'] .fw[data-s='waiting'] {
+  opacity: 0.42;
+}
+
+/* 滚轮翻页时每句左边浮出时间戳（主流播放器的做法）：
+   平时完全不占视觉，翻页那一刻淡入，翻完自动收回。
+   位置贴在窗口左侧的「时间列」，而不是跟在这句文字旁边——
+   长句会占满整行，跟着文字走的话时间戳会顶到屏幕外。 */
+.fline-time,
+.folia-time {
+  position: absolute;
+  left: 22px;
+  top: 50%;
+  transform: translateY(-50%) translateX(-7px);
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--sy-text-1) 52%, transparent);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+  transition: opacity 200ms var(--sy-ease-soft), transform 240ms var(--sy-ease-soft);
+}
+
+/* 焦点句的时间独立于文字层（见 JSX），位置略靠右、稍大一号 */
+.folia-time {
+  left: 30px;
+  font-size: 13px;
+  z-index: 22;
+}
+
+/* 翻页时前后句提亮一档：此刻用户是在「看」歌词，读得清比雾感重要 */
+.folia[data-scrolling='true'] .fline { opacity: 0.58 !important; }
+
+.folia[data-scrolling='true'] .fline-time,
+.folia[data-scrolling='true'] .folia-time {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+/* 当前句的时间用强调色淡染，一眼能认出「这是正在唱的那句」 */
+.folia[data-scrolling='true'] .folia-time {
+  color: color-mix(in srgb, var(--sy-accent) 78%, var(--sy-text-1));
+}
+
+/* 减弱动效 / 系统偏好：停掉整行呼吸（无限循环的动画被压到 100ms 会变成抖动） */
+html[data-reduced-motion='true'] .folia-line { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .folia-line { animation: none !important; }
+}
+
+/* 背景光晕：两块大色斑随播放进度缓慢漂移，整首歌不是一张静止的图。
+   v0.1.9 去掉 filter: blur(74px)——色斑本身就是 radial-gradient，边界已经是软的，
+   再叠一层全屏模糊只是白白吃掉一次大图重绘。 */
+.folia-aura {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.folia-blob {
+  position: absolute;
+  border-radius: 50%;
+  opacity: 0.5;
+  transition: top 1.2s linear;
+}
+.folia-blob.a {
+  width: 44vmax;
+  height: 34vmax;
+  left: -8vmax;
+  top: calc(-10vmax + var(--fl-prog, 0) * 16vmax);
+  background: radial-gradient(circle, color-mix(in srgb, var(--sy-accent) 40%, transparent), transparent 68%);
+  animation: fl-drift-a 24s ease-in-out infinite alternate;
+}
+.folia-blob.b {
+  width: 40vmax;
+  height: 30vmax;
+  right: -10vmax;
+  bottom: calc(-8vmax - var(--fl-prog, 0) * 12vmax);
+  background: radial-gradient(circle, color-mix(in srgb, var(--sy-accent) 26%, transparent), transparent 70%);
+  animation: fl-drift-b 31s ease-in-out infinite alternate;
+}
+@keyframes fl-drift-a {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(4vmax, 3vmax, 0) scale(1.12); }
+}
+@keyframes fl-drift-b {
+  from { transform: translate3d(0, 0, 0) scale(1.06); }
+  to { transform: translate3d(-3vmax, -2vmax, 0) scale(1); }
+}
+/* 焦点背后的一束光（径向渐变本身自带羽化，不需要再 filter） */
+.folia-beam {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(74%, 820px);
+  height: 200px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(58% 58% at 50% 50%, color-mix(in srgb, var(--sy-accent) 15%, transparent), transparent 72%);
+  pointer-events: none;
+}
+
+.folia-foot {
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  transform: translateX(-50%);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--sy-text-4);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.folia-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--sy-text-3);
+}
+.folia-empty .t { font-size: 15px; color: var(--sy-text-2); }
+.folia-empty .s { font-size: 11px; color: var(--sy-text-3); }
+.folia-empty .ghost-btn { margin-top: 6px; }
+
+/*
+ * 歌词空态的「在线搜索」表单：点了按钮才展开的一行。
+ * 放在 .folia-empty / .lyrics-empty 的 grid 里，宽度跟着内容走、
+ * 但不能超过空态容器——所以 max-width 卡 92%，输入框自己收缩。
+ */
+.lyr-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  max-width: 92%;
+}
+.lyr-search .text-input {
+  flex: 0 1 148px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+/* 歌手框可以空着搜，比歌名框窄一点 */
+.lyr-search .text-input + .text-input { flex-basis: 118px; }
+.lyr-search-act {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 窄窗：字太大反而读不完一句，收一档 */
+@media (max-width: 720px) {
+  .fline { letter-spacing: 0 !important; }
+}
+
+/* 播放条：封面上的展开提示 */
+.pb-cover-wrap { position: relative; display: block; flex: none; }
+.pb-expand {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, #000 46%, transparent);
+  color: #fff;
+  opacity: 0;
+  transition: opacity var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.pb-left:hover .pb-expand { opacity: 1; }
+
+/* 窄窗：单列，歌词收在下方 */
+@media (max-width: 980px) {
+  .imm-shell { padding: 18px 24px 64px; }
+  .imm-grid { grid-template-columns: 1fr; gap: 26px; align-content: center; }
+  .imm-cover { margin-bottom: 20px; }
+  .imm-cover .cover-art { width: 200px !important; height: 200px !important; }
+  .imm-lyric { height: 240px; }
+  .imm-title { font-size: 24px; }
+  /* 窄窗里 31px 的太满，收一档 */
+  .imm-solo .lyrics.immersive .lyric-line { font-size: calc(18px * var(--lf, 1)); }
+  .imm-solo .lyrics.immersive .lyric-line.active { font-size: calc(24px * var(--lf, 1)); }
+  .imm-solo-foot { max-width: 100%; }
+}
+
+/* ============================================================
+   桌面歌词窗口（透明置顶）
+   ============================================================ */
+html.lyrics-mode,
+html.lyrics-mode body {
+  background: transparent !important;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+html.lyrics-mode #root { height: 100%; }
+
+.dl {
+  position: fixed;
+  /* 窗口四周留 7px 给阴影：卡片边界要看得见，但又不该顶到窗口沿上 */
+  inset: 7px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  /*
+   * 底部 62px 是**给悬停控制条预留的净空**，不是审美留白：
+   * 控制条 bottom:14 + 自身高 41 = 顶边在窗口底 56px 处，多留 6px 间隙才不会压到第二排。
+   * 这个数字和 lyricWindowHeight 的 +100 是一对——只改一边，字和条就会重新叠在一起。
+   */
+  padding: 10px 16px 62px;
+  border-radius: 15px;
+  /*
+   * 默认**全透明**：桌面歌词是浮在别人桌面上的，常驻一块深色底板
+   * 等于在人家屏幕上贴了一张不透明的纸，看文档、看视频全被挡住。
+   * 只有鼠标进来（.dl:hover）才浮出卡片底板，方便看清「可操作的范围」。
+   * 锁定态更进一步：即使悬停也保持全透明（锁定 = 鼠标穿透，本来也 hover 不到）。
+   * 文字可读性交给 drop-shadow 描边（见 .dl-line），不靠底板。
+   */
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
+  transition:
+    background 220ms var(--sy-ease-soft),
+    border-color 220ms var(--sy-ease-soft),
+    box-shadow 220ms var(--sy-ease-soft);
+}
+/*
+ * 悬停时的底板：角落一层主题强调色 + 顶部高光 + 主体深色。
+ * 浓度来自用户设置（--dl-bg，默认 0.8）——桌面壁纸不可控，太薄会看不出边界。
+ * 用 data-present（悬停/改宽/色板）而不是 :hover：改宽时鼠标经常滑出窗口，
+ * hover 态一丢背景就消失，改宽就断手了（用户反馈过的痛点）。
+ */
+.dl[data-present='true'] {
+  background:
+    radial-gradient(120% 130% at 6% -30%, color-mix(in srgb, var(--sy-accent) 26%, transparent), transparent 58%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0) 44%),
+    rgba(9, 11, 16, var(--dl-bg, 0.8));
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.11);
+}
+.dl[data-present='true'] {
+  border-color: rgba(255, 255, 255, 0.34);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.46),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+/* 锁定：全透明、无边框、无阴影，只留字。
+   padding 保持和未锁定时一致——否则一按锁，整块字会往下跳 26px，
+   看着像「歌词被挪走了」。锁定后底部那块净空没有控制条，透明窗口里也看不见。 */
+.dl[data-locked='true'] {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+/* 拖拽：整个窗口都是热区，由组件里的 pointerdown 阈值判定（>4px 才算拖）。
+   不用 data-tauri-drag-region 的裸属性——那个只在直接点中元素本身时生效，
+   点到字上就拖不动，桌面歌词的实际操作恰恰就是「按住歌词拖」。 */
+.dl { cursor: grab; }
+.dl:active { cursor: grabbing; }
+.dl-bar, .dl-bar * { cursor: default; }
+.dl-swatches, .dl-swatches *, .dl-x { cursor: pointer; }
+/* 右边缘改宽时不要出现「抓手」，否则会以为在拖窗口 */
+.dl[data-resizing='true'],
+.dl[data-resizing='true'] * { cursor: ew-resize; }
+
+/* 右边缘热区：窗口无边框，这是唯一「拖边改宽」的落点（宽度要和组件里的 EDGE 一致） */
+.dl-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  cursor: ew-resize;
+}
+.dl-grip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  width: 2px;
+  height: 26px;
+  margin-top: -13px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.45);
+  opacity: 0;
+  transition: opacity 160ms var(--sy-ease-soft);
+}
+.dl:hover .dl-grip::after { opacity: 0.55; }
+.dl-grip:hover::after { opacity: 1; }
+
+.dl-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  /* 满宽：两行分别贴到左右两端，而不是缩在中间一小块 */
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  text-align: center;
+}
+
+/* 两排歌词：上排当前句（大、亮，左对齐），下排下一句（小、半透明，右对齐）。
+   字号由 JS 按句长算（短句放大铺满、长句缩到刚好放下），所以这两行是真的占满宽度。
+   data-flip：KTV 轮换——奇数行当前句落 bottom（column-reverse 把两排换位）。 */
+.dl-lines {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+.dl-lines[data-flip='true'] { flex-direction: column-reverse; }
+
+/*
+ * 对齐要跟着**位置**走，不能跟着元素走。
+ *
+ * 这里踩过一个大坑：`.dl-line` 永远 text-align:left、`.dl-sub` 永远 right。
+ * 于是 `column-reverse` 只是把两排上下换了个位，大字的对齐方式没变——
+ * 看上去永远都是「左上大字 + 右下小字」，轮换完全看不出来。
+ * 换位时必须同时对调对齐：轮到下排的大字右对齐、上排的小字左对齐，
+ * 两行才是真的在「斜对角」上来回换。
+ *
+ * `margin-left: auto` 不能省：`.dl-line` 的盒子是 `width: fit-content`（贴着文字），
+ * 只写 text-align 只会让文字在**盒子内部**靠右，盒子自己还停在左边，等于没换。
+ */
+.dl-lines[data-flip='true'] .dl-line { text-align: right; margin-left: auto; }
+.dl-lines[data-flip='true'] .dl-sub { text-align: left; }
+/* 次行的入场缩放要贴着它自己那一侧长：次行是整宽盒子，从中心缩放会把字甩到中间去 */
+.dl-sub { transform-origin: right center; }
+.dl-lines[data-flip='true'] .dl-sub { transform-origin: left center; }
+
+/* --q = 这一行唱到哪儿（0~1）。注册过才能吃 transition，
+   没注册的自定义属性只会一格一格地跳，KTV 的扫过感就没了。 */
+@property --q {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
+.dl-line {
+  font-family: var(--sy-font-cn);
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.22;
+  letter-spacing: 0.01em;
+  max-width: 100%;
+  /*
+   * 盒子贴着文字走（不是被 flex 拉满整行）。
+   *
+   * `--q` 的渐变是按**盒子宽度**铺的：盒子若拉满整行、文字又靠右对齐，
+   * 渐变会先去扫左边的空白，字要等进度过半才开始上色——表现出来就是
+   * 「轮到下排唱的那句染色有延迟，上排正常」（用户反馈，2026-10）。
+   * fit-content 之后渐变正好铺在字上，两排的表现才一致。
+   */
+  width: fit-content;
+  /* 长句交给 fitSize 缩字号，这里单行不折——折行会破坏「两排」的结构 */
+  white-space: nowrap;
+  overflow: hidden;
+  /* 上排左对齐：与下排的右对齐错开，形成对角。
+     不居中——居中会让「歌词缩在中间」，用户要看的是从左往右铺满的一行。 */
+  text-align: left;
+  /*
+   * KTV 染色：整行就是一个渐变，--q 左边是已唱色、右边是未唱的白。
+   * background-clip: text 让颜色只落在字上，两个色标之间留 2% 羽化，
+   * 看起来是「唱过去」，而不是「一格格变色」。
+   */
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--dl-hl, #ffc94d) 82%, #fff) 0%,
+    var(--dl-hl, #ffc94d) calc(var(--q) * 100% - 0.6%),
+    rgba(255, 255, 255, 0.97) calc(var(--q) * 100% + 2%)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  /*
+   * 桌面背景不可控，可读性还得靠描边。但 background-clip:text 之后 text-shadow 救不了
+   * （字是透明的，阴影会糊成一团），改用 drop-shadow 沿字形描：
+   * 两层暗边保证压得住任何壁纸，最后一层同色辉光让高亮部分「亮」起来。
+   */
+  filter:
+    drop-shadow(0 0 1.5px rgba(0, 0, 0, 0.98))
+    drop-shadow(0 2px 3px rgba(0, 0, 0, 0.92))
+    drop-shadow(0 0 14px rgba(0, 0, 0, 0.55))
+    drop-shadow(0 0 24px color-mix(in srgb, var(--dl-hl, #ffc94d) 22%, transparent));
+  /* 33ms 一格的位置 + 45ms 的过渡：眼睛看到的是连续扫过。
+     过渡时长就是稳态滞后量，JS 那边用 Q_LAG 提前 45ms 抵消，改这里要同步改它。 */
+  transition: --q 45ms linear;
+  /*
+   * 换句：**从次行的字号长起来**，全程不透明。
+   *
+   * 以前这里是 `dl-roll-a`：`opacity: 0 → 1` + `translateY(15px)`。
+   * 可 `key` 每换一句就变，元素是整个重新挂载的，于是新旧两行同时变成全透明、
+   * 再一起淡入——看上去就是「换句时歌词消失了一下」（用户反馈，2026-10）。
+   * 现在不用透明度，只把 font-size 从 `--dl-from`（本位的 82%）动到本位，
+   * 视觉上就是下一句「轻轻涨了一下」，中间不会有空窗。
+   * 幅度（0.82）和时长（180ms）都刻意收小：桌面歌词是常驻置顶窗口，
+   * 每句都做一次明显的缩放会一直打断视线（用户反馈「太抢眼了」）。
+   * 动画只碰 font-size，不碰 letter-spacing——字距一起动会让整行看起来在「撑开」。
+   */
+  animation: dl-grow 180ms var(--sy-ease-soft);
+}
+@keyframes dl-grow {
+  from { font-size: var(--dl-from, 24px); }
+}
+
+.dl-sub {
+  font-family: var(--sy-font-cn);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  color: rgba(255, 255, 255, 0.52);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  /* 下排右对齐 */
+  text-align: right;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9), 0 0 14px rgba(0, 0, 0, 0.7);
+  /* 次行是新句子：一点点浮起就够，缩放幅度大了会和主行抢注意力 */
+  animation: dl-sub-in 180ms var(--sy-ease-soft);
+}
+/* 开唱倒计时的外壳：点阵要跟着这一排本来的对齐方式走（默认下排右对齐） */
+.dl-sub.counting {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/*
+ * 倒数点阵。
+ *
+ * 用户给的参考图就是一排实心圆点（4 颗）压在歌词上方，明确说「我要的是这种，
+ * 不是每一句都要倒数」。所以这里不用数字、不做缩放动画，只按秒数**减少颗数**：
+ * 每过一秒灭一颗，最后一颗灭掉时正好开唱。
+ * 尺寸用固定 px 而不是 em：次行的字号是按句长动态算的，跟着走会变成一排巨点。
+ */
+.dl-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 1em;
+  line-height: 1;
+}
+.dl-dots > i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--sy-accent-soft, #9db2ff) 92%, #fff);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--sy-accent-soft, #9db2ff) 55%, transparent);
+  /* 只做「点亮」的过渡，不做循环脉冲——桌面歌词是常驻置顶窗口，闪烁会干扰看别的东西 */
+  animation: dl-dot-in 220ms var(--sy-ease-soft) both;
+}
+@keyframes dl-dot-in {
+  from { opacity: 0.2; transform: scale(0.7); }
+  to { opacity: 1; transform: none; }
+}
+/* 轮到上排时点靠左：和下面那句大字（左对齐）留出同样的对角关系 */
+.dl-lines[data-flip='true'] .dl-dots { justify-content: flex-start; }
+@keyframes dl-sub-in {
+  from { opacity: 0.72; transform: scale(0.96); }
+}
+
+.dl-progress {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 200ms var(--sy-ease-soft);
+}
+/*
+ * 进度条与背板同进退：不看 CSS :hover（鼠标快速滑出窗口时 WebView2 会残留 hover 态，
+ * 用户反馈过「没悬浮进度条也在」），统一由组件的 data-present 驱动（悬停/改宽/色板）。
+ */
+.dl[data-present='true'] .dl-progress { opacity: 1; }
+.dl-progress i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--sy-accent);
+  transition: width 420ms linear;
+}
+
+/* 悬停控制条 */
+.dl-bar {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translate(-50%, 8px);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(16, 18, 24, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(14px) saturate(1.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms var(--sy-ease-soft), transform 220ms var(--sy-ease-panel);
+}
+.dl-bar[data-show='true'] { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+
+.dl-btn {
+  appearance: none;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+  transition: background 120ms var(--sy-ease-soft), color 120ms var(--sy-ease-soft);
+}
+.dl-btn:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.dl-play { width: 30px; height: 30px; background: var(--sy-accent); color: #fff; }
+.dl-play:hover { background: var(--sy-accent-soft); }
+.dl-vline { width: 1px; height: 14px; margin: 0 3px; background: rgba(255, 255, 255, 0.16); }
+
+/* 字号 A− / A+：用文字而不是图标，一眼知道是在调字 */
+.dl-aa { font-family: var(--sy-font-num); font-weight: 600; letter-spacing: 0; }
+.dl-aa span { line-height: 1; }
+
+/* 换色按钮：直接显示「现在唱成什么颜色」；点开是色板（见 .dl-swatches） */
+.dl-color i {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.45), 0 0 10px currentColor;
+  transition: background 160ms var(--sy-ease-soft);
+}
+.dl-color.on { background: rgba(255, 255, 255, 0.16); }
+
+/* ---------- 色板：悬在歌词上方，六套一眼看全 ---------- */
+.dl-swatches {
+  position: absolute;
+  bottom: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: rgba(16, 18, 24, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(14px) saturate(1.4);
+  z-index: 3;
+  animation: dl-in 160ms var(--sy-ease-soft);
+}
+.dl-sw {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  cursor: pointer;
+  color: #fff;
+  position: relative;
+}
+.dl-sw i {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28);
+  transition: transform 140ms var(--sy-ease-soft);
+}
+.dl-sw:hover i { transform: scale(1.12); }
+.dl-sw.on { background: rgba(255, 255, 255, 0.14); }
+.dl-sw.on i { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9); }
+.dl-sw svg { position: absolute; color: rgba(0, 0, 0, 0.55); }
+
+/* 关闭：右上角独立一格，不再和播放控制挤在一排 */
+.dl-x {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(16, 18, 24, 0.62);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  z-index: 4;
+  transition: background 140ms var(--sy-ease-soft), color 140ms var(--sy-ease-soft);
+}
+.dl-x:hover { background: rgba(228, 74, 74, 0.9); color: #fff; }
+
+.dl-hint {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(16, 18, 24, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  animation: dl-in 200ms var(--sy-ease-soft);
+}
+
+.dl-lock-flag {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.55);
+  opacity: 0.5;
+}
+
+/* ---------- 频谱可视化 ---------- */
+.spectrum {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+}
+
+.spectrum-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ============================================================
+   频谱摆放位置（lib/spectrumPos）
+   贴边通栏 + 封面光环，都是纯装饰层，不吃鼠标。
+
+   四条边一律贴「窗口的真实边缘」——标题栏、侧栏、播放条都不再让位，
+   柱子从边缘朝里长，看起来才是「沿着窗口一圈」而不是「贴着内容区一圈」。
+   高度压得比较薄：它是装饰，不能挡歌名 / 控制条。
+
+   层级用 data-imm 分两档：
+     主界面（false）38 —— 在播放条(40) 之下，玻璃播放条浮在频谱上面；
+                       也高于侧栏(30)，左右两条能盖住侧栏底色。
+     播放页（true） 62 —— 播放页是 60 的整屏覆盖层，不抬起来就完全看不见。
+   ============================================================ */
+
+.sedge {
+  position: fixed;
+  z-index: 62;
+  pointer-events: none;
+  /* 压得淡一点：它是背景装饰，不该抢内容的可读性 */
+  opacity: 0.58;
+  transition: opacity 420ms var(--sy-ease-soft);
+}
+
+.sedge[data-imm='false'] { z-index: 38; }
+/* 顶部那条要让开标题栏的窗口按钮：标题栏是透明的，压在它下面照样看得见，
+   但悬停/图标必须清晰。播放页没有标题栏，所以只在主界面降层级。 */
+.sedge[data-pos='top'][data-imm='false'] { z-index: 44; }
+/* 播放页里频谱盖在整页之上，顶部那条会压在「疏音 / 正在播放」和右上角按钮上，
+   压淡一档，让它退成纹理而不是抢戏。 */
+.sedge[data-pos='top'][data-imm='true'] { opacity: 0.4; }
+.sedge[data-pos='left'][data-imm='true'],
+.sedge[data-pos='right'][data-imm='true'] { opacity: 0.5; }
+
+.sedge .spectrum { height: 100%; }
+
+/* 底部：柱从窗口下沿往上长 */
+.sedge[data-pos='bottom'] {
+  left: 0; right: 0; bottom: 0;
+  height: 58px;
+  -webkit-mask-image: linear-gradient(to top, #000 0%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(to top, #000 0%, #000 58%, transparent 100%);
+}
+.sedge[data-pos='bottom'][data-imm='true'] { height: 66px; }
+
+/* 顶部：柱从窗口上沿往下长（flip 见 Spectrum 的坐标系镜像），一直铺到标题栏那一行 */
+.sedge[data-pos='top'] {
+  left: 0; right: 0; top: 0;
+  height: 58px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 58%, transparent 100%);
+}
+
+.sedge[data-pos='left'] {
+  left: 0; top: 0; bottom: 0;
+  width: 58px;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(to right, #000 0%, #000 58%, transparent 100%);
+}
+
+.sedge[data-pos='right'] {
+  right: 0; top: 0; bottom: 0;
+  width: 58px;
+  -webkit-mask-image: linear-gradient(to left, #000 0%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(to left, #000 0%, #000 58%, transparent 100%);
+}
+
+/* 底部一层极淡的主题色光，让它有落点 */
+.sedge::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    120% 130% at 50% 100%,
+    color-mix(in srgb, var(--sy-accent) 14%, transparent),
+    transparent 68%
+  );
+  pointer-events: none;
+}
+.sedge[data-pos='top']::before {
+  background: radial-gradient(
+    120% 130% at 50% 0%,
+    color-mix(in srgb, var(--sy-accent) 14%, transparent),
+    transparent 68%
+  );
+}
+.sedge[data-pos='left']::before {
+  background: radial-gradient(
+    130% 120% at 0% 50%,
+    color-mix(in srgb, var(--sy-accent) 12%, transparent),
+    transparent 68%
+  );
+}
+.sedge[data-pos='right']::before {
+  background: radial-gradient(
+    130% 120% at 100% 50%,
+    color-mix(in srgb, var(--sy-accent) 12%, transparent),
+    transparent 68%
+  );
+}
+
+/*
+ * 封面环绕。
+ * 不能用 inset 拉伸：canvas 是 replaced element，absolute + width:auto 时
+ * 浏览器用的是 attribute 固有尺寸，而这里又会按 getBoundingClientRect 反写 attribute，
+ * 两者互相喂 → 尺寸指数级涨到 2^25 上限。所以用明确的 calc 尺寸 + 负 margin 外扩。
+ */
+.cover-ring {
+  --ring-pad: 100px;
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: calc(100% + var(--ring-pad));
+  height: calc(100% + var(--ring-pad));
+  margin-left: calc(var(--ring-pad) / -2);
+  margin-top: calc(var(--ring-pad) / -2);
+  display: block;
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* 环会从封面下沿再往下长 50px（pad/2），歌名离封面只有 16px，
+   低频强的时候柱子会压到歌名上。挂环时把这段距离让出来。 */
+.imm-cover[data-ring='true'] { margin-bottom: 62px; }
+
+/* 频谱高度分档：必须放在基础规则之后，否则同特异性会被覆盖 */
+@media (max-height: 800px) {
+  .imm-shell { padding-bottom: 72px; }
+}
+@media (max-height: 700px) {
+  .imm-shell { padding-bottom: 68px; }
+}
+
+/* ---------- 评论面板（播放页右栏「评论」标签） ----------
+ * 这块是 .imm-lyric-body 的子项，父级是 flex 行 + align-items: stretch，
+ * 所以自己必须 flex:1 + min-height:0 才能内部滚动；漏了 min-height 会把
+ * 整栏撑到内容高度、把播放键挤出屏幕。
+ * 字号比歌词小一档（12.5 / 11.5），因为评论密度天然比歌词高。 */
+.cm-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  align-self: stretch;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 6px;
+  border-radius: 14px;
+  /*
+   * 评论是直接压在模糊封面上的：封面偏亮时，正文那档灰（#9B9EAE）
+   * 几乎糊在背景里，用户说的「看不清字」就是这个。垫一层半透明暗底，
+   * 只作用于评论面板，歌词那栏不受影响。
+   */
+  background: color-mix(in srgb, #06070b 52%, transparent);
+  animation: cm-in 200ms var(--sy-ease-soft) both;
+}
+@keyframes cm-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* 顶部一行：多少条 + 来自哪个平台。
+ *
+ * 以前是「11.5px 灰字 + 通栏渐变遮罩」：字太淡（背景是模糊封面，深浅不定），
+ * 那道渐变更像一块脏印子。现在拆成三档：
+ *   · 数字放大加粗 —— 一眼看到量级；
+ *   · 「条评论」用第二档灰 —— 说明文字，不抢数字；
+ *   · 平台收进一枚小胶囊 —— 自带底色，滚动时正文从下面穿过去也不糊。 */
+.cm-sum {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 -8px 4px;
+  padding: 9px 8px 10px;
+  border-radius: 14px 14px 0 0;
+  background: color-mix(in srgb, #06070b 92%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  backdrop-filter: blur(10px);
+}
+.cm-count {
+  font: 600 14px/1 var(--sy-font-num);
+  color: var(--sy-text-1);
+  letter-spacing: 0.01em;
+}
+.cm-unit { font: 400 11.5px/1 var(--sy-font-cn); color: var(--sy-text-2); }
+.cm-src {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px 3px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font: 500 10.5px/1 var(--sy-font-cn);
+  color: color-mix(in srgb, var(--sy-text-1) 76%, transparent);
+  background: color-mix(in srgb, var(--sy-text-1) 9%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 13%, transparent);
+}
+.cm-src-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--sy-accent);
+  flex: none;
+}
+
+/* 分组标题（热门 / 最新） */
+.cm-group {
+  margin: 8px 0 4px;
+  font: 600 11px/1 var(--sy-font-cn);
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, var(--sy-text-1) 58%, transparent);
+}
+
+/* ---------- 一条主评论 ---------- */
+.cm-row {
+  display: flex;
+  gap: 10px;
+  padding: 9px 2px;
+  border-radius: 10px;
+  transition: background 140ms var(--sy-ease-soft);
+}
+.cm-row:hover { background: color-mix(in srgb, var(--sy-text-1) 4%, transparent); }
+
+.cm-ava {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+/* 破图 / 无头像：首字方块。用 span 而不是 img，所以带上文字排版 */
+.cm-ava-ph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 13px/1 var(--sy-font-cn);
+  color: var(--sy-text-3);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+
+.cm-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.cm-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.cm-user {
+  font: 500 12px/1.2 var(--sy-font-cn);
+  color: color-mix(in srgb, var(--sy-accent) 62%, var(--sy-text-1));
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-time, .cm-loc { font: 400 10.5px/1.2 var(--sy-font-cn); color: var(--sy-text-3); }
+
+/* 「回复 @某人」的引用块：只留左侧一条细线，不要引号气泡（气泡一行就占满） */
+.cm-quote {
+  padding: 5px 9px;
+  border-radius: 6px;
+  border-left: 2px solid color-mix(in srgb, var(--sy-text-1) 16%, transparent);
+  background: color-mix(in srgb, var(--sy-text-1) 5%, transparent);
+  font: 400 11.5px/1.55 var(--sy-font-cn);
+  color: var(--sy-text-3);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.cm-quote-u { color: color-mix(in srgb, var(--sy-accent) 55%, var(--sy-text-2)); }
+
+.cm-text {
+  margin: 0;
+  font: 400 12.5px/1.66 var(--sy-font-cn);
+  color: color-mix(in srgb, var(--sy-text-1) 84%, var(--sy-text-2));
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+/* ---------- 评论图 ----------
+ * 竖图原图常见 1080×1440，直接放进列表会把右栏拉成一列大图。
+ * 这里固定 104px 方格 + object-fit: cover，点击才看原图。 */
+.cm-imgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 2px;
+}
+.cm-img {
+  position: relative;
+  flex: none;
+  width: 104px;
+  height: 104px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--sy-text-1) 6%, transparent);
+  cursor: zoom-in;
+  transition: transform 160ms var(--sy-ease-soft), box-shadow 160ms var(--sy-ease-soft);
+}
+.cm-img:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgb(0 0 0 / 35%); }
+/* 单张图没加载出来：给一句说明 + 可点重试，别留一块没来由的空白 */
+.cm-img.bad {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 11%, transparent);
+}
+.cm-img-bad {
+  padding: 0 6px;
+  font: 400 10px/1.35 var(--sy-font-cn);
+  color: var(--sy-text-3);
+  text-align: center;
+}
+.cm-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 第 4 张上的 "+N"：压一层暗罩，不然白色数字在浅色照片上看不见 */
+.cm-img-more {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 15px/1 var(--sy-font-num);
+  color: #fff;
+  background: rgb(0 0 0 / 52%);
+  backdrop-filter: blur(1px);
+}
+/* 楼中楼里的图再小一档，只当缩略提示 */
+.cm-imgs.sm .cm-img { width: 62px; height: 62px; border-radius: 6px; }
+
+/* 大图浮层：fixed 到整个窗口，点任何地方关闭 */
+.cm-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 56px 64px;
+  background: rgb(3 4 7 / 86%);
+  backdrop-filter: blur(6px);
+  cursor: zoom-out;
+  animation: cm-in 140ms var(--sy-ease-soft) both;
+}
+.cm-lightbox > img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 60%);
+}
+.cm-lb-x {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  color: var(--sy-text-1);
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+}
+/* 大图开着时整页别再跟着滚（滚轮事件在 JS 里也拦了一道） */
+html.cm-zoomed { overscroll-behavior: none; }
+
+/* 点赞 / 展开回复 */
+.cm-foot { display: flex; align-items: center; gap: 14px; padding-top: 1px; }
+.cm-like {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: 400 10.5px/1 var(--sy-font-num);
+  color: var(--sy-text-4);
+}
+.cm-like-num {
+  font: 400 10.5px/1 var(--sy-font-num);
+  color: var(--sy-text-4);
+  margin-top: 2px;
+}
+.cm-more {
+  padding: 0;
+  border: none;
+  background: none;
+  font: 400 11px/1 var(--sy-font-cn);
+  color: color-mix(in srgb, var(--sy-accent) 60%, var(--sy-text-3));
+  cursor: pointer;
+}
+.cm-more:hover { color: var(--sy-accent-soft); }
+/* 楼层没取到：同一行给一个「重试」，别把整块评论区变成错误页 */
+.cm-more-bad { color: var(--sy-error); }
+.cm-more-bad:hover { color: var(--sy-error); text-decoration: underline; }
+
+/* 楼中楼：左侧一条竖线把它和主评论分开，不要再套气泡 */
+.cm-replies {
+  margin-top: 6px;
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cm-reply { display: flex; gap: 7px; }
+.cm-reply .cm-ava { width: 20px; height: 20px; }
+.cm-reply .cm-ava-ph { font-size: 10px; }
+.cm-reply-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cm-reply-head { display: flex; align-items: baseline; gap: 7px; }
+.cm-reply .cm-text { font-size: 11.5px; line-height: 1.6; color: color-mix(in srgb, var(--sy-text-1) 66%, var(--sy-text-2)); }
+
+/* 空 / 加载 / 失败：都在右栏正中，接住原本「什么都没有」的观感 */
+.cm-empty, .cm-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding-bottom: 40px;
+  text-align: center;
+  font: 400 12px/1.6 var(--sy-font-cn);
+  color: var(--sy-text-3);
+}
+.cm-empty p { margin: 0; font-size: 13px; color: var(--sy-text-2); }
+.cm-empty span { font-size: 11px; color: var(--sy-text-4); max-width: 30em; word-break: break-word; }
+.cm-loading { flex-direction: row; gap: 10px; font-size: 11.5px; color: var(--sy-text-4); }
+
+.cm-more-btn {
+  align-self: center;
+  margin: 10px 0 4px;
+  font-size: 11.5px;
+}
+
+/* 矮窗口（笔记本 768 高）里评论图再收一档，否则一条带图的评论吃掉整屏 */
+@media (max-height: 780px) {
+  .cm-img { width: 88px; height: 88px; }
+  .cm-text { font-size: 12px; line-height: 1.6; }
+}

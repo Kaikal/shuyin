@@ -1,0 +1,4 @@
+packages:
+  - 'packages/*'
+  - 'apps/desktop'
+# apps/mobile 使用独立的 RN CLI 构建，不纳入 pnpm workspace（避免 react-native 与 web 依赖混淆）

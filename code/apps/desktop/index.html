@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>疏音</title>
+    <style>
+      /* 启动页固定底色在 HTML 层就位，先于 React 挂载，避免白闪 */
+      html, body { background: #0A0B0F; margin: 0; }
+      /* 启动失败时的兜底提示：不是白屏，而是把原因写在脸上 */
+      #boot-error {
+        display: none;
+        position: fixed; inset: 0; z-index: 99999;
+        padding: 40px;
+        box-sizing: border-box;
+        background: #0A0B0F;
+        color: #EAEBF1;
+        font: 13px/1.7 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      }
+      #boot-error h1 {
+        font-size: 15px; font-weight: 600; color: #FF7A6B;
+        letter-spacing: 0.08em; margin: 0 0 14px;
+      }
+      #boot-error pre {
+        white-space: pre-wrap; word-break: break-word;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px; padding: 14px; margin: 0 0 14px;
+        max-height: 52vh; overflow: auto;
+      }
+      #boot-error p { color: #9B9EAE; margin: 0 0 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script>
+      /* 启动自检：脚本没跑起来 / 运行时报错时，把原因呈现出来，而不是留一片白 */
+      (function () {
+        var shown = false
+        function invokeLog(event, detail) {
+          try {
+            var t = window.__TAURI_INTERNALS__
+            if (t && t.invoke) t.invoke('diag_log', { event: event, detail: detail })
+          } catch (e) {}
+        }
+        function show(title, detail) {
+          if (shown) return
+          shown = true
+          invokeLog('boot.error', title + ' :: ' + detail)
+          var box = document.getElementById('boot-error')
+          if (!box) {
+            box = document.createElement('div')
+            box.id = 'boot-error'
+            document.body.appendChild(box)
+          }
+          box.style.display = 'block'
+          box.innerHTML =
+            '<h1>' + title + '</h1><pre></pre>' +
+            '<p>日志：%LOCALAPPDATA%\\cn.shuyin.player\\app.log</p>' +
+            '<p>按 Ctrl+R 可重试；问题依旧的话把上面的信息发我。</p>'
+          box.querySelector('pre').textContent = detail
+        }
+
+        window.__syShowBootError = show
+        invokeLog('boot.html', location.href)
+
+        window.addEventListener('error', function (e) {
+          var t = e.target
+          // 资源加载失败：脚本/CSS 404 是白屏最常见的原因，保留致命提示。
+          // 图片（在线封面、用户封面、封面兜底）失败属于正常噪音——在线源经常缺图，
+          // 绝不能因为一张封面 404 就把整个界面盖掉。
+          if (t && t !== window && t.tagName) {
+            if (t.tagName === 'SCRIPT' || t.tagName === 'LINK') {
+              show('资源加载失败', (t.tagName === 'SCRIPT' ? t.src : t.href) + '\n\n' +
+                '前端文件可能没被正确内嵌到应用里。')
+            } else {
+              invokeLog('resource.error', t.tagName + ' ' + (t.src || t.href || ''))
+            }
+            return
+          }
+          var msg = e.message || ''
+          // ResizeObserver 的投递环警告、跨域 Script error 都是浏览器噪音，
+          // 在监听器里用 capture 捕获时必然出现，不能当成致命错误
+          if (/^ResizeObserver loop/.test(msg) || msg === 'Script error.') {
+            invokeLog('js.warn', msg)
+            return
+          }
+          show('启动时发生脚本错误', msg + '\n' +
+            (e.filename || '') + ':' + (e.lineno || 0) + ':' + (e.colno || 0) +
+            (e.error && e.error.stack ? '\n\n' + e.error.stack : ''))
+        }, true)
+
+        window.addEventListener('unhandledrejection', function (e) {
+          var r = e.reason || {}
+          var detail = (r.message || String(r)) + (r.stack ? '\n\n' + r.stack : '')
+          // 界面已经渲染出来之后再冒出来的异步异常，多半是某个网络请求/解析失败，
+          // 上层各自有兜底；此处只记日志，不动界面
+          var root = document.getElementById('root')
+          if (root && root.childElementCount > 0) {
+            invokeLog('js.unhandledrejection', detail)
+            return
+          }
+          show('未处理的异步异常', detail)
+        })
+
+        // 6 秒还没挂载出内容，判定为启动卡住
+        setTimeout(function () {
+          var root = document.getElementById('root')
+          if (!root || root.childElementCount === 0) {
+            show('界面没有渲染出来', 'React 未能在 6 秒内挂载任何内容。\n若日志里已经有 boot.html 但没有后续渲染记录，' +
+              '通常是前端资源或 WebView2 渲染问题。')
+          }
+        }, 6000)
+      })()
+    </script>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

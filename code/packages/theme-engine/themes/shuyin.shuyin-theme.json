@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "疏影",
+  "tokens": {
+    "backgroundBase": "#0A0B0F",
+    "backgroundElevated": "#14161C",
+    "textPrimary": "#EAEBF1",
+    "textSecondary": "#9B9EAE",
+    "textTertiary": "#5F6272",
+    "accent": "#6E8BFF",
+    "accentSoft": "#8FA4FF",
+    "glassTint": "rgba(15,18,23,0.72)",
+    "glassHighlight": "rgba(255,255,255,0.10)",
+    "glassBorder": "rgba(255,255,255,0.18)",
+    "rowHover": "rgba(255,255,255,0.055)",
+    "zebra": "rgba(255,255,255,0.015)",
+    "line": "rgba(255,255,255,0.06)",
+    "radiusContainer": 20,
+    "radiusCard": 16,
+    "radiusPill": 999,
+    "radiusSmall": 10,
+    "glassBlur": 20,
+    "glassSaturate": 1.8,
+    "durationFast": 120,
+    "durationPanel": 280,
+    "springStiffness": 260,
+    "springDamping": 30
+  }
+}
