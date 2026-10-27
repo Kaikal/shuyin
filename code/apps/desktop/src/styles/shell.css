@@ -1,0 +1,702 @@
+/* 系统全屏（F11）：自绘标题栏不属于系统边框，系统不会帮你藏，这里自己收掉。
+   --tb-h 同时归零，页面顶部避让跟着失效，内容正好贴到屏幕边。 */
+html[data-fs='true'] .titlebar { display: none; }
+html[data-fs='true'] .rz-host { display: none; }
+
+/* ============================================================
+   全局框架：标题栏 / 侧栏 / 播放条 / 队列抽屉 / 右键菜单
+   尺寸严格对齐设计规范：标题栏 38、侧栏 240（折叠 64）、播放条 72 高 · 距底 16 · 圆角 20 ·
+   左距侧栏 16、右距窗口 16；队列抽屉 400 宽、圆角 24 0 0 24。
+   ============================================================ */
+
+/* ---------- 标题栏（自绘，主窗口无系统边框） ---------- */
+.titlebar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--tb-h, 38px);
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  padding-left: 14px;
+  z-index: 45;
+  /*
+   * 自带一层主题底色 + 模糊：以前是全透明的，页面内容（尤其右上角的按钮）
+   * 直接从标题栏底下透出来，三颗窗口按钮和页面按钮糊成一片
+   * （用户反馈「背景色和下面的按钮重复了」）。有了底板它们就是独立的一栏。
+   */
+  background: color-mix(in srgb, var(--sy-bg-base, #0A0B0F) 86%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2);
+  /* 无边框窗口少了系统边框的那道亮边，补一条内描边让窗口边界看得见 */
+  box-shadow: inset 0 1px 0 var(--sy-line);
+  touch-action: none;
+}
+.tb-drag {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  cursor: default;
+}
+.tb-app {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--sy-text-2);
+  white-space: nowrap;
+}
+.tb-sep { color: var(--sy-text-4); font-size: 11px; }
+.tb-page {
+  font-size: 11.5px;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tb-win { display: flex; flex: none; }
+.tb-btn {
+  appearance: none;
+  border: 0;
+  width: 46px;
+  background: none;
+  color: var(--sy-text-3);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.tb-btn:hover {
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  color: var(--sy-text-1);
+}
+.tb-btn:active {
+  background: color-mix(in srgb, var(--sy-text-1) 15%, transparent);
+}
+/* 关闭键用系统同一套红，但压暗一档，和应用的哑光质感搭 */
+.tb-btn.tb-close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+.tb-btn.tb-close:active {
+  background: #a82315;
+  color: #fff;
+}
+
+/* ---------- 边缘缩放热区（无边框窗口默认拖不了边） ----------
+   窗口可以自由缩放，但有最小尺寸（Rust 侧 apply_min_size：1120×680 CSS px），
+   比这更小播放页两列和播放条就会被挤乱。 */
+.rz-host { position: fixed; inset: 0; z-index: 46; pointer-events: none; }
+.rz-host[data-hidden='true'] { display: none; }
+.rz { position: fixed; pointer-events: auto; }
+.rz-n { top: 0; left: 12px; right: 12px; height: 5px; cursor: ns-resize; }
+.rz-s { bottom: 0; left: 12px; right: 12px; height: 5px; cursor: ns-resize; }
+.rz-w { left: 0; top: 12px; bottom: 12px; width: 5px; cursor: ew-resize; }
+.rz-e { right: 0; top: 12px; bottom: 12px; width: 5px; cursor: ew-resize; }
+.rz-nw { left: 0; top: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+.rz-ne { right: 0; top: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.rz-sw { left: 0; bottom: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+.rz-se { right: 0; bottom: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+
+/* ---------- 侧栏 ---------- */
+.sidebar {
+  position: fixed;
+  left: 0; top: var(--tb-h, 38px); bottom: 0;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 14px 16px;
+  background: color-mix(in srgb, var(--sy-bg-base) 62%, var(--sy-bg-elevated));
+  border-right: 1px solid var(--sy-line);
+  z-index: 30;
+  transition: width var(--sy-dur-panel) var(--sy-ease-panel);
+}
+.sidebar.collapsed { width: 64px; }
+
+.sb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px 22px;
+}
+.sb-logo {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em;
+  color: var(--sy-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sidebar.collapsed .sb-logo { display: none; }
+
+.sb-nav { display: flex; flex-direction: column; gap: 4px; }
+.sb-item {
+  appearance: none;
+  border: 0;
+  background: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  color: var(--sy-text-2);
+  font: 500 13px/1 var(--sy-font-cn);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sb-item:hover { background: var(--sy-row-hover); color: var(--sy-text-1); }
+.sb-item.active { background: var(--sy-row-hover); color: var(--sy-text-1); }
+.sb-item.active svg { color: var(--sy-accent-soft); }
+.sidebar.collapsed .sb-item { justify-content: center; padding: 0; }
+.sidebar.collapsed .sb-label { display: none; }
+
+.sb-meta {
+  margin-top: 18px;
+  padding: 10px 12px;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+  border-radius: 10px;
+  background: var(--sy-surface);
+  border: 1px solid var(--sy-surface-border);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sb-meta .num { color: var(--sy-text-2); font-size: 12px; }
+.sidebar.collapsed .sb-meta { display: none; }
+
+.sb-foot {
+  margin-top: auto;
+  padding: 12px 6px 0;
+  font-size: 10.5px;
+  color: var(--sy-text-4);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* ---------- 播放条 ---------- */
+.playbar {
+  position: fixed;
+  left: 256px; right: 16px; bottom: 16px;
+  height: 72px;
+  border-radius: var(--sy-radius-container);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 20px;
+  z-index: 40;
+}
+
+.pb-cover-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.pb-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 280px;
+  flex: none;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: 12px;
+  padding: 4px 6px;
+  margin-left: -6px;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.pb-left:hover { background: color-mix(in srgb, var(--sy-text-1) 5%, transparent); }
+.pb-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.pb-name {
+  font-size: 12.5px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pb-sub {
+  font-size: 10px; color: var(--sy-text-2);
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.pb-mid { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 7px; min-width: 0; }
+.pb-ctl { display: flex; align-items: center; gap: 16px; }
+
+/*
+ * 音量：默认只露一颗图标，滑杆收成 0（占位不动，播放条不会跳）。
+ * 悬停或键盘聚焦时从图标旁边展开；滚轮在图标上就能调，不用先展开。
+ */
+.vol-wrap { display: inline-flex; align-items: center; gap: 4px; }
+.vol-slider {
+  width: 68px;
+  opacity: 0;
+  transform: scaleX(0.3);
+  transform-origin: left center;
+  pointer-events: none;
+  transition: opacity 160ms linear, transform 220ms var(--sy-ease-soft);
+}
+.vol-wrap:hover .vol-slider,
+.vol-wrap:focus-within .vol-slider {
+  opacity: 1;
+  transform: scaleX(1);
+  pointer-events: auto;
+}
+
+.pb-right { display: flex; align-items: center; gap: 8px; flex: none; }
+/*
+ * 播放条右侧这一排：音质芯片 + 换源 + 三个图标。
+ * `flex: none` 是必须的——播放条是 flex 容器，进度条会抢空间，
+ * 右侧不带 none 时芯片会被压窄，文字挤出来看着就「两个按钮叠在一起」。
+ */
+.pb-right > * { flex: none; }
+.pb-switch {
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1;
+}
+/* 弹出层要盖住页面内容（它挂在播放条的层叠上下文里，默认 30 会被页面卡片压住） */
+.pb-right .chip-pop { z-index: 80; }
+
+/* 进度条：4px，hover 加粗到 6px（scaleY 实现，不做 height 动画） */
+.progress { display: flex; align-items: center; gap: 10px; width: min(520px, 100%); }
+.progress .time { font-size: 10px; color: var(--sy-text-4); min-width: 30px; text-align: center; }
+.progress.tall { width: 100%; }
+.progress.tall .time { font-size: 11px; color: var(--sy-text-3); }
+
+.track {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  cursor: pointer;
+  touch-action: none;
+  transition: transform var(--sy-dur-fast) var(--sy-ease-soft);
+  transform-origin: center;
+}
+.track.hover { transform: scaleY(1.5); }
+/* 拖动中：条子更粗、圆点常显，视觉上「咬住」指针 */
+.track.dragging { transform: scaleY(1.8); }
+.track.dragging .knob { transform: translate(-50%, -50%) scale(1); }
+.track .fill {
+  position: absolute; inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--sy-accent);
+}
+/* 已缓冲的第二层：压在轨道与播放进度之间，淡一档不抢戏 */
+.track .fill-buf {
+  position: absolute; inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sy-accent) 26%, transparent);
+  transition: width 420ms linear;
+}
+.track .knob {
+  position: absolute;
+  top: 50%;
+  width: 9px; height: 9px;
+  border-radius: 999px;
+  background: #fff;
+  transform: translate(-50%, -50%) scale(0);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  transition: transform var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.track.hover .knob { transform: translate(-50%, -50%) scale(1); }
+/*
+ * 悬停时间气泡。
+ * ⚠️ 它挂在 `.track` 里面，而 `.track:hover` 会 `scaleY(1.5)` 把整条拉粗——
+ * 气泡作为子元素会被一起拉长，看起来「又高又窄、字被压扁」。
+ * 所以这里必须**反向缩放**（1/1.5、拖拽时 1/1.8）把字还原成正常比例。
+ */
+.track .bubble {
+  position: absolute;
+  bottom: 15px;
+  transform: translateX(-50%) scaleY(calc(1 / 1.5));
+  transform-origin: center bottom;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 88%, transparent);
+  backdrop-filter: blur(12px) saturate(1.25);
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 14%, transparent);
+  font: 500 11.5px/1 var(--sy-font-num);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--sy-text-1);
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5);
+}
+.track.dragging .bubble { transform: translateX(-50%) scaleY(calc(1 / 1.8)); }
+
+/* ---------- 队列抽屉 ---------- */
+.queue-drawer {
+  position: fixed;
+  /* 让出标题栏：关闭/最小化按钮不能被抽屉盖住 */
+  top: var(--tb-h, 38px); right: 0;
+  width: 400px;
+  max-width: 92vw;
+  height: calc(100vh - 100px - var(--tb-h, 38px));
+  border-radius: 24px 0 0 24px;
+  border-right: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 0;
+  box-shadow: -16px 0 48px rgba(0, 0, 0, 0.40), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(24px);
+  transition:
+    transform 280ms var(--sy-ease-panel),
+    opacity 280ms var(--sy-ease-panel),
+    visibility 0s linear 280ms;
+  z-index: 70;
+}
+.queue-drawer.open {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition:
+    transform 280ms var(--sy-ease-panel),
+    opacity 280ms var(--sy-ease-panel),
+    visibility 0s;
+}
+
+.q-head {
+  height: 44px;
+  padding: 0 16px 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+}
+.q-head .t { display: flex; align-items: baseline; gap: 8px; }
+.q-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.q-count { font-size: 10.5px; color: var(--sy-text-3); }
+.q-head .acts { display: flex; align-items: center; gap: 14px; }
+
+.eq { display: flex; align-items: flex-end; gap: 1.5px; height: 14px; }
+.eq i { width: 2.5px; border-radius: 1px; background: var(--sy-accent); display: block; height: 6px; }
+.eq i:nth-child(2) { height: 11px; }
+.eq i:nth-child(3) { height: 8px; }
+@media (prefers-reduced-motion: no-preference) {
+  html:not([data-reduced-motion='true']) .eq.on i { animation: eq-bounce 1.1s var(--sy-ease-soft) infinite alternate; }
+  html:not([data-reduced-motion='true']) .eq.on i:nth-child(2) { animation-delay: 0.22s; }
+  html:not([data-reduced-motion='true']) .eq.on i:nth-child(3) { animation-delay: 0.44s; }
+}
+@keyframes eq-bounce { from { transform: scaleY(0.45); } to { transform: scaleY(1); } }
+
+.q-sep { height: 1px; background: var(--sy-line); flex: none; }
+.q-label { flex: none; height: 30px; padding: 10px 20px 4px; font-size: 10.5px; color: var(--sy-text-3); }
+
+.q-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px 4px;
+  contain: layout paint;
+  overscroll-behavior: contain;
+}
+
+.q-row {
+  position: relative;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 10px;
+  cursor: default;
+  outline: none;
+  transition: background 140ms var(--sy-ease-soft);
+  touch-action: pan-y;
+}
+.q-row:hover { background: var(--sy-row-hover); }
+.q-row:focus-visible { outline: 2px solid var(--sy-accent); outline-offset: 2px; }
+.q-row .idx {
+  width: 16px; flex: none;
+  font-size: 10.5px; font-weight: 500;
+  color: var(--sy-text-3);
+}
+.q-row .grip { width: 14px; height: 14px; flex: none; display: none; place-items: center; color: var(--sy-text-2); cursor: grab; }
+.q-row:hover .idx { display: none; }
+.q-row:hover .grip { display: grid; }
+.q-row .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.q-row .name {
+  font-size: 12px; font-weight: 500;
+  color: color-mix(in srgb, var(--sy-text-1) 88%, transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 140ms var(--sy-ease-soft);
+}
+.q-row:hover .name { color: var(--sy-text-1); }
+/* 当前曲目：只在列表里加一层强调（标题着色 + 左侧强调条 + 淡底），
+   不再单独在上面摆一张「正在播放」卡片 */
+.q-row.current {
+  background: color-mix(in srgb, var(--sy-accent) 9%, transparent);
+}
+.q-row.current::before {
+  content: '';
+  position: absolute;
+  left: 4px; top: 50%;
+  width: 2px; height: 18px;
+  border-radius: 2px;
+  transform: translateY(-50%);
+  background: var(--sy-accent);
+}
+.q-row.current .name { color: var(--sy-accent-soft); font-weight: 600; }
+.q-row.current .idx { color: var(--sy-accent-soft); }
+.q-row.current .eq-mini { color: var(--sy-accent); }
+.q-row .singer {
+  font-size: 10px; color: var(--sy-text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.q-row .dur { flex: none; font-size: 10.5px; color: var(--sy-text-3); }
+.q-row .q-rm {
+  flex: none;
+  width: 16px; height: 16px;
+  display: none;
+  place-items: center;
+  background: none; border: 0; padding: 0;
+  color: var(--sy-text-2); cursor: pointer; border-radius: 4px;
+}
+.q-row:hover .q-rm, .q-row:has(:focus-visible) .q-rm { display: grid; }
+.q-row .q-rm:hover { color: var(--sy-text-1); }
+
+.q-row.is-dragging {
+  z-index: 5;
+  cursor: grabbing;
+  background: color-mix(in srgb, var(--sy-bg-elevated) 92%, var(--sy-text-1) 8%);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5), inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 18%, transparent);
+}
+.q-row.drop-before::before {
+  content: '';
+  position: absolute;
+  left: 8px; right: 8px; top: -1px;
+  height: 2px;
+  background: var(--sy-accent);
+  border-radius: 1px;
+}
+.q-row.drop-end::after {
+  content: '';
+  position: absolute;
+  left: 8px; right: 8px; bottom: -1px;
+  height: 2px;
+  background: var(--sy-accent);
+  border-radius: 1px;
+}
+
+.q-foot {
+  flex: none;
+  height: 40px;
+  padding: 12px 20px 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--sy-text-3);
+}
+
+.q-empty {
+  margin: 8px;
+  height: 120px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--sy-text-1) 2%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+  font-size: 11.5px;
+  color: var(--sy-text-3);
+  text-align: center;
+}
+
+/* ---------- Toast ---------- */
+.toast {
+  position: absolute;
+  left: 50%; bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 40px;
+  padding: 0 14px 0 18px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--sy-bg-elevated) 96%, transparent);
+  border: 1px solid var(--sy-line);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+  color: var(--sy-text-1);
+  z-index: 60;
+  animation: toast-in 200ms var(--sy-ease-panel);
+  white-space: nowrap;
+}
+@keyframes toast-in { from { opacity: 0; transform: translateX(-50%) translateY(8px); } }
+.toast button {
+  appearance: none; background: none; border: 0; padding: 4px 2px; cursor: pointer;
+  font: 500 12px/1 var(--sy-font-cn);
+  color: var(--sy-accent-soft);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ---------- 右键菜单 ---------- */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 208px;
+  padding: 5px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--sy-bg-elevated) 97%, transparent);
+  border: 1px solid var(--sy-surface-border);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  animation: ctx-in 120ms var(--sy-ease-soft);
+}
+@keyframes ctx-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+.ctx-item {
+  appearance: none;
+  width: 100%;
+  border: 0;
+  background: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--sy-text-1);
+  font: 400 12.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.ctx-item:hover, .ctx-item:focus-visible {
+  background: var(--sy-row-hover);
+  outline: none;
+}
+.ctx-item.danger { color: var(--sy-error); }
+.ctx-item:disabled { opacity: 0.4; cursor: default; }
+.ctx-icon { width: 16px; display: grid; place-items: center; color: var(--sy-text-2); flex: none; }
+.ctx-item.danger .ctx-icon { color: inherit; }
+.ctx-label { flex: 1; }
+.ctx-kbd { font-size: 10px; color: var(--sy-text-3); }
+.ctx-divider { height: 1px; margin: 4px 8px; background: var(--sy-line); }
+
+/* ---------- 响应式：窄窗只收窄，不隐字 ----------
+ * 以前 <1024 会强制把侧栏压成 64px 宽的图标条：文字标题全没了，
+ * 顶上那颗「折叠」按钮也就变成了点了没反应（状态改了，CSS 不认）。
+ * 现在文字常驻，窄窗只收窄宽度与内边距；要不要折叠交给用户自己点。 */
+@media (max-width: 1180px) {
+  .sidebar { width: 208px; }
+  .sb-item { padding-left: 12px; padding-right: 10px; gap: 9px; }
+  .playbar { left: 224px; }
+}
+
+/* 窄窗：播放条左右让位，次要按钮收起（歌词/详情仍可从播放页进入） */
+@media (max-width: 860px) {
+  .pb-left { width: 200px; }
+  .pb-right .icon-btn:nth-child(1),
+  .pb-right .icon-btn:nth-child(2) { display: none; }
+  .vol-slider { display: none; }
+}
+@media (max-width: 620px) {
+  .pb-left { width: auto; max-width: 40%; }
+  .progress .time { display: none; }
+}
+
+/* ---------- 全局错误提示（播放失败等） ---------- */
+/*
+ * 位置：**窗口上方居中**，不在底部。
+ * 以前挂在播放条上方（bottom:132px），正好压住播放条右侧的一排按钮——
+ * 想点「换源」经常先点到提示条上，而且它占掉一大块可点区域。
+ * 现在贴着标题栏下沿，窄、矮、自动走开，鼠标除非真的去点它，否则碰不到。
+ */
+.app-toast {
+  position: fixed;
+  left: 50%;
+  top: 46px;
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, 78vw);
+  padding: 7px 10px 7px 11px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--sy-bg-elevated) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sy-error) 34%, var(--sy-line));
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.42);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--sy-text-1);
+  animation: toast-drop 200ms var(--sy-ease-panel);
+}
+
+/* 播放页打开时：提示条挪到下方。
+   播放页右栏顶部就是歌名（`一·二` 那轮把整块往右移之后，歌名正好落在顶部居中），
+   提示条再压在上面会把歌名盖住 —— 偏偏「取不到播放地址」这种提示就发生在播放页里。
+   挪到下方压住的是频谱，不会盖住任何文字。 */
+.app-toast.low {
+  top: auto;
+  bottom: 104px;
+  animation: toast-rise 200ms var(--sy-ease-panel);
+}
+@keyframes toast-rise { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.app-toast-icon {
+  width: 15px; height: 15px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sy-error) 20%, transparent);
+  color: var(--sy-error);
+  font: 700 10px/1 var(--sy-font-num);
+}
+.app-toast-text {
+  flex: 1;
+  min-width: 0;
+  /* 最多两行，再长就省略——提示条不该长成一屏 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.app-toast button {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  font: 500 11.5px/1 var(--sy-font-cn);
+  color: var(--sy-text-3);
+  flex: none;
+}
+.app-toast button:hover { color: var(--sy-text-1); }
+/* 「换源」是动作而不是关提示，给一点边界，避免和「关闭」混作一排文字 */
+.app-toast .app-toast-act {
+  flex: none;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sy-accent) 45%, transparent);
+  color: var(--sy-accent-soft);
+  font-size: 11.5px;
+}
+.app-toast .app-toast-act:hover { background: color-mix(in srgb, var(--sy-accent) 14%, transparent); }
+
+/*
+ * 浅提示（.soft）：给「已经帮你处理好了」的消息用——音质自动降档、自动换了个平台。
+ *
+ * 和红色错误条共用版式，但**不用错误色**：这不是失败，是兜底成功。
+ * 用醒目红色会让人以为又出问题了；用强调色 + 对钩，一眼就知道「能听，只是我替你调了」。
+ */
+.app-toast.soft {
+  border-color: color-mix(in srgb, var(--sy-accent) 34%, var(--sy-line));
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.34);
+}
+.app-toast.soft .app-toast-icon {
+  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
+  color: var(--sy-accent-soft);
+}
+
+@keyframes toast-drop {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}

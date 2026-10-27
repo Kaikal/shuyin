@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "月黄昏",
+  "tokens": {
+    "backgroundBase": "#141210",
+    "backgroundElevated": "#1E1B17",
+    "textPrimary": "#EFEAE2",
+    "textSecondary": "#A99F90",
+    "textTertiary": "#6E6558",
+    "accent": "#C9A96E",
+    "accentSoft": "#D9BE8C",
+    "glassTint": "rgba(26,22,17,0.72)",
+    "glassHighlight": "rgba(255,244,224,0.08)",
+    "glassBorder": "rgba(255,240,214,0.16)",
+    "rowHover": "rgba(255,240,214,0.05)",
+    "zebra": "rgba(255,240,214,0.012)",
+    "line": "rgba(255,240,214,0.07)",
+    "radiusContainer": 20,
+    "radiusCard": 16,
+    "radiusPill": 999,
+    "radiusSmall": 10,
+    "glassBlur": 20,
+    "glassSaturate": 1.4,
+    "durationFast": 130,
+    "durationPanel": 260,
+    "springStiffness": 260,
+    "springDamping": 30
+  }
+}

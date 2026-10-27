@@ -1,0 +1,33 @@
+# 依赖
+node_modules/
+
+# 构建产物
+code/apps/desktop/dist/
+code/apps/desktop/src-tauri/target/
+code/packages/*/dist/
+code/apps/android/**/build/
+code/apps/android/android/app/src/main/assets/www/
+.gradle/
+
+# 交付物（安装包 / exe / apk，走 release 附件，不进仓库）
+dist/
+
+# 本地探针脚本与临时文件
+tmp/
+*.log
+
+# 本地数据 / 编辑器
+.workbuddy/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 早期 React Native 试验工程（已废弃，改用 apps/android 的 Kotlin 壳）：
+# 只保留源码，构建缓存和依赖不进仓库
+code/apps/mobile/node_modules/
+code/apps/mobile/android/**/build/
+code/apps/mobile/android/.gradle/
+code/apps/mobile/ios/Pods/
+**/.cxx/
+**/.externalNativeBuild/

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "清浅",
+  "tokens": {
+    "backgroundBase": "#F6F7F9",
+    "backgroundElevated": "#FFFFFF",
+    "textPrimary": "#1A1D26",
+    "textSecondary": "#5A5E6C",
+    "textTertiary": "#9A9EAC",
+    "accent": "#3E9BD8",
+    "accentSoft": "#2F7FB8",
+    "glassTint": "rgba(255,255,255,0.60)",
+    "glassHighlight": "rgba(255,255,255,0.75)",
+    "glassBorder": "rgba(255,255,255,0.90)",
+    "rowHover": "rgba(20,24,36,0.045)",
+    "zebra": "rgba(20,24,36,0.015)",
+    "line": "rgba(20,24,36,0.08)",
+    "radiusContainer": 22,
+    "radiusCard": 16,
+    "radiusPill": 999,
+    "radiusSmall": 10,
+    "glassBlur": 18,
+    "glassSaturate": 1.6,
+    "durationFast": 120,
+    "durationPanel": 280,
+    "springStiffness": 260,
+    "springDamping": 30
+  }
+}

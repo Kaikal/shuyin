@@ -1,0 +1,14 @@
+{
+  "name": "shuyin-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "疏音 · 本地音乐播放器（第一阶段：本地扫描播放 + 主题引擎 + 液态玻璃 + 启动页）",
+  "scripts": {
+    "build:core": "tsc -p packages/core",
+    "build:theme": "tsc -p packages/theme-engine",
+    "typecheck:desktop": "tsc -p apps/desktop --noEmit",
+    "build:desktop": "pnpm -F shuyin-desktop build",
+    "tauri": "pnpm -F shuyin-desktop tauri",
+    "dev:desktop": "pnpm -F shuyin-desktop dev"
+  }
+}

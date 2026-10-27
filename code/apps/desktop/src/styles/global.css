@@ -1,0 +1,445 @@
+/* ============================================================
+   疏音 · 设计系统层
+   与 template/Lumen-Music_设计规范.md 对齐：
+   深色 160° 渐变底 + 8% 强调色静态光斑 / 卡片实体磨砂 / 单一强调色
+   Token 由 ThemeProvider 写入 CSS 变量，此处只消费。
+   ============================================================ */
+
+:root {
+  --sy-bg-base: #0A0B0F;
+  --sy-bg-elevated: #14161C;
+  --sy-text-1: #EAEBF1;
+  --sy-text-2: #9B9EAE;
+  --sy-text-3: #5F6272;
+  --sy-text-4: #4C4F5C;
+  --sy-accent: #6E8BFF;
+  --sy-accent-soft: #8FA4FF;
+  --sy-glass-tint: rgba(15, 18, 23, 0.72);
+  --sy-glass-highlight: rgba(255, 255, 255, 0.10);
+  --sy-glass-border: rgba(255, 255, 255, 0.18);
+  --sy-row-hover: rgba(255, 255, 255, 0.045);
+  --sy-zebra: rgba(255, 255, 255, 0.015);
+  --sy-line: rgba(255, 255, 255, 0.06);
+  --sy-surface: rgba(255, 255, 255, 0.028);
+  --sy-surface-border: rgba(255, 255, 255, 0.055);
+  --sy-radius-container: 20px;
+  --sy-radius-card: 16px;
+  --sy-radius-pill: 999px;
+  --sy-radius-small: 10px;
+  /* 自绘标题栏高度：侧栏 / 抽屉 / 页面容器都按它让位 */
+  --tb-h: 38px;
+  --pb-h: 72px;     /* 播放条高度：频谱贴边落点要用 */
+  --sy-glass-blur: 20px;
+  --sy-glass-saturate: 1.8;
+  --sy-dur-fast: 120ms;
+  --sy-dur-panel: 280ms;
+  --sy-ease-soft: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --sy-ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
+  --sy-error: #E08A72;
+  --sy-shadow-card-hover: 0 16px 38px rgba(0, 0, 0, 0.55);
+  --sy-shadow-cover: 0 24px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --sy-font-cn: 'Noto Sans SC', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC', 'Microsoft YaHei UI', system-ui, sans-serif;
+  --sy-font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', serif;
+  --sy-font-num: 'Inter', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+/*
+ * 桌面应用不选文字。
+ *
+ * 网页里拖动一下选中一段文字是常态，但在播放器里这只会碍事：拖进度条、
+ * 点歌词跳转、按住空白处拖窗口，一滑就选中一片白底蓝字，还去不掉。
+ * 输入框 / 可复制区域（歌名、路径、错误详情）单独放行。
+ */
+html,
+body,
+button,
+a {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+[contenteditable='true'],
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sy-font-cn);
+  color: var(--sy-text-1);
+  /* 规范：静态极低透明度径向光斑（≤8%）+ 160° 渐变，不做漂移动效 */
+  background:
+    radial-gradient(900px 700px at 8% -12%, color-mix(in srgb, var(--sy-accent) 10%, transparent), transparent 62%),
+    linear-gradient(160deg, var(--sy-bg-base), var(--sy-bg-elevated));
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+#root { height: 100%; }
+
+button { font-family: inherit; }
+
+/* 焦点环：2px 强调色 + 2px offset（规范统一） */
+:focus-visible {
+  outline: 2px solid var(--sy-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--sy-text-3) 45%, transparent); border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.num { font-family: var(--sy-font-num); font-variant-numeric: tabular-nums; }
+
+/* ---------- 主题切换：仅颜色/阴影 200ms ---------- */
+html.theme-anim body,
+html.theme-anim .themed {
+  transition:
+    background-color 200ms var(--sy-ease-soft),
+    color 200ms var(--sy-ease-soft),
+    border-color 200ms var(--sy-ease-soft),
+    box-shadow 200ms var(--sy-ease-soft) !important;
+}
+
+/* 减弱动效：全部过渡降为 100ms 淡入淡出 */
+html[data-reduced-motion='true'] *,
+html[data-reduced-motion='true'] *::before,
+html[data-reduced-motion='true'] *::after {
+  transition-duration: 100ms !important;
+  animation-duration: 100ms !important;
+  transition-timing-function: ease !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 100ms !important;
+    animation-duration: 100ms !important;
+  }
+}
+
+/* ---------- 液态玻璃（三层：折射 / 高光 / 实体感） ---------- */
+.glass {
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(135deg, var(--sy-glass-highlight), var(--sy-glass-tint));
+  -webkit-backdrop-filter: blur(var(--sy-glass-blur)) saturate(var(--sy-glass-saturate)) brightness(1.05);
+  backdrop-filter: blur(var(--sy-glass-blur)) saturate(var(--sy-glass-saturate)) brightness(1.05);
+  border: 1px solid var(--sy-glass-border);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.glass .on-glass { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+.glass[data-glass-degraded='true'] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* 实体磨砂卡片（规范 surface.card） */
+.card,
+.surface {
+  background: var(--sy-surface);
+  border: 1px solid var(--sy-surface-border);
+  border-radius: var(--sy-radius-card);
+}
+
+/* ---------- 通用控件 ---------- */
+.icon-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--sy-text-2);
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.icon-btn:hover { background: color-mix(in srgb, var(--sy-text-1) 6%, transparent); color: var(--sy-text-1); }
+.icon-btn[aria-expanded='true'] {
+  background: color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+  color: var(--sy-text-1);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+}
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
+.icon-btn:disabled:hover { background: none; color: var(--sy-text-2); }
+
+.link-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  padding: 2px;
+  cursor: pointer;
+  font: 400 11.5px/1 var(--sy-font-cn);
+  color: var(--sy-text-2);
+  transition: color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.link-btn:hover { color: var(--sy-text-1); }
+.link-btn.danger:hover { color: var(--sy-error); }
+
+.play-primary {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--sy-accent);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--sy-accent) 40%, transparent);
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), transform var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.play-primary:hover { background: var(--sy-accent-soft); }
+.play-primary:active { transform: scale(0.96); }
+.play-primary:disabled { opacity: 0.4; cursor: default; }
+
+/*
+ * 加载转圈：播放按钮在「取链 / 解码 / 首段拉流」期间显示它。
+ * 不加它的话，用户在等待期看到的是一个「播放」三角，会以为没点上而反复点。
+ * 只用 transform 动画（不碰 box-shadow / filter），WARP 软渲染下也不掉帧。
+ */
+.spin-ring {
+  display: block;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, currentColor 26%, transparent);
+  border-top-color: currentColor;
+  animation: spin-ring 720ms linear infinite;
+}
+.spin-ring.sm { width: 13px; height: 13px; border-width: 1.6px; }
+@keyframes spin-ring { to { transform: rotate(360deg); } }
+html[data-reduced-motion='true'] .spin-ring { animation-duration: 1.6s; }
+
+.text-input {
+  appearance: none;
+  border: 1px solid var(--sy-line);
+  background: color-mix(in srgb, var(--sy-text-1) 3%, transparent);
+  color: var(--sy-text-1);
+  border-radius: 10px;
+  height: 32px;
+  padding: 0 12px;
+  font: 400 12.5px/1 var(--sy-font-cn);
+  outline: none;
+  transition: border-color var(--sy-dur-fast) var(--sy-ease-soft), box-shadow var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.text-input::placeholder { color: var(--sy-text-3); }
+.text-input:focus {
+  border-color: var(--sy-accent);
+  outline: 2px solid var(--sy-accent);
+  outline-offset: 2px;
+}
+
+.primary-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 0;
+  background: var(--sy-accent);
+  color: #fff;
+  font: 500 12.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  /* 中文按钮文字在 flex 里会被逐字折断成竖排，永远不许换行 */
+  white-space: nowrap;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), opacity var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.primary-btn:hover { background: var(--sy-accent-soft); }
+.primary-btn:disabled { opacity: 0.45; cursor: default; }
+
+.ghost-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--sy-surface-border);
+  background: var(--sy-surface);
+  color: var(--sy-text-2);
+  font: 500 12px/1 var(--sy-font-cn);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft), border-color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.ghost-btn:hover:not(:disabled) { background: var(--sy-row-hover); color: var(--sy-text-1); }
+.ghost-btn:disabled { opacity: 0.4; cursor: default; }
+
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--sy-radius-pill);
+  background: color-mix(in srgb, var(--sy-text-1) 5%, transparent);
+  border: 1px solid var(--sy-line);
+}
+.segmented button {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0 14px;
+  height: 26px;
+  border-radius: var(--sy-radius-pill);
+  font: 500 12px/1 var(--sy-font-cn);
+  color: var(--sy-text-2);
+  cursor: pointer;
+  transition: color var(--sy-dur-fast) var(--sy-ease-soft), background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.segmented button:hover { color: var(--sy-text-1); }
+.segmented button[aria-checked='true'] {
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  color: var(--sy-text-1);
+}
+
+.toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 18%, transparent);
+  background: color-mix(in srgb, var(--sy-text-1) 6%, transparent);
+  cursor: pointer;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft);
+  flex: none;
+  padding: 0;
+}
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--sy-text-2);
+  transition: transform var(--sy-dur-fast) var(--sy-ease-soft), background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.toggle[aria-checked='true'] { background: color-mix(in srgb, var(--sy-text-1) 22%, transparent); }
+.toggle[aria-checked='true']::after { transform: translateX(16px); background: var(--sy-text-1); }
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  cursor: pointer;
+  outline-offset: 4px;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--sy-text-1);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  transition: transform var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.slider:hover::-webkit-slider-thumb { transform: scale(1.15); }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: var(--sy-radius-pill);
+  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  font: 500 8.5px/1 var(--sy-font-num);
+  letter-spacing: 0.04em;
+  color: var(--sy-text-2);
+  text-transform: uppercase;
+}
+
+/* 封面：图片 / 渐变占位；大尺寸占位额外叠一枚音符水印 */
+.cover-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.cover-fallback-glyph {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.16);
+  line-height: 0;
+  pointer-events: none;
+}
+
+/* 封面：图片 / 渐变占位；大尺寸占位额外叠一枚音符水印 */
+.cover-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.cover-fallback-glyph {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.16);
+  line-height: 0;
+  pointer-events: none;
+}
+
+/* 骨架屏：仅加载态，有明确结束条件 */
+@keyframes sy-skeleton { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.75; } }
+.skeleton {
+  border-radius: var(--sy-radius-small);
+  background: color-mix(in srgb, var(--sy-text-1) 6%, transparent);
+  animation: sy-skeleton 1.2s ease-in-out infinite;
+}
+html[data-reduced-motion='true'] .skeleton { animation: none; opacity: 0.55; }
+
+.empty-state {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 56px 24px;
+  text-align: center;
+  color: var(--sy-text-3);
+}
+.empty-state .title { font-size: 14px; color: var(--sy-text-1); }
+.empty-state .sub { font-size: 11.5px; color: var(--sy-text-3); max-width: 460px; line-height: 1.7; }
+.empty-state .empty-actions { display: flex; gap: 10px; margin: 6px 0 4px; }
+
+/* ---------------- 确认框（替代 window.confirm） ---------------- */
+
+/* 正文允许换行：原来 window.confirm 里的 \n 要照样断行，否则挤成一坨读不下去 */
+.confirm-msg {
+  margin: 0;
+  font: 400 12.5px/1.75 var(--sy-font-cn);
+  color: var(--sy-text-2);
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+/* 危险操作（删除 / 清空 / 退出）：确认按钮用警示色，别和普通「确定」长得一样 */
+.primary-btn.danger { background: var(--sy-error); }
+.primary-btn.danger:hover { background: var(--sy-error); filter: brightness(1.08); }

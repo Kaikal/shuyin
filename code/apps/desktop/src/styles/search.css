@@ -1,0 +1,570 @@
+/* ==================================================================
+   在线搜索 / 歌单详情
+   —— 与本地音乐页共用 .page / .lib-head 骨架，这里只补在线独有的部分。
+   动效原则：不做逐行入场动画（列表几十行，入场会让滚动视觉发飘），
+   只用 background/opacity 的 120ms 过渡表达「可点」。
+   ================================================================== */
+
+.search-page { gap: 0; }
+
+/* 搜索框：本地页的 .search-box 依赖 .text-input，这里直接吃原生 input */
+.search-page .search-box {
+  height: 34px;
+  padding: 0 8px 0 30px;
+  border-radius: var(--sy-radius-pill);
+  background: var(--sy-surface);
+  border: 1px solid var(--sy-surface-border);
+  transition: border-color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.search-page .search-box:focus-within { border-color: var(--sy-accent); }
+.search-page .search-box input {
+  width: 240px;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--sy-text-1);
+  font: 400 13px/1 var(--sy-font-cn);
+}
+.search-page .search-box input::placeholder { color: var(--sy-text-4); }
+.search-page .search-box .icon-btn { width: 22px; height: 22px; font-size: 14px; line-height: 1; }
+
+/* ---------- Tab + 平台筛选 ---------- */
+.sr-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex: none;
+  padding: 2px 0 12px;
+  border-bottom: 1px solid var(--sy-line);
+}
+.sr-tabs { display: flex; gap: 4px; }
+.sr-tab {
+  height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--sy-radius-pill);
+  background: transparent;
+  color: var(--sy-text-2);
+  font: 500 12.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sr-tab:hover { color: var(--sy-text-1); background: var(--sy-row-hover); }
+.sr-tab.active { background: color-mix(in srgb, var(--sy-accent) 20%, transparent); color: var(--sy-accent-soft); }
+
+.sr-platforms { display: flex; gap: 6px; flex-wrap: wrap; }
+.sr-plat {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--sy-surface-border);
+  border-radius: var(--sy-radius-pill);
+  background: transparent;
+  color: var(--sy-text-3);
+  font: 500 11.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  transition: color var(--sy-dur-fast) var(--sy-ease-soft), border-color var(--sy-dur-fast) var(--sy-ease-soft),
+              background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sr-plat:hover { color: var(--sy-text-1); border-color: color-mix(in srgb, var(--sy-text-1) 22%, transparent); }
+.sr-plat.active {
+  color: var(--sy-text-1);
+  border-color: color-mix(in srgb, var(--sy-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--sy-accent) 12%, transparent);
+}
+
+/* ---------- 历史 / 提示 ---------- */
+.sr-history {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 14px 0 0;
+}
+.sr-history-label { font-size: 11.5px; color: var(--sy-text-4); }
+.sr-ghost {
+  height: 24px;
+  padding: 0 12px;
+  border: 1px solid var(--sy-surface-border);
+  border-radius: var(--sy-radius-pill);
+  background: transparent;
+  color: var(--sy-text-2);
+  font: 400 11.5px/1 var(--sy-font-cn);
+  cursor: pointer;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--sy-dur-fast) var(--sy-ease-soft), background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sr-ghost:hover { color: var(--sy-text-1); background: var(--sy-row-hover); }
+
+.sr-hint { padding: 26px 0; font-size: 12px; color: var(--sy-text-3); }
+
+/* ---------- 搜索中的等待态 ----------
+ * 四平台并发通常要 1~3 秒。以前这里只有左上角一句「正在搜索…」，
+ * 那几秒整块内容是空的，看起来像页面没反应。现在放在内容区正中：
+ * 三个错开的圆环 + 正在搜什么 + 在问哪些平台。
+ * 只有 loading 期间存在，不常驻，也不做循环入场（避免和滚动打架）。 */
+.sr-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding-bottom: 60px;
+  animation: sr-fade-in 180ms var(--sy-ease-soft) both;
+}
+@keyframes sr-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* 三个环按同一个圆心转、速度不同：像三档转速叠在一起，比单个 spinner 有「在找」的感觉 */
+.sr-ring {
+  position: relative;
+  /* 60 而不是 52：内容区正中只有这一坨，52 缩在 1000px 宽的空场里显得飘 */
+  width: 62px;
+  height: 62px;
+  display: block;
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--sy-accent) 26%, transparent));
+}
+.sr-ring > i {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--sy-accent);
+}
+.sr-ring > i:nth-child(1) { animation: sr-spin 1.1s linear infinite; }
+.sr-ring > i:nth-child(2) { inset: 8px; border-top-color: color-mix(in srgb, var(--sy-accent) 55%, transparent); animation: sr-spin 1.7s linear infinite reverse; }
+.sr-ring > i:nth-child(3) { inset: 16px; border-top-color: color-mix(in srgb, var(--sy-accent) 30%, transparent); animation: sr-spin 2.3s linear infinite; }
+@keyframes sr-spin { to { transform: rotate(360deg); } }
+
+/* 小号：评论面板那句「正在读取评论…」用它，22px 才和 11.5px 的文字配得住。
+   子项的 inset(7/14) 是按 52px 定的，缩小后必须同步改，否则三环糊成一圈。 */
+.sr-ring.sm { width: 22px; height: 22px; }
+.sr-ring.sm > i { border-width: 1.5px; }
+.sr-ring.sm > i:nth-child(2) { inset: 4px; }
+.sr-ring.sm > i:nth-child(3) { inset: 8px; }
+
+.sr-loading-t { font-size: 13px; color: var(--sy-text-2); }
+.sr-loading-s { font-size: 11px; color: var(--sy-text-4); letter-spacing: 0.01em; }
+
+.sr-errors { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 0 0; }
+.sr-error {
+  font-size: 11px;
+  color: var(--sy-error);
+  background: color-mix(in srgb, var(--sy-error) 10%, transparent);
+  border-radius: var(--sy-radius-small);
+  padding: 4px 9px;
+}
+/* 限流不是错误：一句灰字说明「已跳过」，不占红条的位置 */
+.sr-busy { padding: 12px 0 0; font-size: 11px; color: var(--sy-text-4); }
+
+/* 标题旁的一行边界说明：搜索不依赖音源脚本，别让它抢标题的视觉重量 */
+.sr-note {
+  font-size: 10.5px;
+  color: var(--sy-text-4);
+  letter-spacing: 0.02em;
+  padding: 1px 0 0 2px;
+  white-space: nowrap;
+}
+
+/* ---------- 曲目列表 ---------- */
+.sr-list { flex: 1; overflow-y: auto; padding: 6px 0 24px; }
+.sr-group + .sr-group { margin-top: 10px; }
+.sr-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: linear-gradient(var(--sy-bg-base) 72%, transparent);
+}
+.sr-group-count { font-size: 10.5px; color: var(--sy-text-4); }
+
+/* 来源标签：颜色按平台区分，扫一眼就知道点的是哪家 */
+.sr-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: var(--sy-radius-pill);
+  font: 500 10px/1 var(--sy-font-cn);
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: var(--sy-text-4);
+}
+.sr-badge.sm { height: 16px; padding: 0 6px; font-size: 9.5px; }
+.sr-badge[data-src='wy'] { background: #C1443C; }
+.sr-badge[data-src='tx'] { background: #2E9B6B; }
+.sr-badge[data-src='kw'] { background: #C8892B; }
+.sr-badge[data-src='kg'] { background: #3B7FC4; }
+.sr-badge[data-src='mg'] { background: #8A5BC4; }
+
+.sr-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 54px;
+  padding: 0 12px;
+  border-radius: 10px;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sr-row:hover { background: var(--sy-row-hover); }
+.sr-row.live .sr-title { color: var(--sy-accent-soft); }
+
+/* 多选（在线歌单详情）：选中行 + 复选框。复选框常显到 0.5，悬停/选中才实心——
+   藏到 0 的话用户根本不知道这里能多选。 */
+.sr-row.selected { background: color-mix(in srgb, var(--sy-accent) 14%, transparent); }
+.sr-cbx { flex: none; opacity: 0.5; }
+.sr-row:hover .sr-cbx,
+.sr-row.selected .sr-cbx { opacity: 1; }
+
+/* 列表上方的全选条 */
+.sr-pickhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 4px;
+  flex: none;
+}
+.sr-pickhint {
+  font-size: 10.5px;
+  color: var(--sy-text-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sr-cover {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 8px;
+  background-color: var(--sy-surface);
+  background-size: cover;
+  background-position: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.sr-idx { width: 24px; flex: none; text-align: right; font-size: 11px; color: var(--sy-text-4); }
+.sr-main { flex: 1; min-width: 0; }
+.sr-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--sy-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sr-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sr-dot { color: var(--sy-text-4); }
+.sr-dur { flex: none; width: 42px; text-align: right; font-size: 11px; color: var(--sy-text-3); }
+.sr-acts { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity var(--sy-dur-fast) var(--sy-ease-soft); }
+/* 只在悬停 / 键盘导航时显形。**不要**给 .sr-row.live 加 opacity:1：
+   那样「正在播的那一行」的按钮会一直亮着，鼠标移开也不消失。
+   **也不要用 :focus-within**：点完行内「播放」后按钮自己保留了焦点，
+   mouseleave 之后 :focus-within 仍然成立，三个按钮就永远挂在那儿。
+   :focus-visible 只在键盘 Tab 过来时才成立，正好。 */
+.sr-row:hover .sr-acts,
+.sr-row:has(:focus-visible) .sr-acts { opacity: 1; }
+.sr-row { cursor: default; }
+.sr-row:hover { cursor: pointer; }
+
+/* ---------- 歌单卡 ---------- */
+.sr-grid {
+  flex: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+  /*
+   * 这一行是必须的：`grid-auto-rows` 默认 auto 时，卡片（flex 列 + 内部 aspect-ratio 的封面）
+   * 对行高贡献被算成 0，24 行被压成每行 1.32px，卡片被 overflow:hidden 剪成一条彩色细线——
+   * 看起来像「封面画成了横条」。max-content 让行高按内容算，问题消失。
+   */
+  grid-auto-rows: max-content;
+  gap: 14px;
+  padding: 16px 0 24px;
+  align-content: start;
+}
+.sr-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 0;
+  border-radius: var(--sy-radius-card);
+  background: var(--sy-surface);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform var(--sy-dur-fast) var(--sy-ease-soft), background var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sr-card:hover:not(.disabled) { transform: translateY(-2px); background: var(--sy-row-hover); }
+.sr-card.disabled { opacity: 0.45; cursor: default; }
+.sr-card-cover {
+  aspect-ratio: 1 / 1;
+  position: relative;
+  flex: none;
+  width: 100%;
+  background-color: var(--sy-bg-elevated);
+  overflow: hidden;
+}
+.sr-card-cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.sr-card-body { padding: 9px 10px 11px; }
+.sr-card-name {
+  font-size: 12px;
+  color: var(--sy-text-1);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sr-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+}
+.sr-soon { color: var(--sy-text-4); }
+
+/* ---------- 歌单详情 ---------- */
+.sr-detail-head { flex: none; }
+.sr-back {
+  height: 26px;
+  padding: 0 10px;
+  margin-bottom: 12px;
+  font-size: 11.5px;
+}
+.sr-detail-hero { display: flex; gap: 18px; align-items: flex-end; padding-bottom: 16px; }
+.sr-detail-cover {
+  width: 132px;
+  height: 132px;
+  flex: none;
+  border-radius: var(--sy-radius-card);
+  background-color: var(--sy-bg-elevated);
+  background-size: cover;
+  background-position: center;
+  box-shadow: var(--sy-shadow-cover);
+}
+.sr-detail-info { min-width: 0; padding-bottom: 4px; }
+.sr-detail-name {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--sy-text-1);
+  line-height: 1.35;
+  margin-bottom: 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sr-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--sy-text-3);
+  margin-bottom: 12px;
+}
+.sr-detail-acts { display: flex; gap: 10px; }
+.sr-detail-acts .primary-btn,
+.sr-detail-acts .ghost-btn { height: 32px; padding: 0 16px; font-size: 12.5px; }
+.sr-detail-acts svg { margin-right: 5px; }
+
+/* ==================================================================
+   设置页 · 在线音源
+   ================================================================== */
+
+.src-dir-actions { display: flex; gap: 8px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.src-dir-actions svg { margin-right: 5px; }
+.src-dir-actions .primary-btn { height: 30px; padding: 0 12px; font-size: 11.5px; }
+.src-dir-actions .ghost-btn { height: 30px; padding: 0 11px; font-size: 11.5px; }
+.src-dir {
+  font: 400 11px/1.5 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  color: var(--sy-text-3);
+  word-break: break-all;
+  padding: 0 0 14px;
+}
+.src-dir-sub {
+  display: block;
+  margin-top: 4px;
+  font: 400 10.5px/1.5 var(--sy-font-cn);
+  color: var(--sy-text-4);
+}
+.src-select {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--sy-radius-small);
+  border: 1px solid var(--sy-surface-border);
+  background: var(--sy-surface);
+  color: var(--sy-text-1);
+  font: 400 12px/1 var(--sy-font-cn);
+  outline: none;
+}
+.src-msg {
+  font-size: 11.5px;
+  color: var(--sy-text-2);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: var(--sy-radius-small);
+  background: var(--sy-surface);
+}
+.src-msg.bad { color: var(--sy-error); background: color-mix(in srgb, var(--sy-error) 10%, transparent); }
+.src-empty {
+  font-size: 11.5px;
+  color: var(--sy-text-3);
+  line-height: 1.7;
+  padding: 12px 14px;
+  border-radius: var(--sy-radius-small);
+  border: 1px dashed var(--sy-surface-border);
+}
+.src-list { display: flex; flex-direction: column; gap: 8px; }
+.src-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  border-radius: var(--sy-radius-small);
+  background: var(--sy-surface);
+  border: 1px solid var(--sy-surface-border);
+}
+.src-item.bad { border-color: color-mix(in srgb, var(--sy-error) 45%, transparent); }
+.src-item.off { opacity: 0.55; }
+.src-main { flex: 1; min-width: 0; }
+.src-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--sy-text-1);
+}
+.src-ver { font: 400 10px/1 var(--sy-font-num); color: var(--sy-text-4); }
+.src-state {
+  font-size: 9.5px;
+  padding: 2px 6px;
+  border-radius: var(--sy-radius-pill);
+  color: var(--sy-text-2);
+  background: color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+}
+.src-state.ready { color: #7FD0A0; background: color-mix(in srgb, #7FD0A0 16%, transparent); }
+.src-state.error { color: var(--sy-error); background: color-mix(in srgb, var(--sy-error) 16%, transparent); }
+.src-sub {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.src-out { margin-top: 3px; font-size: 10px; color: var(--sy-text-4); }
+.src-acts { display: flex; gap: 6px; flex: none; align-items: center; }
+.src-acts .ghost-btn { height: 26px; padding: 0 11px; font-size: 11.5px; }
+.src-acts .src-del { color: var(--sy-text-4); }
+.src-acts .src-del:hover { color: var(--sy-error); background: color-mix(in srgb, var(--sy-error) 12%, transparent); }
+
+/* 导入弹窗 */
+.src-import { display: flex; flex-direction: column; gap: 12px; }
+.src-field { display: flex; flex-direction: column; gap: 6px; }
+.src-field > span { font-size: 11px; color: var(--sy-text-3); }
+.src-field .text-input { width: 100%; height: 32px; }
+/* 脚本文本框要长得像代码框：上面那行 32px 的宽度规则优先级更高，这里得跟着提权，
+   否则粘贴进来的脚本只能看见一行（实测就踩到了） */
+.src-field .text-input.src-code {
+  height: 190px;
+  padding: 9px 11px;
+  resize: vertical;
+  font: 400 11px/1.6 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  white-space: pre;
+  overflow: auto;
+}
+
+/* 播放条：在线来源标签 / 换源 */
+.pb-src {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: var(--sy-radius-pill);
+  font: 500 9.5px/1.5 var(--sy-font-cn);
+  color: var(--sy-accent-soft);
+  background: color-mix(in srgb, var(--sy-accent) 16%, transparent);
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.pb-switch {
+  height: 26px;
+  padding: 0 12px;
+  margin-right: 10px;
+  font-size: 11.5px;
+}
+/* 播放条上的音质下拉：和「换源」并排，不抢视觉 */
+.pb-q {
+  height: 26px;
+  margin-right: 8px;
+  padding: 0 6px;
+  border-radius: var(--sy-radius-pill);
+  border: 1px solid var(--sy-surface-border);
+  background: transparent;
+  color: var(--sy-text-3);
+  font: 400 11px/1 var(--sy-font-cn);
+  outline: none;
+  cursor: pointer;
+}
+.pb-q:hover:not(:disabled) { color: var(--sy-text-1); border-color: var(--sy-surface-border-strong, var(--sy-surface-border)); }
+.pb-q:disabled { opacity: 0.45; cursor: default; }
+.pb-q option { background: var(--sy-bg-2, #14161d); color: var(--sy-text-1); }
+.pb-q option:disabled { color: var(--sy-text-4); }
+
+/* ---------- 歌单卡片：右上角收藏星（v0.5） ---------- */
+.sr-card-wrap { position: relative; min-width: 0; }
+.sr-card-wrap .sr-card { width: 100%; }
+.sr-fav {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 50%;
+  background: rgba(10, 12, 16, 0.52);
+  color: #EDEFF5;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity var(--sy-dur-fast), transform var(--sy-dur-fast), color var(--sy-dur-fast);
+  backdrop-filter: blur(6px);
+}
+.sr-card-wrap:hover .sr-fav,
+.sr-fav:focus-visible,
+.sr-fav.on { opacity: 1; transform: scale(1); }
+.sr-fav:hover { color: #FFD479; border-color: rgba(255, 212, 121, 0.5); }
+.sr-fav.on { color: #FFC94D; border-color: rgba(255, 201, 77, 0.45); }
+.sr-fav.on svg { fill: currentColor; }
+.sr-favbtn.on { color: #FFC94D; border-color: rgba(255, 201, 77, 0.4); }
+.sr-favbtn.on svg { fill: currentColor; }

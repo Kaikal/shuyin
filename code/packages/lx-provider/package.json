@@ -1,0 +1,17 @@
+{
+  "name": "@shuyin/lx-provider",
+  "version": "0.1.0",
+  "description": "疏音 · 洛雪音源接入：平台 API 层（搜索/歌单/歌词/封面）+ 音源脚本层（musicUrl 降级链）",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

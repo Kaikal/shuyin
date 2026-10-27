@@ -1,0 +1,238 @@
+/* 启动页 · 疏影横斜（诗句竖排、错落成诗） */
+
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background:
+    radial-gradient(760px 620px at 22% 18%, rgba(110, 139, 255, 0.10), transparent 64%),
+    #0A0B0F; /* 固定底色，不读用户主题 */
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.splash-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* ---------- 版心：诗句 + 题跋 ---------- */
+.splash-stage {
+  display: flex;
+  flex-direction: row-reverse; /* 题跋落在左侧「落款」位 */
+  align-items: flex-start;
+  gap: clamp(18px, 2.6vw, 34px);
+  /* 题跋在左会让视觉重心偏右，往左带一点点回到画面中线 */
+  margin-right: clamp(24px, 4vw, 56px);
+}
+
+/* 诗句容器：竖排，颜色必须不透明，否则子元素的 opacity 动画什么都显示不出来 */
+.splash-poem {
+  display: flex;
+  flex-direction: row-reverse; /* 传统竖排：先读右列 */
+  align-items: flex-start;
+  gap: 1.08em; /* 两列之间的空白，竖排的「行距」 */
+  font-family: var(--sy-font-serif);
+  font-weight: 400;
+  color: #EAEBF1;
+  line-height: 1;
+}
+
+.poem-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* 每字：竖排时字距靠 margin 控制（letter-spacing 在竖排里作用于横向） */
+.poem-char {
+  display: block;
+  margin-block: 0.18em; /* 上下字距 */
+  opacity: 0;
+  will-change: transform, opacity;
+  text-shadow: 0 2px 16px rgba(10, 11, 15, 0.95);
+}
+
+/* 错落：右列（第一列）从顶部起，左列（第二列）整体下沉约 1.6 字 */
+.poem-col[data-col='1'] {
+  transform: rotate(-0.8deg);
+  transform-origin: top center;
+}
+.poem-col[data-col='2'] {
+  margin-top: 1.62em;
+  transform: rotate(0.6deg);
+  transform-origin: top center;
+}
+
+/* ---------- 首启：逐列逐字淡入 + 落笔感 ---------- */
+.splash-inner[data-anim='full'] .poem-char {
+  animation: splash-char 520ms cubic-bezier(0.22, 0.68, 0.24, 1) both;
+}
+.splash-inner[data-anim='full'] .poem-col[data-col='1'] .poem-char {
+  animation-delay: calc(200ms + var(--d) * 62ms);
+}
+.splash-inner[data-anim='full'] .poem-col[data-col='2'] .poem-char {
+  animation-delay: calc(560ms + var(--d) * 62ms);
+}
+
+@keyframes splash-char {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+    transform: translateX(calc(var(--tx) - 4px)) translateY(-8px) rotate(var(--rot));
+  }
+  to {
+    opacity: 0.94;
+    filter: blur(0);
+    transform: translateX(var(--tx)) rotate(var(--rot));
+  }
+}
+
+/* ---------- 后续启动：整列快速淡入 ---------- */
+.splash-inner[data-anim='quick'] .poem-char {
+  animation: splash-char-quick 300ms cubic-bezier(0.22, 0.68, 0.24, 1) both;
+}
+.splash-inner[data-anim='quick'] .poem-col[data-col='1'] .poem-char {
+  animation-delay: calc(150ms + var(--d) * 22ms);
+}
+.splash-inner[data-anim='quick'] .poem-col[data-col='2'] .poem-char {
+  animation-delay: calc(240ms + var(--d) * 22ms);
+}
+
+@keyframes splash-char-quick {
+  from { opacity: 0; transform: translateX(var(--tx)) translateY(-4px) rotate(var(--rot)); }
+  to   { opacity: 0.94; transform: translateX(var(--tx)) rotate(var(--rot)); }
+}
+
+/* ---------- 减弱动效：整块淡入，无位移 ---------- */
+.splash-inner[data-anim='reduced'] .poem-char {
+  animation: splash-fade 300ms ease both;
+}
+@keyframes splash-fade {
+  from { opacity: 0; }
+  to   { opacity: 0.94; transform: translateX(var(--tx)) rotate(var(--rot)); }
+}
+
+/* ---------- 题跋：朱印 + 细竖线 + 小字 ---------- */
+.splash-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  align-self: flex-end; /* 压在左列下方，取「落款」位 */
+  margin-bottom: 0.4em;
+  /* 与诗句保持呼吸感，别贴着最后一列 */
+  margin-right: 4px;
+}
+
+/* 朱印：两字竖排，朱红描边，轻微倾斜 */
+.splash-seal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 9px 6px;
+  border: 1.5px solid #B23A2E;
+  border-radius: 2px;
+  color: #C44435;
+  background: rgba(178, 58, 46, 0.07);
+  font-family: var(--sy-font-serif);
+  font-size: clamp(14px, 1.25vw, 18px);
+  line-height: 1.1;
+  letter-spacing: 0;
+  transform: rotate(-2.2deg);
+  opacity: 0;
+  box-shadow: 0 0 0 1px rgba(178, 58, 46, 0.14) inset;
+}
+
+.splash-vrule {
+  width: 1px;
+  height: clamp(28px, 5vw, 54px);
+  background: linear-gradient(to bottom, rgba(110, 139, 255, 0.55), rgba(110, 139, 255, 0));
+  opacity: 0;
+}
+
+.splash-tag {
+  writing-mode: vertical-rl;
+  font-family: var(--sy-font-serif);
+  font-size: clamp(11px, 0.9vw, 13px);
+  letter-spacing: 0.26em;
+  color: rgba(196, 199, 214, 0.9);
+  opacity: 0;
+}
+
+.splash-inner[data-anim='full'] .splash-seal {
+  animation: splash-seal 420ms cubic-bezier(0.34, 0.9, 0.3, 1) 1180ms both;
+}
+.splash-inner[data-anim='full'] .splash-vrule {
+  animation: splash-rule-grow 360ms cubic-bezier(0.22, 0.68, 0.24, 1) 1420ms both;
+}
+.splash-inner[data-anim='full'] .splash-tag {
+  animation: splash-fade-soft 380ms ease 1560ms both;
+}
+
+.splash-inner[data-anim='quick'] .splash-seal {
+  animation: splash-seal 260ms cubic-bezier(0.34, 0.9, 0.3, 1) 420ms both;
+}
+.splash-inner[data-anim='quick'] .splash-vrule {
+  animation: splash-rule-grow 240ms ease 520ms both;
+}
+.splash-inner[data-anim='quick'] .splash-tag {
+  animation: splash-fade-soft 240ms ease 600ms both;
+}
+
+.splash-inner[data-anim='reduced'] .splash-seal,
+.splash-inner[data-anim='reduced'] .splash-vrule,
+.splash-inner[data-anim='reduced'] .splash-tag {
+  animation: splash-fade-soft 260ms ease both;
+  opacity: 1;
+}
+
+@keyframes splash-seal {
+  from { opacity: 0; transform: rotate(-2.2deg) scale(1.22); }
+  to   { opacity: 1; transform: rotate(-2.2deg) scale(1); }
+}
+@keyframes splash-rule-grow {
+  from { opacity: 0; transform: scaleY(0); transform-origin: top; }
+  to   { opacity: 1; transform: scaleY(1); transform-origin: top; }
+}
+@keyframes splash-fade-soft {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ---------- 上次在听 ---------- */
+.splash-last {
+  margin-top: clamp(26px, 4.2vh, 46px);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: rgba(155, 158, 174, 0.72);
+  opacity: 0;
+  max-width: 62vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.splash-inner[data-anim='full'] .splash-last {
+  animation: splash-fade-soft 340ms ease 1760ms both;
+}
+.splash-inner[data-anim='quick'] .splash-last {
+  animation: splash-fade-soft 240ms ease 460ms both;
+}
+.splash-inner[data-anim='reduced'] .splash-last {
+  animation: splash-fade-soft 300ms ease both;
+}
+
+/* 窄窗：两列收紧，题跋移到列尾下方 */
+@media (max-width: 620px) {
+  .splash-stage { gap: 16px; }
+  .splash-side { align-self: center; }
+  .splash-tag { display: none; }
+}
+
+/* 整体淡出由容器 opacity 过渡承担（finish() 中设置） */

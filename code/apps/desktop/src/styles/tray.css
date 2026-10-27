@@ -1,0 +1,235 @@
+/* ============================================================
+   托盘菜单窗口（自绘，替代系统原生菜单）
+   窗口本体透明；底板、描边、阴影全部自己画，配色走主题 token。
+   语气对齐主界面：深底 + 左上角强调色光斑 + 实体卡片 + 胶囊状态标签。
+   ============================================================ */
+html.tray-mode,
+html.tray-mode body {
+  background: transparent !important;
+  margin: 0;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+html.tray-mode #root { display: inline-block; }
+
+/* 外面这层只负责给阴影留空间（窗口尺寸 = 这层的实测尺寸） */
+.tmwrap {
+  display: inline-block;
+  padding: 8px;
+  background: transparent;
+}
+
+.tm {
+  position: relative;
+  width: 290px;
+  padding: 7px;
+  border-radius: 16px;
+  color: var(--sy-text-1);
+  font: 400 12.5px/1.45 var(--sy-font-cn);
+  /* 和 body 一样：左上角一层极淡的强调色光斑，再压一层 158° 渐变 */
+  background:
+    radial-gradient(120% 92% at 6% -18%, color-mix(in srgb, var(--sy-accent) 17%, transparent), transparent 62%),
+    linear-gradient(158deg, var(--sy-bg-elevated), var(--sy-bg-base));
+  border: 1px solid color-mix(in srgb, var(--sy-text-1) 13%, transparent);
+  box-shadow:
+    0 22px 52px -14px rgba(0, 0, 0, 0.72),
+    0 4px 14px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 color-mix(in srgb, var(--sy-text-1) 9%, transparent);
+  /* 从托盘往上长：入场从下往上来，方向才对 */
+  animation: tm-in 150ms var(--sy-ease-panel);
+}
+@keyframes tm-in {
+  from { opacity: 0; transform: translateY(7px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- 头部：封面 + 曲名 ---------- */
+.tm-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 9px 11px;
+}
+.tm-cover {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background-size: cover;
+  background-position: center;
+  display: grid;
+  place-items: center;
+  box-shadow:
+    0 5px 16px rgba(0, 0, 0, 0.38),
+    inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 14%, transparent);
+}
+.tm-cover.empty {
+  background:
+    linear-gradient(145deg,
+      color-mix(in srgb, var(--sy-accent) 42%, transparent),
+      color-mix(in srgb, var(--sy-accent) 10%, transparent));
+  color: color-mix(in srgb, var(--sy-text-1) 72%, transparent);
+}
+.tm-meta { min-width: 0; flex: 1; }
+.tm-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tm-sub {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tm-count { opacity: 0.78; }
+.tm-pct {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--sy-text-4);
+  letter-spacing: 0.02em;
+}
+
+/* ---------- 播放控制：内凹的一块小面板 ---------- */
+.tm-deck {
+  position: relative;
+  margin: 0 2px 3px;
+  padding: 6px 8px 10px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--sy-text-1) 4.5%, transparent);
+  border: 1px solid var(--sy-line);
+}
+.tm-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.tm-btn {
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--sy-text-2);
+  cursor: pointer;
+  transition: background 120ms var(--sy-ease-soft), color 120ms var(--sy-ease-soft);
+}
+.tm-btn:hover { background: color-mix(in srgb, var(--sy-text-1) 7%, transparent); color: var(--sy-text-1); }
+.tm-btn:disabled { opacity: 0.34; cursor: default; background: none; }
+.tm-play {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--sy-accent);
+  color: #fff;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--sy-accent) 42%, transparent);
+}
+.tm-play:hover { background: var(--sy-accent-soft); color: #fff; }
+.tm-play:disabled { background: var(--sy-line); box-shadow: none; color: var(--sy-text-3); }
+.tm-time {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+  letter-spacing: 0.02em;
+}
+.tm-prog {
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  bottom: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--sy-text-1) 9%, transparent);
+  overflow: hidden;
+}
+.tm-prog i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--sy-accent);
+  transition: width 300ms linear;
+}
+
+/* ---------- 分组小标题 ---------- */
+.tm-label {
+  padding: 7px 10px 4px;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  color: var(--sy-text-4);
+}
+
+/* ---------- 菜单项 ---------- */
+.tm-sep {
+  height: 1px;
+  margin: 6px 9px;
+  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+}
+.tm-item {
+  appearance: none;
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--sy-text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 110ms var(--sy-ease-soft), color 110ms var(--sy-ease-soft);
+}
+.tm-item svg {
+  flex: none;
+  opacity: 0.78;
+  transition: opacity 110ms var(--sy-ease-soft), color 110ms var(--sy-ease-soft);
+}
+.tm-item:hover { background: color-mix(in srgb, var(--sy-text-1) 6%, transparent); color: var(--sy-text-1); }
+.tm-item:hover svg { opacity: 1; color: var(--sy-accent-soft); }
+.tm-item:disabled { opacity: 0.38; cursor: default; background: none; }
+.tm-item:disabled:hover svg { color: currentColor; }
+.tm-item span {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 开关状态用小胶囊，比系统菜单的勾好看且不占位 */
+.tm-tag {
+  flex: none;
+  font-style: normal;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+  color: var(--sy-text-3);
+  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+}
+.tm-tag.on {
+  color: var(--sy-accent-soft);
+  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
+}
+.tm-quit { color: var(--sy-text-3); }
+.tm-quit:hover {
+  background: color-mix(in srgb, var(--sy-error) 15%, transparent);
+  color: var(--sy-error);
+}
+.tm-quit:hover svg { color: var(--sy-error); opacity: 1; }
