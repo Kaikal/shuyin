@@ -46,12 +46,18 @@ const cover = (u?: string) => {
  * 也不需要再打一次 song/detail。
  */
 function qualitiesOf(s: any): string[] | undefined {
+  /*
+   * 新版接口（cloudsearch / v3 每日推荐）用 `l/m/h/sq/hr`，老接口（v2 每日推荐）
+   * 用 `lMusic/mMusic/hMusic/sqMusic/hrMusic`。两套都认，否则老格式那批歌
+   * 会显示成「未知音质」。
+   */
+  const has = (k: 'l' | 'm' | 'h' | 'sq' | 'hr') => Boolean(s?.[k] ?? s?.[`${k}Music`])
   const q: string[] = []
-  if (s?.l) q.push('128k')
-  if (s?.m) q.push('192k')
-  if (s?.h) q.push('320k')
-  if (s?.sq) q.push('flac')
-  if (s?.hr) q.push('flac24bit')
+  if (has('l')) q.push('128k')
+  if (has('m')) q.push('192k')
+  if (has('h')) q.push('320k')
+  if (has('sq')) q.push('flac')
+  if (has('hr')) q.push('flac24bit')
   return q.length ? q : undefined
 }
 
@@ -131,33 +137,46 @@ export function createWyApi(client: HttpClient): PlatformApi {
    * 拆开后是随便传的，`this` 绑不住。
    */
   const personalDaily = async (): Promise<PlaylistDetail | null> => {
-    try {
-      /*
-       * 网页版这条 `/api/v2/...` 要带 `csrf_token`（就是 cookie 里的 `__csrf`），
-       * 不带时服务端不一定报错，而是回一份「通用推荐」——看着像登录失效，
-       * 实际是参数没带全。App 里那份 30 首就是按 uid 算出来的，同一个接口。
-       */
-      const csrf = /(?:^|;\s*)__csrf=([^;]+)/.exec(client.cookieFor?.('https://music.163.com/') ?? '')?.[1]
-      const url = 'https://music.163.com/api/v2/discovery/recommend/songs'
-        + (csrf ? `?csrf_token=${encodeURIComponent(csrf)}` : '')
-      const j = await getJson(client, url, { headers: HEADERS, retry: 0 })
-      if (Number(j?.code) !== 200) return null
-      const raw: any[] = j?.data?.dailySongs ?? []
-      const songs: SearchSong[] = raw.filter((x: any) => x?.id).map(normalize)
-      if (!songs.length) return null
-      return {
-        id: 'daily:wy',
-        source: 'wy',
-        name: '每日推荐 · 按你的口味',
-        cover: cover(raw[0]?.al?.picUrl),
-        songCount: songs.length,
-        songs,
-        total: songs.length,
-        hasMore: false,
+    /*
+     * 这两条接口回的**不是同一个格式**，别再按一个写死：
+     *   · `/api/v3/discovery/recommend/songs` → 新格式（`ar` / `al` / `dt` / `sq`），
+     *     和 `normalize` 完全对齐，封面、时长、音质档位都能拿到；
+     *   · `/api/v2/discovery/recommend/songs` → **老格式**（`artists` / `album` /
+     *     `duration` / `hMusic`），根本没有 `al` 这个字段。
+     *
+     * 以前只打 v2 却用 `raw[0].al.picUrl` 取封面 → 永远是 undefined，于是
+     * 「歌单广场那张每日推荐卡」和「详情页头图」两块一直是一片空白（列表本身是好的）。
+     * 现在 v3 优先、v2 兜底，封面再退到第一首歌的专辑图，三条路都不空。
+     */
+    const csrf = /(?:^|;\s*)__csrf=([^;]+)/.exec(client.cookieFor?.('https://music.163.com/') ?? '')?.[1]
+    const qs = csrf ? `?csrf_token=${encodeURIComponent(csrf)}` : ''
+    for (const ver of ['v3', 'v2'] as const) {
+      try {
+        const j = await getJson(client, `https://music.163.com/api/${ver}/discovery/recommend/songs${qs}`, {
+          headers: HEADERS, retry: 0,
+        })
+        if (Number(j?.code) !== 200) continue
+        const raw: any[] = j?.data?.dailySongs ?? []
+        const songs: SearchSong[] = raw.filter((x: any) => x?.id).map(normalize)
+        if (!songs.length) continue
+        // 老格式没有 al，退回 album.picUrl；再不行用第一首歌自己的专辑封面
+        const first = raw[0]
+        const own = cover(first?.al?.picUrl ?? first?.album?.picUrl) ?? songs[0]?.img
+        return {
+          id: 'daily:wy',
+          source: 'wy',
+          name: '每日推荐 · 按你的口味',
+          cover: own,
+          songCount: songs.length,
+          songs,
+          total: songs.length,
+          hasMore: false,
+        }
+      } catch {
+        /* 换下一个版本再试 */
       }
-    } catch {
-      return null
     }
+    return null
   }
 
   return {
