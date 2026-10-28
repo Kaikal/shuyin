@@ -363,8 +363,13 @@ export async function dailyRecommend(source: PlatformSource): Promise<PlaylistDe
   if (hit) return hit.data
 
   const data = await api.getDailyRecommend()
-  DAILY.set(key, { day: dayKey(), data })
-  return data
+  /*
+   * 平台层没给封面时，用第一首歌的专辑图顶上：每日推荐那张卡和详情页头图
+   * 都是「有封面才画」的，`cover` 空着就是一块空白（网易云 v2 接口就是这么空的）。
+   */
+  const filled: PlaylistDetail = data.cover ? data : { ...data, cover: data.songs[0]?.img }
+  DAILY.set(key, { day: dayKey(), data: filled })
+  return filled
 }
 
 /* ------------------------------------------------------------------ */

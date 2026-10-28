@@ -46,9 +46,14 @@ html[data-shell='phone'] {
   /*
    * 安全区：安卓壳会把「WebView 距屏幕上下边缘多少」写进 --sy-safe-*（MainActivity 量的
    * 真实坐标，见 pushInsets）；桌面 / iOS 走 env()。两个取大的，谁大听谁的。
+   *
+   * 注意这里是 env() 而不是 var(--safe-top)——**绝不能自引用**：自定义属性一旦引用
+   * 自己就是「循环依赖」，浏览器判定为非法，`var(--safe-top)` 用在 calc() 里会让
+   * 整条 `inset` / `top` / `bottom` 变成非法值（回落 auto），手机上所有页面会缩到
+   * 左上角、被顶部胶囊盖住。上一版批量把 env() 换成 var(--safe-top) 就是这么炸的。
    */
-  --safe-top: max(var(--safe-top), var(--sy-safe-top, 0px));
-  --safe-bottom: max(var(--safe-bottom), var(--sy-safe-bottom, 0px));
+  --safe-top: max(env(safe-area-inset-top, 0px), var(--sy-safe-top, 0px));
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--sy-safe-bottom, 0px));
   /* 顶部 Tab 占位：上留白 8 + 胶囊 62 + 间隔 8 */
   --phone-tab: 78px;
   /* 底部播放条占位：底距 10 + 条 64 + 间隔 8 */
@@ -353,6 +358,21 @@ html[data-shell='phone'] .set-row-stack .set-label { flex: 1 1 100%; }
 html[data-shell='phone'] .src-dir-actions { flex-wrap: wrap; gap: 8px; width: 100%; }
 html[data-shell='phone'] .src-dir-actions .primary-btn,
 html[data-shell='phone'] .src-dir-actions .ghost-btn { flex: 0 1 auto; }
+/*
+ * 右侧控件（分段选择 / 胶囊组）在 396dp 下会顶出页面右边——`inline-flex` 不折行也不缩，
+ * 一行 4~5 个中文档位就是 380px 起步。手机上让它自己横向滑（不折成两层胶囊），
+ * 并把父级宽度锁死，别再把 `.set-row` 撑宽。
+ */
+html[data-shell='phone'] .set-ctl { max-width: 100%; min-width: 0; }
+html[data-shell='phone'] .segmented {
+  max-width: 100%;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+html[data-shell='phone'] .segmented::-webkit-scrollbar { display: none; }
+html[data-shell='phone'] .segmented button { flex: none; }
 
 /* ===== 在线搜索：手机上把筛选拆成两行 =====
  * 桌面上「单曲/歌单」和四个平台胶囊同在一行，手机上挤成一条 6 个控件，
