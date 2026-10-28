@@ -12,6 +12,7 @@ import { bridge, type ScanProgressPayload } from '../lib/bridge'
 import { KEYS, settings } from '../lib/settings'
 import { toast } from '../lib/toast'
 import { consumeLongPress, longPressProps } from '../lib/longPress'
+import { isCoarsePointer } from '../lib/shellMode'
 import { confirm } from '../lib/confirm'
 import { Cover } from '../components/Cover'
 import { VList } from '../components/VList'
@@ -208,24 +209,34 @@ export function LibraryPage({
     await p.scan('custom', dirs)
   }
 
-  const buildMenu = useCallback((track: LocalTrack, index: number): MenuItem[] => [
-    { id: 'play', label: '播放', icon: <IconPlay width={14} height={14} />, onSelect: () => p.playList(filtered, index) },
-    { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => p.addToQueue(track, 'next') },
-    { id: 'queue', label: '加入播放列表', icon: <IconPlus width={14} height={14} />, onSelect: () => p.addToQueue(track, 'end') },
-    { id: 'addpl', label: '加入歌单…', icon: <IconMusicNote width={14} height={14} />, onSelect: () => setAddTo([track.id]) },
-    { id: 'd1', label: '', divider: true, onSelect: () => {} },
-    { id: 'detail', label: '歌曲详情', icon: <IconLyric width={14} height={14} />, onSelect: () => onOpenDetail(track) },
-    { id: 'reveal', label: '在文件夹中显示', icon: <IconFolder width={14} height={14} />, onSelect: () => void bridge.revealInFolder(track.path) },
-    {
-      id: 'copy', label: '复制歌曲信息', icon: <IconLyric width={14} height={14} />,
-      onSelect: () => { void navigator.clipboard?.writeText(`${track.title} - ${track.artist}`) },
-    },
-    { id: 'd2', label: '', divider: true, onSelect: () => {} },
-    {
-      id: 'remove', label: '从曲库移除', danger: true, icon: <IconTrash width={14} height={14} />,
-      onSelect: () => void p.removeTrack(track.id),
-    },
-  ], [filtered, onOpenDetail, p])
+  const buildMenu = useCallback((track: LocalTrack, index: number): MenuItem[] => {
+    /*
+     * 「在文件夹中显示」是桌面专属动作：安卓没有资源管理器，点了只会什么都不发生。
+     * 手机菜单里干脆不出现——菜单项点了没反应比没有这一项更让人困惑。
+     */
+    const reveal: MenuItem = {
+      id: 'reveal', label: '在文件夹中显示', icon: <IconFolder width={14} height={14} />,
+      onSelect: () => void bridge.revealInFolder(track.path),
+    }
+    return [
+      { id: 'play', label: '播放', icon: <IconPlay width={14} height={14} />, onSelect: () => p.playList(filtered, index) },
+      { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => p.addToQueue(track, 'next') },
+      { id: 'queue', label: '加入播放列表', icon: <IconPlus width={14} height={14} />, onSelect: () => p.addToQueue(track, 'end') },
+      { id: 'addpl', label: '加入歌单…', icon: <IconMusicNote width={14} height={14} />, onSelect: () => setAddTo([track.id]) },
+      { id: 'd1', label: '', divider: true, onSelect: () => {} },
+      { id: 'detail', label: '歌曲详情', icon: <IconLyric width={14} height={14} />, onSelect: () => onOpenDetail(track) },
+      ...(isCoarsePointer ? [] : [reveal]),
+      {
+        id: 'copy', label: '复制歌曲信息', icon: <IconLyric width={14} height={14} />,
+        onSelect: () => { void navigator.clipboard?.writeText(`${track.title} - ${track.artist}`) },
+      },
+      { id: 'd2', label: '', divider: true, onSelect: () => {} },
+      {
+        id: 'remove', label: '从曲库移除', danger: true, icon: <IconTrash width={14} height={14} />,
+        onSelect: () => void p.removeTrack(track.id),
+      },
+    ]
+  }, [filtered, onOpenDetail, p])
 
   return (
     <div className={'page library-page' + (embedded ? ' embedded' : '')}>
@@ -390,9 +401,12 @@ function TrackRow({ track, index, playing, checked, onCheck, onRowClick, onDetai
       className={'track-row' + (playing ? ' playing' : '') + (checked ? ' selected' : '') + (index % 2 === 1 ? ' zebra' : '')}
       {...longPressProps(onCheck)}
       onClick={e => { if (consumeLongPress()) return; onRowClick(e) }}
-      onDoubleClick={onDetail}
+      /* 手机上快速点两下「播放」会被当成双击直接跳详情——手指场景不需要双击 */
+      onDoubleClick={isCoarsePointer ? undefined : onDetail}
       onContextMenu={e => { e.preventDefault(); onMenu(e) }}
-      title="单击播放 · 双击查看详情 · 长按多选 · 右键更多操作"
+      title={isCoarsePointer
+        ? '单击播放 · 长按多选 · 右侧「更多」打开菜单'
+        : '单击播放 · 双击查看详情 · 长按多选 · 右键更多操作'}
     >
       <span className="col-check">
         <button

@@ -54,8 +54,8 @@ html[data-shell='phone'] {
    */
   --safe-top: max(env(safe-area-inset-top, 0px), var(--sy-safe-top, 0px));
   --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--sy-safe-bottom, 0px));
-  /* 顶部 Tab 占位：上留白 8 + 胶囊 62 + 间隔 8 */
-  --phone-tab: 78px;
+  /* 顶部 Tab 占位：上留白 8 + 胶囊 70 + 间隔 8 */
+  --phone-tab: 86px;
   /* 底部播放条占位：底距 10 + 条 64 + 间隔 8 */
   --phone-dock: 82px;
 }
@@ -72,13 +72,13 @@ html[data-shell='phone'] .sidebar {
   top: calc(8px + var(--safe-top));
   bottom: auto;
   width: auto;
-  height: 62px;
+  height: 70px;
   flex-direction: row;
   align-items: center;
-  padding: 12px 14px;
+  padding: 10px 14px;
   gap: 4px;
   border: 1px solid rgba(255, 255, 255, 0.055);
-  border-radius: 36px;
+  border-radius: 38px;
   background: color-mix(in srgb, var(--sy-bg-base) 88%, transparent);
   backdrop-filter: blur(20px) saturate(180%) brightness(1.05);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.10);
@@ -95,17 +95,18 @@ html[data-shell='phone'] .sb-nav {
   width: 100%;
   align-items: center;
 }
-/* Tab 项：默认图标+小字（60% 灰）；当前项整颗淡底胶囊高亮 */
+/* Tab 项：默认图标+小字（60% 灰）；当前项整颗淡底胶囊高亮。
+   46 高是「胶囊 70 - 上下内边距 20」的结果，也是手指舒服的下限。 */
 html[data-shell='phone'] .sb-item {
   flex: 1 1 0;
   min-width: 0;
   flex-direction: column;
   justify-content: center;
-  gap: 2px;
-  height: 38px;
+  gap: 3px;
+  height: 46px;
   padding: 0 4px;
-  font-size: 10px;
-  border-radius: 19px;
+  font-size: 10.5px;
+  border-radius: 23px;
   color: var(--sy-text-3);
   letter-spacing: 0.01em;
 }
@@ -575,9 +576,9 @@ html[data-shell='phone'] .sr-detail-acts .primary-btn,
 html[data-shell='phone'] .sr-detail-acts .ghost-btn,
 html[data-shell='phone'] .plp-acts .primary-btn,
 html[data-shell='phone'] .plp-acts .ghost-btn {
-  height: 34px;
-  padding: 0 13px;
-  font-size: 12px;
+  height: 40px;
+  padding: 0 15px;
+  font-size: 13px;
   white-space: nowrap;
 }
 
@@ -639,3 +640,385 @@ html[data-shell='phone'] .track-row {
 @media (prefers-reduced-motion: reduce) {
   html[data-shell='phone'] .page-keep:not([hidden]) { animation: none; }
 }
+
+/* ==================================================================== */
+/* 触摸设备 · 手势与目标尺寸（安卓真机）                                  */
+/*                                                                      */
+/* 桌面那套尺寸是照鼠标给的：图标按钮 26、次要按钮 30、分段控件 26、      */
+/* 勾选框 15、开关 36×20。鼠标点 26px 毫无压力，手指不行——安卓的触摸    */
+/* 目标下限是 48dp，密排列表还得再加余量，否则按下去经常落在隔壁那行。    */
+/*                                                                      */
+/* 这一节只做三件事：                                                    */
+/*   ① 把滚动/缩放收回到「只有 .page 能滚」；                            */
+/*   ② 把常用控件的视觉尺寸抬到 40、热区补到 48；                        */
+/*   ③ 把「hover 才出现」的东西在触摸屏上改成常显。                      */
+/* ==================================================================== */
+
+/* ---------- ① 手势：整页不滚、不缩、不出橡皮筋 ---------- */
+
+/*
+ * 页面本身绝对不能成为滚动容器。
+ *
+ * 真机上「整页可以左右上下拖」有两个来源，缺一不可：
+ *   · WebView 认为文档比视口宽 → 建立可平移画布（已在 MainActivity 关掉
+ *     supportZoom / overScroll，并靠这一条把文档宽度锁死）；
+ *   · html/body 的 overflow 是 visible → 文档跟着内容一起滚。
+ * 两者都堵上之后，滚动只发生在 .page 里，界面就像原生 App 一样「不动」。
+ */
+html[data-shell='phone'],
+html[data-shell='tablet'],
+html[data-shell='car'] {
+  overflow: hidden;
+  overscroll-behavior: none;
+  /* 系统「字体大小」会整体放大 px 字号，布局跟着崩，这里锁死 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+html[data-shell='phone'] body,
+html[data-shell='tablet'] body,
+html[data-shell='car'] body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  width: 100%;
+  max-width: 100%;
+  /* 双击不再缩放（WebView 侧也关了），单击不再等 300ms */
+  touch-action: manipulation;
+}
+
+/* 内部滚动容器到边界就停，别把滚动链传出去 */
+html[data-shell='phone'] .page,
+html[data-shell='tablet'] .page,
+html[data-shell='car'] .page {
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ---------- ② 触摸目标尺寸 ---------- */
+
+/*
+ * 热区用 padding 撑而不是把视觉做大：图标本体保持原大小，
+ * 外框变大，看上去不会显得「按钮胖了一圈」，但手指有地方落。
+ */
+html[data-shell='phone'] .icon-btn,
+html[data-shell='tablet'] .icon-btn,
+html[data-shell='car'] .icon-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+}
+html[data-shell='phone'] .icon-btn svg,
+html[data-shell='tablet'] .icon-btn svg,
+html[data-shell='car'] .icon-btn svg {
+  width: 19px;
+  height: 19px;
+}
+
+html[data-shell='phone'] .primary-btn,
+html[data-shell='tablet'] .primary-btn {
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 12px;
+  font-size: 13.5px;
+}
+html[data-shell='phone'] .ghost-btn,
+html[data-shell='tablet'] .ghost-btn {
+  height: 38px;
+  padding: 0 15px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+html[data-shell='phone'] .link-btn,
+html[data-shell='tablet'] .link-btn {
+  /* 11.5px 的行内文字按钮在手机上几乎点不中，靠 padding 补、字号也抬一点 */
+  font-size: 12.5px;
+  padding: 8px 6px;
+}
+
+html[data-shell='phone'] .segmented,
+html[data-shell='tablet'] .segmented { padding: 4px; }
+html[data-shell='phone'] .segmented button,
+html[data-shell='tablet'] .segmented button {
+  height: 34px;
+  padding: 0 16px;
+  font-size: 13px;
+}
+
+html[data-shell='phone'] .toggle,
+html[data-shell='tablet'] .toggle {
+  width: 46px;
+  height: 26px;
+}
+/* 滑块必须跟着轨道一起放大，否则 46 宽的轨道里塞一颗 14 的豆，右半边全空 */
+html[data-shell='phone'] .toggle::after,
+html[data-shell='tablet'] .toggle::after {
+  width: 20px;
+  height: 20px;
+  top: 2px;
+  left: 2px;
+}
+html[data-shell='phone'] .toggle[aria-checked='true']::after,
+html[data-shell='tablet'] .toggle[aria-checked='true']::after {
+  transform: translateX(21px);
+}
+
+html[data-shell='phone'] .play-primary,
+html[data-shell='tablet'] .play-primary {
+  width: 46px;
+  height: 46px;
+}
+
+/* 勾选框：15px 是桌面的鼠标尺寸，手指根本按不中 */
+html[data-shell='phone'] .cbx,
+html[data-shell='tablet'] .cbx {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+html[data-shell='phone'] .cbx svg { width: 13px; height: 13px; }
+html[data-shell='phone'] .col-check { width: 24px; }
+
+/* ---------- ③ 触摸屏没有 hover：别把功能藏在悬停里 ---------- */
+
+/*
+ * 桌面靠 .track-row:hover 才让「更多」浮现；手机上永远 hover 不到，
+ * 于是这一列在用户看来根本不存在——功能做了，但没人能用。
+ */
+html[data-shell='phone'] .row-more,
+html[data-shell='tablet'] .row-more,
+html[data-shell='car'] .row-more,
+html[data-shell='phone'] .plp-rm,
+html[data-shell='tablet'] .plp-rm,
+html[data-shell='car'] .plp-rm,
+html[data-shell='phone'] .plp-cbx,
+html[data-shell='tablet'] .plp-cbx,
+html[data-shell='car'] .plp-cbx {
+  opacity: 1;
+}
+
+html[data-shell='phone'] .row-more {
+  /* 34 的方框 + 行高 64，是这一行最容易误触的地方，给足 */
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+}
+
+/* 首页歌单卡右下角的播放圆钮：同样只在 hover 出现 */
+html[data-shell='phone'] .home-play,
+html[data-shell='tablet'] .home-play,
+html[data-shell='car'] .home-play {
+  opacity: 1;
+  transform: none;
+  width: 36px;
+  height: 36px;
+}
+html[data-shell='phone'] .home-play svg { width: 16px; height: 16px; }
+
+/* ---------- ④ 曲库行：桌面的 8 列在手机上塞不下 ---------- */
+
+/*
+ * 桌面一行是「勾选 / 序号 / 封面 / 歌名 / 歌手·专辑 / 格式 / 时长 / 更多」，
+ * 8 列并排。412dp 的屏幕上这一行会被压成一条缝，360dp 的真机更糟——
+ * 这正是「横向能拖动」的直接原因（文档比视口宽）。
+ *
+ * 手机改成两行网格：封面横跨两行，右边第一行歌名、第二行歌手，尾列是「更多」。
+ * 顺序 / 格式 / 时长三列在手机上没有任何决策价值，直接隐藏。
+ */
+html[data-shell='phone'] .track-row {
+  display: grid;
+  grid-template-columns: 24px 44px minmax(0, 1fr) 38px;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    'check cover title more'
+    'check cover artist more';
+  column-gap: 10px;
+  row-gap: 1px;
+  height: auto;
+  min-height: 66px;
+  padding: 8px 10px;
+  align-items: center;
+}
+html[data-shell='phone'] .track-row .col-check { grid-area: check; justify-content: center; }
+html[data-shell='phone'] .track-row .cover-art { grid-area: cover; }
+html[data-shell='phone'] .track-row .col-title { grid-area: title; align-self: end; min-width: 0; }
+html[data-shell='phone'] .track-row .col-artist { grid-area: artist; align-self: start; min-width: 0; font-size: 11.5px; }
+html[data-shell='phone'] .track-row .row-more { grid-area: more; }
+html[data-shell='phone'] .track-row .col-idx,
+html[data-shell='phone'] .track-row .col-fmt,
+html[data-shell='phone'] .track-row .col-dur { display: none; }
+
+/* 序号没了，「正在播放」改用左侧一道强调色竖线，比看不见的 eq 动画清楚 */
+html[data-shell='phone'] .track-row.playing {
+  background: color-mix(in srgb, var(--sy-accent) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--sy-accent);
+}
+
+html[data-shell='phone'] .plp-row {
+  height: auto;
+  min-height: 62px;
+  padding: 8px 10px;
+}
+html[data-shell='phone'] .plp-row .plp-idx,
+html[data-shell='phone'] .plp-row .plp-dur { display: none; }
+html[data-shell='phone'] .plp-row .plp-title { font-size: 13.5px; }
+html[data-shell='phone'] .plp-row .plp-sub { font-size: 11.5px; }
+
+/* 行高变了，content-visibility 的占位估值要跟着改，否则滚动条长度会跳 */
+html[data-shell='phone'] .plp-row,
+html[data-shell='phone'] .track-row {
+  contain-intrinsic-size: auto 66px;
+}
+
+/* ---------- ⑤ 在线歌曲行（搜索 / 歌单详情）：收列 + 补入口 ---------- */
+
+/*
+ * 这一行桌面是「序号 / 封面 / 歌名·歌手·专辑 / 平台 / 时长 / 三个悬停按钮」。
+ * 手机上一是塞不下（横向溢出的另一个来源），二是那三个按钮 hover 才出现，
+ * 手指永远看不到——等于播放/下一首/下载在手机上不存在。
+ */
+html[data-shell='phone'] .sr-row,
+html[data-shell='tablet'] .sr-row {
+  gap: 10px;
+  height: auto;
+  min-height: 62px;
+  padding: 8px 10px;
+}
+html[data-shell='phone'] .sr-row .sr-idx,
+html[data-shell='phone'] .sr-row .sr-dur,
+html[data-shell='phone'] .sr-row .sr-badge { display: none; }
+html[data-shell='phone'] .sr-cover { width: 44px; height: 44px; border-radius: 10px; }
+
+/* 专辑名在手机上没地方放，只留歌手；完整信息在详情页 */
+html[data-shell='phone'] .sr-meta .sr-dot,
+html[data-shell='phone'] .sr-meta .sr-dot + span { display: none; }
+html[data-shell='phone'] .sr-meta { font-size: 11.5px; }
+
+/* 三个悬停按钮收成一颗（最后一颗：下载 / 加入队列），其余走长按菜单 */
+html[data-shell='phone'] .sr-acts,
+html[data-shell='tablet'] .sr-acts { opacity: 1; }
+html[data-shell='phone'] .sr-acts > .icon-btn { display: none; }
+html[data-shell='phone'] .sr-acts > .icon-btn:last-child { display: grid; }
+
+/* 本地歌单行：桌面右键才有的「更多」，手机上给一颗常显的 ⋮ */
+.plp-more { display: none; }
+html[data-shell='phone'] .plp-more,
+html[data-shell='tablet'] .plp-more,
+html[data-shell='car'] .plp-more { display: grid; }
+/* × 挪进菜单，行尾只留一颗按钮，360dp 上才不挤 */
+html[data-shell='phone'] .plp-rm { display: none; }
+
+/* ---------- ⑥ 进度条：2px 的线，手指拖不住 ---------- */
+
+/*
+ * 播放条顶上的进度线视觉只有 2px，指针事件绑在 .track 上。
+ * 鼠标能精准命中 2px，手指不能——手机上最常见的动作（拖进度）反而做不了。
+ * 这里把 .track 的热区撑到 22px，用渐变只在中间画 2px 的线，视觉不变。
+ */
+html[data-shell='phone'] .playbar .progress .track {
+  height: 22px;
+  border-radius: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 0, transparent 10px,
+    rgba(255, 255, 255, 0.10) 10px, rgba(255, 255, 255, 0.10) 12px,
+    transparent 12px
+  );
+}
+html[data-shell='phone'] .playbar .progress .fill,
+html[data-shell='phone'] .playbar .progress .fill-buf {
+  inset: 10px auto 10px 0;
+  border-radius: 0;
+}
+/* 触摸屏上 :hover 会「粘住」不放，放大效果会一直留着 */
+html[data-shell='phone'] .playbar .progress .track.hover,
+html[data-shell='phone'] .playbar .progress .track.dragging { transform: none; }
+
+html[data-shell='phone'] .track-row .t-name { font-size: 14px; }
+html[data-shell='phone'] .imm-close { width: 42px; height: 42px; }
+
+/* 设置页是普通 div 滚动（不是虚拟列表），横向也裁掉：真机上能左右拖多半是它 */
+html[data-shell='phone'] .settings-page { overflow-x: hidden; }
+
+/* ---------- ⑦ 零散小控件：一个个都点不中 ---------- */
+
+/*
+ * 探针在 360dp 下扫出来的名单，都是「桌面上刚好、手指上太小」：
+ * 平台胶囊 28、收藏星标 25、问号 15、平台登录 20、播放全部 28。
+ * 这里逐个补到 32~44（顶部 Tab 的尺寸在它自己那段里改）。
+ */
+
+/* 次要按钮跟主按钮同高，一排看起来才齐 */
+html[data-shell='phone'] .ghost-btn { height: 40px; }
+
+html[data-shell='phone'] .sq-plat,
+html[data-shell='phone'] .sr-plat,
+html[data-shell='phone'] .sr-tab {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+/* 收藏星标压在封面右上角，25px 手指按十次中一次；变大后往内收一点 */
+html[data-shell='phone'] .sq-fav {
+  width: 34px;
+  height: 34px;
+  top: 6px;
+  right: 6px;
+}
+
+/* 问号：15px 是桌面尺寸，手指按十次中一次。直接放大到 26，视觉上也更像按钮 */
+html[data-shell='phone'] .help-dot {
+  width: 26px;
+  height: 26px;
+  margin-left: 7px;
+  font-size: 12px;
+}
+
+html[data-shell='phone'] .home-plat-btn {
+  padding: 10px;
+  font-size: 12.5px;
+}
+html[data-shell='phone'] .home-band-play {
+  min-height: 40px;
+  padding: 9px 16px;
+  font-size: 12.5px;
+}
+html[data-shell='phone'] .sq-sec-more { padding: 10px 2px; }
+
+/* 播放页的音质芯片 */
+html[data-shell='phone'] .imm-chip {
+  height: 34px;
+  padding: 0 13px;
+  font-size: 12px;
+}
+
+/* 分段控件再抬一档：34 是「能点」，38 才是「好点」 */
+html[data-shell='phone'] .segmented button { height: 38px; }
+
+/* 播放条左侧「曲名区」= 点开播放页的入口，整块都要能按 */
+html[data-shell='phone'] .pb-left { min-height: 48px; }
+
+/* 搜索页「D」这类小圆按钮 */
+html[data-shell='phone'] .sr-ghost {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+
+/* 行内文字按钮（「打开」「云开发环境：…」）：字号已抬，padding 再补一点才够 40 */
+html[data-shell='phone'] .link-btn { padding: 14px 6px; }
+
+/* ---------- ⑧ 搜索页：桌面靠回车，手机要给一颗按钮 ---------- */
+
+.search-go { display: none; }
+html[data-shell='phone'] .search-go,
+html[data-shell='tablet'] .search-go {
+  display: inline-flex;
+  flex: none;
+  padding: 0 16px;
+}
+/* 只作用于搜索页：首页那排「新建/导入/刷新/登录」保持原样，别被撑成整行 */
+html[data-shell='phone'] .search-page .lib-actions { width: 100%; }
+html[data-shell='phone'] .search-page .search-box { flex: 1; min-width: 0; }

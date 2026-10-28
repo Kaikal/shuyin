@@ -33,6 +33,13 @@ export const IconMusicNote = wrap(<><path d="M6 12.5V4l7-1.4v8.6" /><circle cx="
 export const IconClose = wrap(<path d="M3.4 3.4 10.6 10.6M10.6 3.4 3.4 10.6" />, '0 0 14 14')
 export const IconGrip = wrap(<g fill="currentColor" stroke="none"><circle cx="5" cy="3.6" r="1" /><circle cx="9" cy="3.6" r="1" /><circle cx="5" cy="7" r="1" /><circle cx="9" cy="7" r="1" /><circle cx="5" cy="10.4" r="1" /><circle cx="9" cy="10.4" r="1" /></g>, '0 0 14 14')
 export const IconPlus = wrap(<path d="M9 3.2v11.6M3.2 9h11.6" />, '0 0 18 18')
+/** 行尾「更多」：触摸屏上用来替代右键菜单 */
+export const IconMore = wrap(
+  <g fill="currentColor" stroke="none">
+    <circle cx="3.4" cy="9" r="1.35" /><circle cx="9" cy="9" r="1.35" /><circle cx="14.6" cy="9" r="1.35" />
+  </g>,
+  '0 0 18 18',
+)
 export const IconFolder = wrap(<><path d="M2.5 5.2A1.7 1.7 0 0 1 4.2 3.5h2.4l1.7 1.7h7.5A1.7 1.7 0 0 1 17.5 7v7.3a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7V5.2Z" /></>, '0 0 20 20')
 export const IconRefresh = wrap(<><path d="M13.8 3.7v3.5h-3.5" /><path d="M2.9 8.3A5.6 5.6 0 0 1 13.4 6l.4 1.2" /><path d="M2.2 12.3v-3.5h3.5" transform="translate(0.7 0)" /><path d="M13.1 7.7A5.6 5.6 0 0 1 2.6 10l-.4-1.2" transform="translate(0 4.3) scale(0.94)" /></>, '0 0 16 16')
 export const IconDownload = wrap(<><path d="M8 2.5v8M4.8 7.6 8 10.8l3.2-3.2" /><path d="M2.8 13.5h10.4" /></>, '0 0 16 16')

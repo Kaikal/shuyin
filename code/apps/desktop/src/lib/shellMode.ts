@@ -76,3 +76,16 @@ export function useShell(): ShellMode {
 
 /** 触摸设备（安卓 / 触屏），用来关掉「悬停才出现」这类交互 */
 export const isTouch = isAndroid || (typeof window !== 'undefined' && 'ontouchstart' in window)
+
+/**
+ * 主输入设备是手指吗？
+ *
+ * 比 `isTouch` 更准：触屏笔记本外接了鼠标时 `(pointer: coarse)` 是 false，
+ * 而 `ontouchstart` 依然在 window 上——那种机器上双击、右键都该保留。
+ * 安卓壳里恒为 true。用它决定「双击进详情」这类桌面习惯要不要绑。
+ */
+export const isCoarsePointer = isAndroid || (
+  typeof window !== 'undefined' &&
+  !!window.matchMedia &&
+  window.matchMedia('(pointer: coarse)').matches
+)

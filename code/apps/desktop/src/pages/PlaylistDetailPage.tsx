@@ -18,6 +18,7 @@ import { useDownloads } from '../lib/DownloadsProvider'
 import { apiFor, dailyRecommend, platformName, toLocalTrack, toLocalTracks } from '../lib/online'
 import { usePlaylists } from '../lib/localPlaylists'
 import { toast } from '../lib/toast'
+import { consumeLongPress, longPressProps } from '../lib/longPress'
 import {
   IconCheck, IconClose, IconDownload, IconLyric, IconMusicNote, IconNext, IconPlay, IconPlus,
   IconStar,
@@ -275,7 +276,12 @@ export function PlaylistDetailPage({ source, id, name, backLabel = '返回搜索
                 key={`${sg.id}:${i}`}
                 className={'sr-row' + (live ? ' live' : '') + (on ? ' selected' : '')}
                 title="点击播放 · Ctrl 点多选 · 右键更多操作"
-                onClick={e => onRowClick(sg, i, e)}
+                onClick={e => { if (consumeLongPress()) return; onRowClick(sg, i, e) }}
+                {...longPressProps(at => {
+                  // 触摸屏没有右键：长按 = 选中这一行并弹出同一份菜单
+                  setSel(new Set([key])); anchor.current = i
+                  setMenu({ x: at.x, y: at.y, song: sg })
+                })}
                 onContextMenu={e => {
                   e.preventDefault()
                   // 右键一行要是没在多选里，先把选择切成这一行——跟资源管理器一致
