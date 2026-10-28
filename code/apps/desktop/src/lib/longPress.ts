@@ -19,16 +19,21 @@ const HOLD_MS = 480
 let timer = 0
 let firedAt = 0
 
-export function longPressProps(fire: () => void) {
+/** 长按落点。菜单要贴着手指弹，不能弹到屏幕另一头去 */
+export type HoldPoint = { x: number; y: number }
+
+export function longPressProps(fire: (at: HoldPoint) => void) {
   const stop = () => window.clearTimeout(timer)
+  let at: HoldPoint = { x: 0, y: 0 }
   return {
     onPointerDown(e: ReactPointerEvent<HTMLElement>) {
       if (e.pointerType !== 'touch') return
       firedAt = 0
       stop()
+      at = { x: e.clientX, y: e.clientY }
       timer = window.setTimeout(() => {
         firedAt = Date.now()
-        fire()
+        fire(at)
       }, HOLD_MS)
     },
     onPointerUp: stop,

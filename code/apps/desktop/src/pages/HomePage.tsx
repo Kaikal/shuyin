@@ -22,6 +22,7 @@ import { KEYS, settings } from '../lib/settings'
 import { loadProfile, type CloudProfile } from '../lib/cloud'
 import { toast } from '../lib/toast'
 import { confirm } from '../lib/confirm'
+import { consumeLongPress, longPressProps } from '../lib/longPress'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { Modal } from '../components/Modal'
 import { HelpTip } from '../components/HelpTip'
@@ -406,8 +407,9 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                       role="button"
                       tabIndex={0}
                       title={`${l.name} · ${tracks.length} 首`}
-                      onClick={() => onOpenLocalPlaylist(l.id)}
+                      onClick={() => { if (consumeLongPress()) return; onOpenLocalPlaylist(l.id) }}
                       onKeyDown={e => { if (e.key === 'Enter') onOpenLocalPlaylist(l.id) }}
+                      {...longPressProps(at => setMenu({ x: at.x, y: at.y, list: l }))}
                       onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, list: l }) }}
                     >
                       <div className="home-cover">
@@ -483,7 +485,11 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                     className="home-card"
                     role="button"
                     tabIndex={0}
-                    onClick={() => onOpenOnlinePlaylist({ source: f.source, id: f.id, name: f.name })}
+                    onClick={() => {
+                      if (consumeLongPress()) return
+                      onOpenOnlinePlaylist({ source: f.source, id: f.id, name: f.name })
+                    }}
+                    {...longPressProps(at => setFavMenu({ x: at.x, y: at.y, key: f.key, name: f.name }))}
                     onContextMenu={e => { e.preventDefault(); setFavMenu({ x: e.clientX, y: e.clientY, key: f.key, name: f.name }) }}
                   >
                     <div className="home-cover">

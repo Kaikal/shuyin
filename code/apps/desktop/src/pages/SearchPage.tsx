@@ -20,6 +20,7 @@ import { usePlayer } from '../lib/PlayerProvider'
 import { apiFor, onlineId, platformName, toLocalTrack } from '../lib/online'
 import { KEYS, settings } from '../lib/settings'
 import { toast } from '../lib/toast'
+import { consumeLongPress, longPressProps } from '../lib/longPress'
 import { usePlaylists } from '../lib/localPlaylists'
 import { IconNext, IconPause, IconPlay, IconPlus, IconSearch, IconStar } from '../components/icons'
 import { OnlineSongMenu } from '../components/OnlineSongMenu'
@@ -201,6 +202,8 @@ export function SearchPage({ onOpenPlaylist }: Props) {
               placeholder="搜歌名、歌手、专辑"
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') submit() }}
+              /* 手机键盘右下角显示「搜索」而不是「换行」 */
+              enterKeyHint="search"
               spellCheck={false}
             />
             {input && (
@@ -209,6 +212,8 @@ export function SearchPage({ onOpenPlaylist }: Props) {
               </button>
             )}
           </div>
+          {/* 桌面按回车就行，手机上需要一颗看得见的按钮 */}
+          <button className="primary-btn search-go" onClick={() => submit()}>搜索</button>
         </div>
       </header>
 
@@ -294,7 +299,8 @@ export function SearchPage({ onOpenPlaylist }: Props) {
                       title={live ? '点一下暂停 / 继续' : '点击播放 · 右键更多操作'}
                       /* 点行就播：不必精确点到右侧那个小三角（双击同样有效）。
                          用户点的是一首歌，不是一行表格。 */
-                      onClick={() => playSong(row)}
+                      onClick={() => { if (consumeLongPress()) return; playSong(row) }}
+                      {...longPressProps(at => setMenu({ x: at.x, y: at.y, song: row.song }))}
                       onContextMenu={e => {
                         e.preventDefault()
                         setMenu({ x: e.clientX, y: e.clientY, song: row.song })

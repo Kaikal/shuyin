@@ -18,9 +18,10 @@ import { AddToPlaylistDialog } from '../components/AddToPlaylistDialog'
 import { toast } from '../lib/toast'
 import { confirm } from '../lib/confirm'
 import { consumeLongPress, longPressProps } from '../lib/longPress'
+import { isCoarsePointer } from '../lib/shellMode'
 import { bridge } from '../lib/bridge'
 import {
-  IconCheck, IconClose, IconFolder, IconLyric, IconMusicNote, IconNext, IconPlay, IconPlus,
+  IconCheck, IconClose, IconFolder, IconLyric, IconMore, IconMusicNote, IconNext, IconPlay, IconPlus,
   IconSearch, IconTrash,
 } from '../components/icons'
 
@@ -295,7 +296,7 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
                   className={'plp-row' + (live ? ' live' : '') + (on ? ' selected' : '')}
                   {...longPressProps(() => toggleOne(t.id, i))}
                   onClick={e => { if (consumeLongPress()) return; onRowClick(t, i, e) }}
-                  onDoubleClick={() => onOpenDetail(t)}
+                  onDoubleClick={isCoarsePointer ? undefined : () => onOpenDetail(t)}
                   onContextMenu={e => {
                     e.preventDefault()
                     // 右键一行要是没在多选里，先把选择切成这一行——跟资源管理器一致
@@ -319,6 +320,17 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
                   </span>
                   <span className="pill">{t.format}</span>
                   <span className="plp-dur num">{fmtTime(t.duration)}</span>
+                  <button
+                    className="icon-btn plp-more" aria-label={'更多操作：' + t.title}
+                    onClick={e => {
+                      e.stopPropagation()
+                      const r = e.currentTarget.getBoundingClientRect()
+                      // 贴在按钮左下角展开，ContextMenu 自己会收敛进屏幕
+                      setMenu({ x: r.left, y: r.bottom, track: t, index: i })
+                    }}
+                  >
+                    <IconMore width={15} height={15} />
+                  </button>
                   <button
                     className="icon-btn plp-rm" aria-label={'从歌单移除 ' + t.title}
                     title="从歌单移除（不会删文件）"

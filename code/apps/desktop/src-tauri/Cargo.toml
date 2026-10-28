@@ -1,6 +1,6 @@
 [package]
 name = "shuyin-desktop"
-version = "0.5.9"
+version = "0.5.10"
 description = "疏音 · 本地音乐播放器（桌面端）"
 authors = ["shuyin"]
 edition = "2021"

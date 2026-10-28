@@ -13,6 +13,8 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
+import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
@@ -140,9 +142,25 @@ class MainActivity : Activity() {
             useWideViewPort = true
             loadWithOverviewMode = false
             textZoom = 100
+            /*
+             * 禁掉 WebView 自己的缩放与滚动。
+             *
+             * 真机上「整个界面能左右上下拖」不是页面里有宽元素那么简单：
+             * useWideViewPort 一旦认为文档比视口宽，WebView 就建立一个可平移的
+             * 画布，双指还能再缩放。这些手势在 App 里全是误触——横向拖走半个
+             * 界面、纵向拖出一片底色，用户以为界面错位。
+             * 页面内的滚动一律交给 .page 这个自绘容器，WebView 只负责渲染。
+             */
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
             // 音源脚本靠 Worker 跑（洛雪脚本的宿主约定），必须开
             setSupportMultipleWindows(false)
         }
+        // 到边界别再回弹/发光：那是「还能继续滑」的暗示
+        web.overScrollMode = View.OVER_SCROLL_NEVER
+        web.isHorizontalScrollBarEnabled = false
+        web.isVerticalScrollBarEnabled = false
         web.setBackgroundColor(0xFF0A0B0F.toInt())
 
         bridge = Bridge(web)
@@ -159,6 +177,14 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 Log.i("Shuyin", "page finished: $url")
+                /*
+                 * 必须在这里再推一次。
+                 * onCreate 里那次跑在页面还没加载完的时刻，evaluateJavascript 写在
+                 * about:blank 上，随后导航到真页面就冲掉了——日志里能看到
+                 * 「insets: top=41dp」出现在「page finished」之前，而页面里读到的
+                 * --sy-safe-top 是空的，顶栏于是被状态栏压住。
+                 */
+                pushInsets()
             }
         }
 
@@ -177,6 +203,9 @@ class MainActivity : Activity() {
         // 系统栏可能压在 WebView 上（沉浸页尤其明显），把真实内缩量告诉前端
         web.post { pushInsets() }
 
+        // 键盘弹出 / 旋转 / 分屏都会改 WebView 尺寸，安全区要跟着重算（否则播放条被键盘盖住）
+        web.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> pushInsets() }
+
         askPermissions()
     }
 
@@ -186,6 +215,12 @@ class MainActivity : Activity() {
      * 为什么不用 env(safe-area-inset-*)：那套要 viewport-fit=cover 且 WebView 支持，
      * 实测这里恒为 0。为什么不在 Kotlin 里给 WebView 加 padding：那样连背景图都会被挤下去。
      * 量屏幕坐标最直接——不管系统栏是浮在上面还是把窗口挤小了，算出来的就是真实差值。
+     *
+     * ⚠️ 只量坐标不够：主题里状态栏 / 导航栏都是透明的（styles.xml 的
+     * statusBarColor=transparent + windowDrawsSystemBarBackgrounds），WebView 实际从
+     * 屏幕 y=0 铺到底，`getLocationOnScreen` 给出 0 —— 但状态栏确实浮在内容上面。
+     * 只信坐标的话 safe-top 恒为 0，手机上顶栏就被状态栏压住（「顶部按钮被挡住」）。
+     * 所以再取一次系统栏 / 刘海的实际高度，两个取大的：谁大听谁的。
      */
     private fun pushInsets() {
         val loc = IntArray(2)
@@ -196,15 +231,36 @@ class MainActivity : Activity() {
         } else {
             @Suppress("DEPRECATION") resources.displayMetrics.heightPixels
         }
-        val top = (loc[1] / density).toInt().coerceAtLeast(0)
-        val bottom = ((screenH - loc[1] - web.height) / density).toInt().coerceAtLeast(0)
-        Log.i("Shuyin", "insets: top=${top}dp bottom=${bottom}dp webH=${web.height}")
+
+        // 系统栏 + 刘海的真实高度（dp 像素）。透明状态栏下这就是被盖住的那一截
+        var barsTop = 0
+        var barsBottom = 0
+        if (Build.VERSION.SDK_INT >= 30) {
+            val insets = window.windowManager.currentWindowMetrics.windowInsets
+                .getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+            barsTop = insets.top
+            barsBottom = insets.bottom
+        } else {
+            barsTop = dimenPx("status_bar_height")
+            barsBottom = dimenPx("navigation_bar_height")
+        }
+
+        val top = (maxOf(loc[1], barsTop) / density).toInt().coerceAtLeast(0)
+        val bottom = (maxOf(screenH - loc[1] - web.height, barsBottom) / density)
+            .toInt().coerceAtLeast(0)
+        Log.i("Shuyin", "insets: top=${top}dp bottom=${bottom}dp webH=${web.height} bars=${barsTop}x${barsBottom}")
         web.evaluateJavascript(
             "(()=>{const s=document.documentElement.style;" +
                 "s.setProperty('--sy-safe-top','${top}px');" +
                 "s.setProperty('--sy-safe-bottom','${bottom}px');})()",
             null,
         )
+    }
+
+    /** 老系统的系统栏高度只能查 dimens */
+    private fun dimenPx(name: String): Int {
+        val id = resources.getIdentifier(name, "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else 0
     }
 
     /* ---------------- 权限 ---------------- */

@@ -576,7 +576,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         <div className="about">
           <span className="about-name">疏音</span>
           <span className="about-tag">疏影横斜，澄澈之音</span>
-          <span className="about-ver num">v0.5.9 · 第二阶段</span>
+          <span className="about-ver num">v0.5.10 · 第二阶段</span>
         </div>
       </section>
 
