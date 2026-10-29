@@ -1,0 +1,13 @@
+{
+  "version": "0.5.11",
+  "android": "0.6.4",
+  "date": "2026-10-29",
+  "notes": [
+    "音乐桌面：修掉「盖住桌面图标」——挂载后被 show() 刷回弹窗样式，窗口浮到了图标层上面",
+    "新增启动检查更新：发现新版本在应用内弹窗提示",
+    "设置页「关于」可以直接检查更新"
+  ],
+  "url": "https://gitee.com/ghpgitee/shuyin",
+  "android_url": "https://gitee.com/ghpgitee/shuyin",
+  "force": false
+}

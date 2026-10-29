@@ -149,30 +149,55 @@ pub fn attach(hwnd: HWND) -> Attach {
         }
         let (wpx, hpx) = (rc.right - rc.left, rc.bottom - rc.top);
 
-        // 顶层弹窗 → 子窗口（跨进程 SetParent 前必须先改样式）
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_POPUP) | WS_CHILD);
-        if let Err(e) = SetParent(hwnd, Some(host)) {
-            return Attach::fail(format!("SetParent fail {e}"));
-        }
         // 关键：24H2 要插到 DefView **之后**（= DefView 之下、壁纸 WorkerW 之上）
         let after = insert_after.unwrap_or(HWND_TOP);
-        let _ = SetWindowPos(hwnd, Some(after), 0, 0, wpx, hpx, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
-        let parent = GetParent(hwnd).unwrap_or_default();
-        let ok = !parent.is_invalid() && parent == host;
-        Attach {
-            ok,
-            detail: format!(
-                "host={}({}) {}x{} parent={} after={}",
+        /*
+         * 做两遍，并且**每遍都把样式写回去**。
+         *
+         * tao 的 `WebviewWindow::show()` 会把窗口 flags 整体重刷（顶层窗口按 WS_POPUP + WS_VISIBLE
+         * 重写样式），而它是在挂载**之后**调的（见 musicdesk_open）。只挂一次的结果就是：
+         * SetParent 仍在（窗口列进了 Progman 的子窗口表），但 WS_CHILD 被抹掉 →
+         * 它按弹窗自己画，Z 序跑到 SHELLDLL_DefView **前面**，把桌面图标整块盖住，
+         * 双击图标当然没反应。日志里表现为 `child=false` 且排在第 [0] 位。
+         *
+         * 现在：写样式 → SetParent → **再写一次样式**（覆盖 show 的副作用）→ 定 Z 序，
+         * 然后按「父窗口 == host 且 WS_CHILD 在」验收，不合格重来一遍。
+         */
+        let mut last = String::new();
+        for attempt in 0..2 {
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_POPUP) | WS_CHILD);
+            // 每一遍都重设父窗口：show() 有可能把窗口摘回顶层（父窗口变 NULL）
+            if let Err(e) = SetParent(hwnd, Some(host)) {
+                if attempt == 1 {
+                    return Attach::fail(format!("SetParent fail {e}"));
+                }
+            }
+            // show() 刷过样式的话，这一步把 WS_CHILD 抢回来
+            let style2 = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (style2 & !WS_POPUP) | WS_CHILD);
+            let _ = SetWindowPos(hwnd, Some(after), 0, 0, wpx, hpx, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+            let parent = GetParent(hwnd).unwrap_or_default();
+            let now = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let parent_ok = !parent.is_invalid() && parent == host;
+            let child_ok = (now & WS_CHILD) != 0;
+            last = format!(
+                "host={}({}) {}x{} parent={} child={} attempt={}",
                 class_of(host),
                 host.0 as isize,
                 wpx,
                 hpx,
                 class_of(parent),
-                if insert_after.is_some() { "defview" } else { "top" }
-            ),
+                if child_ok { 1 } else { 0 },
+                attempt + 1,
+            );
+            if parent_ok && child_ok {
+                return Attach { ok: true, detail: last };
+            }
         }
+        Attach { ok: false, detail: last }
     }
 }
 

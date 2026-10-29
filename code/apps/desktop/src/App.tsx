@@ -42,6 +42,8 @@ import { KEYS, settings } from './lib/settings'
 import { toggleMainWindow, useGlobalHotkeys } from './lib/hotkeys'
 import { ToastHost } from './components/ToastHost'
 import { ConfirmHost } from './components/ConfirmHost'
+import { UpdateDialog } from './components/UpdateDialog'
+import { autoCheckUpdate, openDownload, skipVersion, type UpdateInfo } from './lib/update'
 
 /**
  * 一个在线歌单的定位信息（平台 + id + 名字）。
@@ -78,6 +80,8 @@ export function App() {
   const [queueOpen, setQueueOpen] = useState(false)
   const [detail, setDetail] = useState<LocalTrack | null>(null)
   const [nowOpen, setNowOpen] = useState(false)
+  /** 有新版本时这里放更新信息，弹窗就靠它开 */
+  const [upd, setUpd] = useState<UpdateInfo | null>(null)
   const [specStyle] = useSpectrumStyle()
   const [specPos] = useSpectrumPos()
   /* 顶部频谱是覆盖层，内容区得往下让一截，否则会压住页面大标题 */
@@ -394,6 +398,17 @@ export function App() {
     }
   }), [pushDesk, closeDesk])
 
+  /* ---------- 检查更新 ----------
+   * 启动 4 秒后再查：先把首屏和曲库扫描让出来，别跟它们抢带宽。
+   * 12 小时内只查一次；点过「以后再说」的版本不再提（见 lib/update.ts）。 */
+  useEffect(() => {
+    if (!bridge.isNative) return
+    const t = window.setTimeout(() => {
+      void autoCheckUpdate().then(i => { if (i) setUpd(i) })
+    }, 4000)
+    return () => window.clearTimeout(t)
+  }, [])
+
   /* ---------- 全局快捷键 / 耳机线控 ----------
    * 媒体键、组合键都由 Rust 侧注册（窗口在后台也响应），这里只负责把动作接到播放器上。
    * 用 pRef 取最新播放器上下文，避免快捷键跟着每次快照重建。
@@ -649,6 +664,12 @@ export function App() {
       <ToastHost low={nowOpen} />
       {/* 全局确认框：替换掉系统原生 confirm（白底英文按钮，和应用风格完全不搭） */}
       <ConfirmHost />
+      {/* 发现新版本：启动时查一次，弹应用内弹窗（不是系统白框） */}
+      <UpdateDialog
+        info={upd}
+        onSkip={() => { if (upd) void skipVersion(upd.latest); setUpd(null) }}
+        onGo={() => { if (upd) void openDownload(upd.url); setUpd(null) }}
+      />
       <TrackDetail
         track={detail}
         onClose={() => setDetail(null)}

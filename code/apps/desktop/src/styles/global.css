@@ -443,3 +443,35 @@ html[data-reduced-motion='true'] .skeleton { animation: none; opacity: 0.55; }
 /* 危险操作（删除 / 清空 / 退出）：确认按钮用警示色，别和普通「确定」长得一样 */
 .primary-btn.danger { background: var(--sy-error); }
 .primary-btn.danger:hover { background: var(--sy-error); filter: brightness(1.08); }
+
+/* 「发现新版本」弹窗的更新说明：一条一行，前面一个小圆点 */
+.upd-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+.upd-notes li {
+  position: relative;
+  padding-left: 14px;
+  font: 400 12.5px/1.7 var(--sy-font-cn);
+  color: var(--sy-text-2);
+  word-break: break-word;
+}
+.upd-notes li::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--sy-accent);
+  opacity: 0.75;
+}
+.upd-meta {
+  margin: 0;
+  font: 400 12.5px/1.7 var(--sy-font-cn);
+  color: var(--sy-text-3);
+}

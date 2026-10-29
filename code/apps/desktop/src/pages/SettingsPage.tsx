@@ -25,6 +25,7 @@ import { desktopLyrics } from '../lib/desktopLyrics'
 import { musicDesk } from '../lib/musicDesk'
 import { useFoliaFx, useLyricsSolo } from '../lib/uiPrefs'
 import { KEYS, settings } from '../lib/settings'
+import { fetchUpdate, openDownload, type UpdateInfo } from '../lib/update'
 import { SourcesSection } from '../components/SourcesSection'
 
 import { HotkeySection } from '../components/HotkeySection'
@@ -55,6 +56,27 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
     onToggleDesk()
     if (deskOn) return
     setDeskMsg('已打开。主窗口还在最上面——最小化它，或者双击桌面屏上的任意位置回来')
+  }
+
+  /* 检查更新：手动点的那一路。自动检查在 App 里（启动 4 秒后、12 小时一次）。 */
+  const [updBusy, setUpdBusy] = useState(false)
+  const [updMsg, setUpdMsg] = useState('')
+  const [updNew, setUpdNew] = useState<UpdateInfo | null>(null)
+  const doCheckUpdate = async () => {
+    setUpdBusy(true)
+    setUpdNew(null)
+    const info = await fetchUpdate()
+    setUpdBusy(false)
+    if (!info) {
+      setUpdMsg('检查失败，看看网络或稍后再试')
+      return
+    }
+    if (!info.has_update) {
+      setUpdMsg(`已是最新版 v${info.current}`)
+      return
+    }
+    setUpdNew(info)
+    setUpdMsg(`发现新版本 v${info.latest}`)
   }
 
   /** 缓存占用（MB）。进入设置页时读一次，清空后重新读 */
@@ -576,7 +598,27 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         <div className="about">
           <span className="about-name">疏音</span>
           <span className="about-tag">疏影横斜，澄澈之音</span>
-          <span className="about-ver num">v0.5.10 · 第二阶段</span>
+          <span className="about-ver num">v0.5.11 · 第二阶段</span>
+        </div>
+        {/* 自动检查是「发现就弹窗」，这里给一个手动入口：不确定有没有新版时点一下 */}
+        <div className="set-row">
+          <span className="set-label">
+            检查更新
+            <span className="set-sub">{updMsg || '启动时会自动查一次；有新版在这里也能看到'}</span>
+          </span>
+          <span className="set-ctl">
+            {updNew
+              ? (
+                <button className="primary-btn" onClick={() => void openDownload(updNew.url)}>
+                  前往下载 v{updNew.latest}
+                </button>
+              )
+              : (
+                <button className="ghost-btn" onClick={() => void doCheckUpdate()} disabled={updBusy}>
+                  {updBusy ? '检查中…' : '检查更新'}
+                </button>
+              )}
+          </span>
         </div>
       </section>
 
