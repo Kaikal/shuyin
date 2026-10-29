@@ -177,6 +177,19 @@ class Bridge(private val web: WebView) {
         "probe_audio_url" -> Http.probe(a.optString("url"))
         "local_audio_duration" -> Library.duration(a.optString("path"))
 
+        /* ---- 版本 / 外链（更新弹窗用，和桌面端 check_update / open_url 对齐）---- */
+        "app_version" -> BuildConfig.VERSION_NAME
+        "open_url" -> {
+            val u = a.optString("url")
+            if (!u.startsWith("http://") && !u.startsWith("https://")) {
+                throw IllegalArgumentException("只支持 http/https 链接")
+            }
+            val it = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(u))
+            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            Sy.app.startActivity(it)
+            null
+        }
+
         /* ---- 音源清单 ---- */
         "sources_default_dir" -> Sy.sourcesDir.absolutePath
         "list_source_scripts" -> Sources.list()

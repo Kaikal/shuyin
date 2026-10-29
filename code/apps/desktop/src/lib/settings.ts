@@ -165,4 +165,8 @@ export const KEYS = {
   squarePlatform: 'square.platform',
   /** 音乐桌面：窗口是否开着 */
   deskOn: 'desk.visible',
+  /** 上次检查更新的时间戳（毫秒），太频繁就不查了 */
+  updateLastAt: 'update.lastAt',
+  /** 用户点过「以后再说」的那个版本，同一个版本不再弹 */
+  updateSkip: 'update.skip',
 } as const

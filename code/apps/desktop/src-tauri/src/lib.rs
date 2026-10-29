@@ -422,6 +422,105 @@ async fn net_request(req: NetRequest) -> Result<net::NetResponse, String> {
     .map_err(|e| format!("网络线程异常：{e}"))?
 }
 
+/* ------------------------------------------------------------------ */
+/* 更新检查                                                            */
+/* ------------------------------------------------------------------ */
+
+/// 更新信息放哪儿：一个**公开**仓库里的 json（只有版本号/更新说明/下载页）。
+/// 源码仓库是私有的，匿名拉不到，所以单独开了一个 `shuyin-update`。
+/// 想换成自己的服务器，改这里，或者前端调用时传 `url`。
+const UPDATE_FEED: &str = "https://gitee.com/ghpgitee/shuyin-update/raw/master/version.json";
+
+#[derive(serde::Serialize)]
+pub struct UpdateInfo {
+    /// 当前运行的版本：编译期从 Cargo.toml 烘进去，和 package.json 同步改
+    current: String,
+    latest: String,
+    has_update: bool,
+    notes: Vec<String>,
+    url: String,
+    date: String,
+    /// true = 这个版本必须更新（不显示「以后再说」）
+    force: bool,
+}
+
+/// 版本比较：只认数字段（0.5.10 > 0.5.9），段数不同按 0 补齐。
+fn version_gt(a: &str, b: &str) -> bool {
+    let num = |s: &str| -> Vec<u32> {
+        s.split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    let (pa, pb) = (num(a), num(b));
+    for i in 0..pa.len().max(pb.len()) {
+        let x = *pa.get(i).unwrap_or(&0);
+        let y = *pb.get(i).unwrap_or(&0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+async fn check_update(url: Option<String>) -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let target = url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| UPDATE_FEED.to_string());
+    let body = tauri::async_runtime::spawn_blocking(move || {
+        let headers = std::collections::HashMap::new();
+        net::request("GET", &target, &headers, None, 8_000).map(|r| r.body)
+    })
+    .await
+    .map_err(|e| format!("网络线程异常：{e}"))??;
+
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("更新信息不是合法 JSON：{e}"))?;
+    let latest = v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if latest.is_empty() {
+        return Err("更新信息里没有 version 字段".into());
+    }
+    let notes: Vec<String> = v
+        .get("notes")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    Ok(UpdateInfo {
+        has_update: version_gt(&latest, &current),
+        current,
+        latest,
+        notes,
+        url: v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        date: v.get("date").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        force: v.get("force").and_then(|x| x.as_bool()).unwrap_or(false),
+    })
+}
+
+/// 用系统默认浏览器打开下载页。只认 http/https——别把任意字符串丢给 `cmd start`。
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let u = url.trim();
+    if !(u.starts_with("https://") || u.starts_with("http://")) {
+        return Err("只支持 http/https 链接".into());
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", u])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 把当前曲目与播放状态交给系统媒体会话。
 ///
 /// 有了它，耳机按键才会路由到本应用，「音量键浮层 / 锁屏」上也会显示歌名——
@@ -1887,15 +1986,17 @@ fn musicdesk_open(app: AppHandle, layer: Option<String>) -> Result<(), String> {
     app.run_on_main_thread(move || {
         match a.get_webview_window("musicdesk") {
             Some(w) => {
-                // **先挂进壁纸槽位再显示**：反过来的话，它会先以普通窗口的样子
-                // 在屏幕上闪一帧（启动自动恢复时尤其明显），然后才被塞进桌面层。
-                if layer == "bottom" {
-                    apply_desk_layer(&a, &layer);
-                    let _ = w.show();
-                } else {
-                    let _ = w.show();
-                    apply_desk_layer(&a, &layer);
-                }
+                /*
+                 * **先 show 再挂壁纸层**（顺序不能反）。
+                 *
+                 * tao 的 `show()` 会把窗口 flags 整体重刷：顶层窗口按 WS_POPUP + WS_VISIBLE
+                 * 重写样式。如果先 apply_desk_layer 再 show，刚设好的 WS_CHILD 就被抹掉，
+                 * 窗口变成「有父窗口的弹窗」——Z 序跑到 SHELLDLL_DefView 前面，
+                 * 把整块桌面图标盖住（双击图标自然没反应，用户看到的就是「退回老版本」）。
+                 * 两步都在同一次主线程调用里，中间不出帧，所以看不到闪。
+                 */
+                let _ = w.show();
+                apply_desk_layer(&a, &layer);
                 append_log(&a, "musicdesk.open ok");
             }
             None => {
@@ -1904,19 +2005,12 @@ fn musicdesk_open(app: AppHandle, layer: Option<String>) -> Result<(), String> {
                 let layer2 = layer.clone();
                 std::thread::spawn(move || match build_desk_window(&a2) {
                     Ok(w) => {
-                        // 同上：嵌壁纸态先挂槽位再显示，避免闪一帧普通窗口
-                        if layer2 == "bottom" {
-                            let a3 = a2.clone();
-                            let a4 = a3.clone();
-                            let l = layer2.clone();
-                            let _ = a3.run_on_main_thread(move || apply_desk_layer(&a4, &l));
-                            let _ = w.show();
-                        } else {
-                            let _ = w.show();
-                            let a3 = a2.clone();
-                            let a4 = a3.clone();
-                            let _ = a3.run_on_main_thread(move || apply_desk_layer(&a4, &layer2));
-                        }
+                        // 同 Some 分支：先 show（tao 会重刷样式），再把壁纸层压上去
+                        let _ = w.show();
+                        let a3 = a2.clone();
+                        let a4 = a3.clone();
+                        let l = layer2.clone();
+                        let _ = a3.run_on_main_thread(move || apply_desk_layer(&a4, &l));
                         append_log(&a2, "musicdesk.rebuild ok");
                     }
                     Err(e) => append_log(&a2, &format!("musicdesk.rebuild fail {e}")),
@@ -2610,6 +2704,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            check_update,
+            app_version,
+            open_url,
             scan_music,
             get_tracks,
             get_track_count,
