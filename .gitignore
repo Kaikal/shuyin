@@ -16,6 +16,20 @@ dist/
 tmp/
 *.log
 
+# 根目录调试残留：截图、以及命令行参数被误当文件名生成的产物
+# （--rect 就是某次 Linux 风格参数在 Git Bash 里被当成重定向目标留下的）
+/--rect
+/250
+/cur-app.png
+/my-page.png
+/cur-shot/
+
+# 平台接口调研笔记（第三方的接口细节，只作本地参考，不入库）
+/获取每日推荐/
+
+# 安卓设计交接稿（HTML 稿，本地参考）
+/Android/
+
 # 本地数据 / 编辑器
 .workbuddy/
 .idea/
