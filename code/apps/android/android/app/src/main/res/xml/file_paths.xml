@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider 的可用路径。
+
+    只放 `updates/` 一个目录：安装包是唯一需要交给别的应用去读的文件，
+    给宽了（比如整个 cacheDir）等于把播放缓存也暴露成一个可被任意应用申请的 uri。
+-->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

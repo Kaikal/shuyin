@@ -1,29 +1,29 @@
 {
   "base": "https://github.com/Kaikal/shuyin/releases/download",
-  "headline": "v0.6.107 · 平板大屏适配",
+  "headline": "v0.6.109 · 应用内更新",
   "items": [
     {
       "id": "android",
-      "version": "0.6.107",
-      "tag": "v0.6.107",
-      "file": "shuyin-android-0.6.107.apk",
-      "size": 3684492,
-      "mirror": ""
+      "version": "0.6.109",
+      "tag": "v0.6.109",
+      "file": "shuyin-android-0.6.109.apk",
+      "size": 4179508,
+      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-android-0.6.109.apk"
     },
     {
       "id": "car",
-      "version": "0.6.107",
-      "tag": "v0.6.107",
-      "file": "shuyin-car-0.6.107.apk",
-      "size": 3684516,
-      "mirror": ""
+      "version": "0.6.109",
+      "tag": "v0.6.109",
+      "file": "shuyin-car-0.6.109.apk",
+      "size": 4179588,
+      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-car-0.6.109.apk"
     },
     {
       "id": "windows",
-      "version": "0.5.24",
-      "tag": "v0.5.24",
-      "file": "shuyin-windows-0.5.24.exe",
-      "size": 5853955,
+      "version": "0.5.25",
+      "tag": "v0.5.25",
+      "file": "shuyin-windows-0.5.25.exe",
+      "size": 5890407,
       "mirror": ""
     }
   ]

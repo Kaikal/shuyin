@@ -295,7 +295,11 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
                 <div
                   key={t.id}
                   className={'plp-row' + (live ? ' live' : '') + (on ? ' selected' : '')}
-                  {...longPressProps(() => toggleOne(t.id, i))}
+                  {...longPressProps(at => {
+                    /* 已经选中的行再长按 = 对这一首的菜单（多选态里也能单点操作） */
+                    if (on) { setMenu({ x: at.x, y: at.y, track: t, index: i }); return }
+                    toggleOne(t.id, i)
+                  })}
                   onClick={e => { if (consumeLongPress()) return; onRowClick(t, i, e) }}
                   onDoubleClick={isCoarsePointer ? undefined : () => onOpenDetail(t)}
                   onContextMenu={e => {

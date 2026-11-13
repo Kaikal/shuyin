@@ -188,8 +188,35 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
 
   /** 这一组显示哪些、按什么顺序：先过滤隐藏，再套用户排过的顺序 */
   const platShown = useMemo(
-    () => prefs.arrange(platList.filter(i => !prefs.hidden.has(platKey(i.source, i.id)))),
+    () => prefs.arrange(platList.filter(i =>
+      !prefs.hidden.has(platKey(i.source, i.id))
+      /*
+       * 平台自带的「我喜欢」这类歌单，一条歌都没有也照样由接口返回。
+       * 卡片摆在那儿、点进去空列表，用户只会以为是没加载出来
+       * （原话：「本地有个我的喜欢的歌单，不管有没有歌都显示」）。
+       * `songCount === 0` 才隐藏——字段缺失（部分平台不给）保留，宁可多不可少。
+       */
+      && i.songCount !== 0)),
     [platList, prefs.hidden, prefs.arrange],
+  )
+
+  /**
+   * 「收藏的歌单」这一组同样处理 0 首的。
+   *
+   * 收藏是**本地快照**（存的是收藏那一刻的 name/cover/songCount），
+   * 平台那边后来清空了也不会有任何推送，卡就一直摆着 —— 用户说的
+   * 「本地有个我的喜欢的歌单，不管有没有歌都显示」，说的就是这种
+   * 已经落到本地、却早已空掉的卡。
+   *
+   * 规则和上面一致：`songCount === 0` 才藏，字段缺失（老版本存的快照
+   * 压根没这个字段）一律保留，宁可多不可少。
+   *
+   * 整理态反过来**全部显示**：这一组没有「已移除」回收站，
+   * 藏起来就等于用户再也点不到 ×、取消不掉这个收藏了。
+   */
+  const favShown = useMemo(
+    () => (tidy ? pl.favs : pl.favs.filter(f => f.songCount !== 0)),
+    [pl.favs, tidy],
   )
 
   /*
@@ -977,6 +1004,20 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                       deleting={tidy}
                       onHold={enterEdit}
                       /*
+                       * 整理态里长按卡片 → 这张卡的功能菜单。
+                       *
+                       * 不再等系统 `contextmenu`（WebView 里常不派发，见 SortableGrid 的
+                       * `onMenu` 注释）。落点用 `elementFromPoint` 反查是哪张卡：
+                       * 手指就按在卡上，这一下命中的一定是它。
+                       */
+                      onMenu={at => {
+                        const el = document.elementFromPoint(at.x, at.y)?.closest<HTMLElement>('.home-card')
+                        const sk = el?.dataset.skey ?? ''
+                        if (!sk.startsWith('local:')) return
+                        const hit = pl.lists.find(x => x.id === sk.slice('local:'.length))
+                        if (hit) setMenu({ x: at.x, y: at.y, list: hit })
+                      }}
+                      /*
                        * 本地这一组的第一格是「我喜欢的音乐」（固定卡，不可拖），
                        * 所以网格下标要减 1 才对应 `pl.lists` 的位置。
                        *
@@ -1290,13 +1331,18 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                   </button>
                 )}
               </div>
+              {/* 空成这样时网格里没有卡可拖，提示要放在网格**外面**：
+                  SortableGrid 是按 children 下标算几何和 reorder 的，塞个 <p> 进去会让下标全错位 */}
+              {favShown.length === 0 && (
+                <p className="home-empty-note">收藏的歌单都空了，点上面「整理」可以取消收藏。</p>
+              )}
               <SortableGrid
                 className={gridCls}
                 deleting={tidy}
                 onHold={enterEdit}
                 onReorder={(from, to) => pl.moveFav(from, to)}
               >
-                {pl.favs.map(f => (
+                {favShown.map(f => (
                   <div
                     key={f.key}
                     className="home-card"

@@ -13,6 +13,7 @@
  * 检查失败**不弹错**：更新是锦上添花，断网或仓库抽风不该在用户面前报错。
  */
 import { bridge } from './bridge'
+import { androidAppInfo, onNative } from './native/android'
 import { settings, KEYS } from './settings'
 
 export interface UpdateInfo {
@@ -21,6 +22,8 @@ export interface UpdateInfo {
   has_update: boolean
   notes: string[]
   url: string
+  /** 备用下载地址（国内源打不开时用）。没有就空串 */
+  urlAlt: string
   date: string
   /** 强制更新（不显示「以后再说」） */
   force: boolean
@@ -28,8 +31,15 @@ export interface UpdateInfo {
 
 const FEED = 'https://gitee.com/ghpgitee/shuyin-update/raw/master/version.json'
 
-/** 两次自动检查的最小间隔：同一天连着开十次，不该查十次 */
-const CHECK_GAP = 12 * 60 * 60 * 1000
+/**
+ * 两次自动检查的最小间隔。
+ *
+ * 原来是 12 小时，本意是「一天开十次别查十次」，实际后果是**新版本发布后
+ * 头半天打开应用不会弹窗**（上次检查时间还在窗口里，直接 return null），
+ * 用户只能自己去「关于」里手动点。更新提示的全部价值就在「及时」，
+ * 一个 json 几百字节，多查几次不值一提 —— 缩到 3 分钟只挡连点/Activity 重建。
+ */
+const CHECK_GAP = 3 * 60 * 1000
 
 /** 只认数字段：0.5.10 > 0.5.9；段数不同按 0 补齐 */
 function versionGt(a: string, b: string): boolean {
@@ -66,8 +76,11 @@ export async function fetchUpdate(url?: string): Promise<UpdateInfo | null> {
   try {
     const v = await fetchFeed(url || FEED)
     /* 两个平台的版本号本来就不同（桌面 0.5.x / 安卓 0.6.x），
-       feed 里分字段给，别拿桌面的号去比安卓的包。 */
-    const latest = String(v.android ?? '')
+       feed 里分字段给，别拿桌面的号去比安卓的包。
+       车机包 applicationId 不同（装在同一台车上会变成两个应用），
+       所以它另有一套字段；没写就退回手机那套。 */
+    const car = bridge.isAndroid && androidAppInfo().car
+    const latest = String((car ? (v.car ?? v.android) : v.android) ?? '')
     if (!latest) return null
     const current = await bridge.invoke<string>('app_version').catch(() => '')
     return {
@@ -75,7 +88,8 @@ export async function fetchUpdate(url?: string): Promise<UpdateInfo | null> {
       latest,
       has_update: !!current && versionGt(latest, current),
       notes: Array.isArray(v.notes) ? v.notes.map(String) : [],
-      url: String(v.android_url || v.url || ''),
+      url: String((car ? (v.car_url ?? v.android_url) : v.android_url) || v.url || ''),
+      urlAlt: String((car ? (v.car_url_alt ?? v.android_url_alt) : v.android_url_alt) || ''),
       date: String(v.date ?? ''),
       force: v.force === true,
     }
@@ -114,4 +128,70 @@ export async function openDownload(url: string): Promise<void> {
     return
   }
   window.open(u, '_blank', 'noopener')
+}
+
+/* ------------------------------------------------------------------ *
+ * 应用内下载安装（安卓）
+ *
+ * 为什么不再跳浏览器：手机上「点更新 → 打开浏览器 → 下完 → 通知栏里点开 →
+ * 系统又拦一次『未知来源』」，四步里只要有一处卡住，用户就不知道自己在哪。
+ * 现在整条链在应用里：进度条 → 下载完直接拉起系统安装器。
+ *
+ * 原生侧见 `app/src/main/java/cn/shuyin/player/UpdateApk.kt`：
+ * 下载到 cacheDir/updates，完成前顺手查一次「允许安装未知应用」，
+ * 没开就跳那个设置页，回来自动续上（状态走 `update_install`）。
+ * ------------------------------------------------------------------ */
+
+/** 下载进度。原生按 2% 节流推送，别每 64KB 刷一次 DOM */
+export interface DlProgress {
+  /** 0~100；不知道总长度时是 -1 */
+  pct: number
+  got: number
+  total: number
+}
+
+export type InstallResult =
+  /** 已经把安装器拉起来了（应用会被系统挂起，用户点「安装」） */
+  | { status: 'installed'; path: string }
+  /** 缺「安装未知应用」权限，原生已经跳到设置页 */
+  | { status: 'need_perm'; path: string }
+
+/** 订阅下载进度；返回取消订阅 */
+export function onDownloadProgress(cb: (p: DlProgress) => void): () => void {
+  if (!bridge.isAndroid) return () => {}
+  return onNative('app://update-dl', raw => {
+    const v = raw as Partial<DlProgress> | null
+    if (!v) return
+    cb({
+      pct: typeof v.pct === 'number' ? v.pct : -1,
+      got: Number(v.got) || 0,
+      total: Number(v.total) || 0,
+    })
+  })
+}
+
+/** 文件名按版本走，系统安装器会用这个名字显示 */
+function apkName(latest: string): string {
+  return `shuyin-${latest}.apk`
+}
+
+/**
+ * 下载并安装。先试主源（Gitee），失败自动换备用源（GitHub）——
+ * 国内直连 GitHub 的 release 时快时慢，两个都试比只给一个稳。
+ */
+export async function downloadAndInstall(info: UpdateInfo): Promise<InstallResult> {
+  if (!bridge.isAndroid) throw new Error('应用内安装只在安卓上可用')
+  const urls = [info.url, info.urlAlt].filter(Boolean)
+  if (!urls.length) throw new Error('更新地址是空的')
+  const r = await bridge.invoke<InstallResult>('update_download', {
+    urls,
+    name: apkName(info.latest),
+  })
+  if (!r || !r.status) throw new Error('下载失败')
+  return r
+}
+
+/** 从设置页授权回来之后续装（文件已经在缓存里） */
+export async function installDownloaded(path: string): Promise<InstallResult> {
+  return bridge.invoke<InstallResult>('update_install', { path })
 }

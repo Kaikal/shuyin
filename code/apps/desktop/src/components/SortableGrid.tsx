@@ -73,6 +73,15 @@ interface Props {
   deleting?: boolean
   /** 触摸长按松手（没移动）→ 父层进删除态 */
   onHold?(): void
+  /**
+   * 整理态里长按某张卡 → 弹这张卡的功能菜单（编辑 / 删除 / 置顶）。
+   *
+   * 以前这里靠系统补发的 `contextmenu`，但触摸屏上根本没保证：
+   * 华为 / 荣耀那批 WebView 在 `user-select: none` 的元素上**不派发 contextmenu**，
+   * 于是「整理态里长按 → 菜单」在真机上永远不出现（用户 2026-11-13 报了这条）。
+   * 现在自己起一个 340ms 的定时器，跟拖动用的是同一套抖动阈值。
+   */
+  onMenu?(at: { x: number; y: number }): void
   /** 组内换位。松手时才调用一次，索引是 `[data-skey]` 的顺序 */
   onReorder(from: number, to: number): void
   /** 不许拖到的下标以下（比如第一格是固定的「我喜欢的音乐」） */
@@ -111,7 +120,7 @@ interface DragState {
 }
 
 export function SortableGrid({
-  deleting = false, onHold, onReorder, minIndex = 0, className = 'home-grid', children,
+  deleting = false, onHold, onMenu, onReorder, minIndex = 0, className = 'home-grid', children,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<DragState | null>(null)
@@ -120,6 +129,8 @@ export function SortableGrid({
   cb.current = onReorder
   const holdCb = useRef(onHold)
   holdCb.current = onHold
+  const menuCb = useRef(onMenu)
+  menuCb.current = onMenu
   /** 这个实例的手势锁名（同一屏有本地 / 平台 / 收藏三个网格，不能共用一个名字） */
   const lockId = useRef(`sort-${Math.random().toString(36).slice(2, 8)}`)
 
@@ -132,6 +143,14 @@ export function SortableGrid({
 
     const clearHold = () => {
       if (holdTimer.current) { window.clearTimeout(holdTimer.current); holdTimer.current = 0 }
+    }
+
+    /* ---- 整理态里「长按弹菜单」这一路（跟拖动完全独立，别混进 dragRef） ---- */
+    let menuTimer = 0
+    let menuFrom = { x: 0, y: 0 }
+    let menuAt = { x: 0, y: 0 }
+    const clearMenuHold = () => {
+      if (menuTimer) { window.clearTimeout(menuTimer); menuTimer = 0 }
     }
 
     const reset = (d: DragState) => {
@@ -202,8 +221,28 @@ export function SortableGrid({
        * 手指按住一滑、卡片先抖一下就回位了。
        */
       const byHandle = !!target.closest('[data-drag-handle]')
-      // 触摸在删除态里只从手柄起手（别处留给滚动）；鼠标照旧整卡可拖
-      if (deleting && e.pointerType !== 'mouse' && !byHandle) return
+      /*
+       * 整理态 + 手指 + 没按在手柄上 = 这一下要么是**滚列表**，要么是**要菜单**。
+       *
+       * 早先这里直接 `return`（整理态触摸不接拖动），结果连"长按弹菜单"也没了：
+       * 菜单原来是等系统 `contextmenu`，而它在 WebView 里常常不派发。
+       * 现在自己起一个定时器——按住 340ms 不动就弹菜单，动了就当滚动（阈值同 PRE_SLOP）。
+       */
+      if (deleting && e.pointerType !== 'mouse' && !byHandle) {
+        if (target.closest('[data-nodrag]')) return
+        const card = target.closest<HTMLElement>('[data-skey]')
+        if (!card || card.dataset.fixed || !host.contains(card)) return
+        menuFrom = { x: e.clientX, y: e.clientY }
+        menuAt = { x: e.clientX, y: e.clientY }
+        clearMenuHold()
+        menuTimer = window.setTimeout(() => {
+          menuTimer = 0
+          /* 抬手这一下补发的 click 不能让卡片自己再跑一次 onClick */
+          swallowUntil = Date.now() + CLICK_GUARD_MS
+          menuCb.current?.(menuAt)
+        }, HOLD_MS)
+        return
+      }
       // 小叉、播放键这类按钮不负责拖动
       if (target.closest('[data-nodrag]')) return
       const el = target.closest<HTMLElement>('[data-skey]')
@@ -317,6 +356,10 @@ export function SortableGrid({
     }
 
     const onPointerMove = (e: PointerEvent) => {
+      /* 整理态里手指一挪就是滚列表，别把菜单按出来（阈值同拖动的 PRE_SLOP） */
+      if (menuTimer && Math.hypot(e.clientX - menuFrom.x, e.clientY - menuFrom.y) > PRE_SLOP) {
+        clearMenuHold()
+      }
       const d = dragRef.current
       if (!d || e.pointerId !== d.pointerId) return
       update(e.clientX, e.clientY)
@@ -330,6 +373,10 @@ export function SortableGrid({
      * 未到长按时**不 prevent**：那时候是在滚列表 / 滑页面，一概别管。
      */
     const onTouchMove = (e: TouchEvent) => {
+      const p0 = e.touches[0]
+      if (menuTimer && p0 && Math.hypot(p0.clientX - menuFrom.x, p0.clientY - menuFrom.y) > PRE_SLOP) {
+        clearMenuHold()
+      }
       const d = dragRef.current
       if (!d) return
       const p = e.touches[0]
@@ -347,6 +394,7 @@ export function SortableGrid({
      */
     const end = (cancelled: boolean) => {
       clearHold()
+      clearMenuHold()
       const d = dragRef.current
       if (!d) return
       dragRef.current = null
@@ -423,6 +471,7 @@ export function SortableGrid({
       window.removeEventListener('touchcancel', onCancel)
       window.removeEventListener('touchmove', onTouchMove)
       clearHold()
+      clearMenuHold()
       // 删除态被外部关掉时（点空白 / 按 Esc / 返回键）可能还有残留位移，清掉
       abort()
     }

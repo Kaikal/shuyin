@@ -354,7 +354,12 @@ export function createWyApi(client: HttpClient): PlatformApi {
             // 只认一个的话那批歌单会整片显示成音符占位
             cover: cover(p.coverImgUrl || p.coverUrl || p.picUrl),
             creator: clean(p.creator?.nickname) || undefined,
-            songCount: Number(p.trackCount ?? p.songCount ?? 0) || undefined,
+            /*
+             * 「我喜欢的音乐」这类歌单 0 首也照样由接口返回，卡片摆在那儿点进去空列表。
+             * 这里保留 0（不写成 `|| undefined`）：上层据此隐藏空歌单，
+             * 而 `undefined` 会被当成「平台没给数量」，只能留着。
+             */
+            songCount: Number(p.trackCount ?? p.songCount ?? 0),
             playCount: Number(p.playCount ?? 0) || undefined,
             detailSupported: true,
           }))
