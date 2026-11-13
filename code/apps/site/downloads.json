@@ -1,21 +1,21 @@
 {
-  "base": "",
-  "headline": "v0.6.104 · 已支持平板大屏",
+  "base": "https://github.com/Kaikal/shuyin/releases/download",
+  "headline": "v0.6.107 · 平板大屏适配",
   "items": [
     {
       "id": "android",
-      "version": "0.6.104",
-      "tag": "v0.6.104",
-      "file": "shuyin-android-0.6.104.apk",
-      "size": 3685452,
+      "version": "0.6.107",
+      "tag": "v0.6.107",
+      "file": "shuyin-android-0.6.107.apk",
+      "size": 3684492,
       "mirror": ""
     },
     {
       "id": "car",
-      "version": "0.6.104",
-      "tag": "v0.6.104",
-      "file": "shuyin-car-0.6.104.apk",
-      "size": 3685472,
+      "version": "0.6.107",
+      "tag": "v0.6.107",
+      "file": "shuyin-car-0.6.107.apk",
+      "size": 3684516,
       "mirror": ""
     },
     {
