@@ -62,6 +62,22 @@ let backHandler: (() => boolean) | null = null
 /** 注册安卓返回键处理（返回 true 表示「这一下我吃掉了」） */
 export function setBackHandler(fn: (() => boolean) | null): void { backHandler = fn }
 
+/*
+ * 弹层自己也能抢返回键。
+ *
+ * 播放页的「更多」、歌曲长按面板这些是**组件内部的 open 状态**，App 那边看不见，
+ * 所以返回键一路走到「退出播放页」——用户按返回想关菜单，结果直接回了首页。
+ * 弹层打开时往这里压一层，关掉时弹掉；后来的先响应（层叠顺序）。
+ */
+const backLayers: Array<() => boolean> = []
+export function pushBackLayer(fn: () => boolean): () => void {
+  backLayers.push(fn)
+  return () => {
+    const i = backLayers.lastIndexOf(fn)
+    if (i >= 0) backLayers.splice(i, 1)
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* 原生 → JS 的入口（由原生 evaluateJavascript 调用）                    */
 /* ------------------------------------------------------------------ */
@@ -108,8 +124,13 @@ if (isAndroid) {
     }
   }
 
-  // 安卓返回键：前端先决定这一下该关哪一层
-  w.__syBack = () => (backHandler ? backHandler() : false)
+  // 安卓返回键：弹层 → 页面自己 → 都没接住才让系统退出
+  w.__syBack = () => {
+    for (let i = backLayers.length - 1; i >= 0; i--) {
+      try { if (backLayers[i]()) return true } catch { /* 一层坏了不影响外层 */ }
+    }
+    return backHandler ? backHandler() : false
+  }
   // 转屏 / 权限变化
   w.__syOnResize = () => window.dispatchEvent(new Event('resize'))
   w.__syOnPermission = () => window.dispatchEvent(new CustomEvent('sy:permission'))
@@ -125,6 +146,14 @@ if (isAndroid) {
  * 超时兜底 120s：原生侧若因权限/文件锁卡住没回调，这里不能永远挂着——
  * 挂住就是「点了没反应」且无从恢复（桌面上 pending 死锁那个坑的翻版）。
  */
+/**
+ * 少数命令天生就该等更久。**平台登录**是唯一一个：用户要在内嵌的官方登录页里
+ * 输手机号、等短信、填验证码，两分钟根本不够——前端先超时的话，原生那边还开着窗、
+ * 用户还在输，等他登完这边早就 reject 掉了，看到的却是一句「原生调用超时」。
+ * 原生侧登录窗自己 5 分钟收尾，这里给到 6 分钟，让它永远先结束。
+ */
+const LONG_TIMEOUT: Record<string, number> = { platform_login: 360_000 }
+
 export function androidInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (!nativeHost) return Promise.reject(new Error('不在安卓环境'))
   const id = String(++seq)
@@ -132,7 +161,7 @@ export function androidInvoke<T>(cmd: string, args?: Record<string, unknown>): P
     const timer = window.setTimeout(() => {
       if (!pending.delete(id)) return
       reject(new Error(`原生调用超时：${cmd}`))
-    }, 120_000)
+    }, LONG_TIMEOUT[cmd] ?? 120_000)
     pending.set(id, {
       resolve: (v: unknown) => { window.clearTimeout(timer); resolve(v as T) },
       reject: (e: Error) => { window.clearTimeout(timer); reject(e) },

@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react'
 import {
-  BUILTIN_THEMES, degradeTokens, isDarkBase, resolveActiveTheme,
+  BUILTIN_THEMES, degradeTokens, isDarkBase, resolveActiveTheme, withAlpha,
   type DegradationContext, type ThemeDef, type ThemeMode, type ThemeTokens,
 } from '@shuyin/theme-engine'
 import { KEYS, settings } from './settings'
@@ -59,6 +59,34 @@ function detectDegradation(): DegradationContext {
 
 function applyTokensToCss(t: ThemeTokens): void {
   const root = document.documentElement
+  /*
+   * 半透明 accent（选中胶囊底、播放键光晕）必须在 JS 里算成 rgba。
+   *
+   * 这些值本来可以写成 `color-mix(in srgb, var(--sy-accent) 16%, transparent)`，
+   * 但 color-mix 要 Chrome 111+；用户那台真机是 WebView 104，遇到它会**不回退**，
+   * 直接把整条声明判成计算值无效 → 底色变透明（Tab 选中胶囊整个消失）。
+   * rgba 是纯值，哪一代 WebView 都认，桌面也一样。
+   */
+  const tint = (hex: string, a: number): string => {
+    const v = withAlpha(hex, a)
+    return v.startsWith('rgba') ? v : `rgba(255,255,255,${a})`
+  }
+  /*
+   * 往白色那边提一档：给「永远近黑」的播放页做前景色。
+   *
+   * 播放页在浅色主题下也强制近黑底，但强调色仍然取主题的 accent。
+   * 浅色主题的 accent（「清浅」#3E9BD8、accentSoft 更是 #2F7FB8）是为白底选的，
+   * 直接当文字色压在 #0a0b0f 上对比度只有 2.7:1 —— 选中的标签、当前播放那行
+   * 只剩一团看不清的蓝。提亮 45% 之后同一个色相，落在黑底上才立得住。
+   */
+  const lift = (hex: string, k: number): string => {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim())
+    if (!m) return '#E8ECF5'
+    const n = parseInt(m[1], 16)
+    const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+      .map(v => Math.round(v + (255 - v) * k))
+    return `rgb(${ch[0]},${ch[1]},${ch[2]})`
+  }
   const vars: Record<string, string> = {
     '--sy-bg-base': t.backgroundBase,
     '--sy-bg-elevated': t.backgroundElevated,
@@ -67,6 +95,37 @@ function applyTokensToCss(t: ThemeTokens): void {
     '--sy-text-3': t.textTertiary,
     '--sy-accent': t.accent,
     '--sy-accent-soft': t.accentSoft,
+    /* 触屏一套令牌（styles/handoff.css）里带 alpha 的强调色，见上面 tint() 的注释 */
+    '--hd-accent-weak': tint(t.accent, 0.16),
+    '--hd-glow': tint(t.accent, 0.36),
+    /*
+     * Folia 歌词要用的几档强调色透明度。
+     *
+     * 原来这几处写的是 `color-mix(in srgb, var(--sy-accent) 74%, transparent)`，
+     * 而真机 WebView 104 没有 color-mix：整条声明判无效 → 唱到哪个字都不变色、
+     * 光晕也没有——「歌词动效好像坏了」很大一部分是这里。算成 rgba 落成变量，
+     * 哪一代 WebView 都认，桌面端视觉不变。
+     */
+    '--sy-accent-a15': tint(t.accent, 0.15),
+    '--sy-accent-a20': tint(t.accent, 0.2),
+    '--sy-accent-a26': tint(t.accent, 0.26),
+    '--sy-accent-a40': tint(t.accent, 0.4),
+    '--sy-accent-a42': tint(t.accent, 0.42),
+    '--sy-accent-a74': tint(t.accent, 0.74),
+    /*
+     * 播放页 / 播放队列里几档更细的强调色。
+     *
+     * 这几处原来在 handoff.css 里写死了默认主题的靛蓝 `rgba(110,139,255,…)`
+     * （正在播放那行的底色、已缓冲的进度、拖拽时的描边）。换到「清浅」之后
+     * 播放键是青蓝 #3E9BD8、进度条缓冲段却是靛蓝——**一个屏幕上两套蓝**，
+     * 就是「播放页和整体主题不搭」最直接的那一半。
+     */
+    '--sy-accent-a08': tint(t.accent, 0.08),
+    '--sy-accent-a32': tint(t.accent, 0.32),
+    '--sy-accent-a38': tint(t.accent, 0.38),
+    '--sy-accent-a55': tint(t.accent, 0.55),
+    /** 近黑底上的强调色文字（播放页 / 播放队列） */
+    '--sy-accent-on-dark': lift(t.accent, 0.45),
     '--sy-glass-tint': t.glassTint,
     '--sy-glass-highlight': t.glassHighlight,
     '--sy-glass-border': t.glassBorder,
@@ -84,6 +143,13 @@ function applyTokensToCss(t: ThemeTokens): void {
   }
   for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v)
   root.dataset.glassDegraded = String(t.glassBlur === 0)
+  /*
+   * 明暗标记：设计交付包（styles/handoff.css）里的 --hd-* 是按**深色**画的，
+   * 浅色主题下如果照用，就变成「页面是浅的、播放条和 dock 是黑的」——
+   * 两套材质拼在一屏上，看起来就是「乱」。挂一个属性让它能整套换令牌。
+   * 只在 :root 上多写一个 data-dark，不参与主题引擎的任何判断。
+   */
+  root.dataset.dark = String(isDarkBase(t.backgroundBase))
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

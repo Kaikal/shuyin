@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知里的细进度条：底色用中性 20% 灰，深浅两张卡片上都看得见；
+     进度色是疏音的强调蓝（通知栏拿不到应用主题，写死一份） -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@android:id/background">
+        <shape android:shape="rectangle">
+            <corners android:radius="2dp" />
+            <solid android:color="#33808080" />
+        </shape>
+    </item>
+    <item android:id="@android:id/progress">
+        <clip>
+            <shape android:shape="rectangle">
+                <corners android:radius="2dp" />
+                <solid android:color="#7C93FF" />
+            </shape>
+        </clip>
+    </item>
+</layer-list>

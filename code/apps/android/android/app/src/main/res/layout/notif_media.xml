@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  通知栏媒体卡片（自定义布局）。
+
+  为什么自己做一套：MIUI 的媒体模板在动作行第 4 位画一颗**巨大的心**，
+  还只给 5 个位置，我们的「切换输出 / 悬浮歌词」会被吞掉；
+  整体观感也和 QQ 音乐那套（封面 + 歌名 + 进度条 + 一排小按钮）差得远。
+
+  约定：
+    · 卡片底色仍由系统画（浅色/深色、壁纸取色都归它）；我们只往上叠一层
+      封面色晕（n_wash），且这层颜色往右淡到全透明，不覆盖系统底色；
+    · 文字颜色由 Kotlin 侧按当前深/浅色显式 setTextColor（见 PlaybackService.mediaView），
+      不依赖 `?attr` 在 SystemUI 里能不能解析；
+    · 图标同理，运行时染色成 bitmap 再塞进来（RemoteViews 不认 tint 属性）。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <!--
+      封面色晕：从封面那一侧晕开的一层颜色，越往右越淡直到全透明。
+
+      为什么要有它：卡片原来只有「封面 + 两行字 + 一条线 + 一排图标」，
+      在系统那张浅底卡片上看着就是一块白板（用户原话「感觉有点单调，
+      你看酷狗的就没有这种感觉」）。酷狗那张卡片其实也就多了这一层——
+      背景里透出封面的颜色。
+
+      做法见 PlaybackService.washBitmap：把封面缩到 12×12 求平均色，
+      再用径向渐变铺开。位图在 Kotlin 侧生成，这里只负责铺满。
+
+      `match_parent` 在 wrap_content 的 FrameLayout 里是安全的：FrameLayout 会先按
+      不受它影响的子 View 量出自己的高度，再拿这个高度回头量它（系统框架的既定行为），
+      所以卡片高度仍然由下面的内容决定，不会被拉成一屏。
+    -->
+    <ImageView
+        android:id="@+id/n_wash"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitXY"
+        android:contentDescription="@null" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="6dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <ImageView
+            android:id="@+id/n_cover"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:scaleType="centerCrop"
+            android:contentDescription="@null" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="14dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/n_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/n_artist"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- 进度：左时间 / 细条 / 右时间，和 QQ 音乐那屏一样 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="10dp">
+
+        <TextView
+            android:id="@+id/n_pos"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="11sp"
+            android:includeFontPadding="false" />
+
+        <!--
+          进度条 = 一张自绘位图（Kotlin 侧 barBitmap）叠 20 个透明热区。
+
+          为什么不用 ProgressBar：真机（华为 HarmonyOS 4.2）上同一份
+          ProgressBar + progressDrawable **完全不画**，连底色都没有——系统界面进程
+          inflate 时把 `?android:attr/progressBarStyleHorizontal` 解析成了空样式。
+          位图没有解析空间，塞进去就一定看得见。
+
+          为什么是 20 个热区：`RemoteViews` 塞不进真正的 SeekBar（那是一整个控件，
+          不是 RemoteViews 支持的方法），通知栏里又拖不动。所以把整条切成 20 段，
+          每段一个 PendingIntent，点哪跳哪，粒度 5%（四分钟的歌约 12 秒）。
+          热区 22dp 高、比 4dp 的条厚一圈，手指点得中。
+        -->
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="24dp"
+            android:layout_weight="1"
+            android:layout_marginStart="9dp"
+            android:layout_marginEnd="9dp">
+
+            <ImageView
+                android:id="@+id/n_bar"
+                android:layout_width="match_parent"
+                android:layout_height="4dp"
+                android:layout_gravity="center_vertical"
+                android:scaleType="fitXY"
+                android:contentDescription="@null" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="horizontal">
+                <ImageView
+                    android:id="@+id/n_s0"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s1"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s2"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s3"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s4"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s5"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s6"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s7"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s8"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s9"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s10"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s11"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s12"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s13"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s14"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s15"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s16"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s17"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s18"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:id="@+id/n_s19"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:contentDescription="@null" />
+            </LinearLayout>
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/n_dur"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="11sp"
+            android:includeFontPadding="false" />
+    </LinearLayout>
+
+    <!-- 动作行：收藏 / 上一首 / 播放暂停 / 下一首 / 悬浮歌词（对齐 QQ 那五颗） -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginTop="8dp">
+
+        <ImageButton
+            android:id="@+id/n_fav"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:scaleType="center"
+            android:padding="11dp"
+            android:contentDescription="收藏" />
+
+        <ImageButton
+            android:id="@+id/n_prev"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:scaleType="center"
+            android:padding="11dp"
+            android:contentDescription="上一首" />
+
+        <ImageButton
+            android:id="@+id/n_toggle"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1.15"
+            android:background="@android:color/transparent"
+            android:scaleType="center"
+            android:padding="0dp"
+            android:contentDescription="播放" />
+
+        <ImageButton
+            android:id="@+id/n_next"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:scaleType="center"
+            android:padding="11dp"
+            android:contentDescription="下一首" />
+
+        <ImageButton
+            android:id="@+id/n_lyric"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:background="@android:color/transparent"
+            android:scaleType="center"
+            android:padding="11dp"
+            android:contentDescription="悬浮歌词" />
+    </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

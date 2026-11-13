@@ -16,6 +16,7 @@ import { Modal } from '../components/Modal'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
 import { AddToPlaylistDialog } from '../components/AddToPlaylistDialog'
 import { toast } from '../lib/toast'
+import { queueToast } from '../lib/queueToast'
 import { confirm } from '../lib/confirm'
 import { consumeLongPress, longPressProps } from '../lib/longPress'
 import { isCoarsePointer } from '../lib/shellMode'
@@ -126,12 +127,12 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
 
   const rowMenu = (t: LocalTrack, i: number): MenuItem[] => [
     { id: 'play', label: '播放', icon: <IconPlay width={14} height={14} />, onSelect: () => p.playList(tracks, i) },
-    { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => p.addToQueue(t, 'next') },
-    { id: 'queue', label: '加入播放列表', icon: <IconPlus width={14} height={14} />, onSelect: () => p.addToQueue(t, 'end') },
+    { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => { queueToast([t], p.queueState.queue, 'next'); p.addToQueue(t, 'next') } },
+    { id: 'queue', label: '加入播放列表', icon: <IconPlus width={14} height={14} />, onSelect: () => { queueToast([t], p.queueState.queue, 'end'); p.addToQueue(t, 'end') } },
     { id: 'addpl', label: '加入其它歌单…', icon: <IconMusicNote width={14} height={14} />, onSelect: () => setAddTo([t.id]) },
     { id: 'd1', label: '', divider: true, onSelect: () => {} },
     { id: 'detail', label: '歌曲详情', icon: <IconLyric width={14} height={14} />, onSelect: () => onOpenDetail(t) },
-    { id: 'reveal', label: '在文件夹中显示', icon: <IconFolder width={14} height={14} />, onSelect: () => void bridge.revealInFolder(t.path) },
+    { id: 'reveal', label: bridge.isAndroid ? '复制路径' : '在文件夹中显示', icon: <IconFolder width={14} height={14} />, onSelect: () => void bridge.revealInFolder(t.path) },
     {
       id: 'copy', label: '复制歌曲信息', icon: <IconLyric width={14} height={14} />,
       onSelect: () => { void navigator.clipboard?.writeText(`${t.title} - ${t.artist}`) },
@@ -196,7 +197,7 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
               <button className="primary-btn" disabled={!tracks.length} onClick={() => p.playList(tracks, 0)}>
                 <IconPlay width={13} height={13} /> 播放全部
               </button>
-              <button className="ghost-btn" disabled={!tracks.length} onClick={() => p.addManyToQueue(tracks, 'next')}>
+              <button className="ghost-btn" disabled={!tracks.length} onClick={() => { queueToast(tracks, p.queueState.queue, 'next'); p.addManyToQueue(tracks, 'next') }}>
                 <IconNext width={13} height={13} /> 下一首播放
               </button>
               <button className="ghost-btn" onClick={() => { setPicked(new Set()); setQuery(''); setPicking(true) }}>
@@ -233,10 +234,10 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
             <button className="bb-btn primary" onClick={() => p.playList(selTracks, 0)}>
               <IconPlay width={12} height={12} /> 播放
             </button>
-            <button className="bb-btn" onClick={() => p.addManyToQueue(selTracks, 'next')}>
+            <button className="bb-btn" onClick={() => { queueToast(selTracks, p.queueState.queue, 'next'); p.addManyToQueue(selTracks, 'next') }}>
               <IconNext width={12} height={12} /> 下一首播放
             </button>
-            <button className="bb-btn" onClick={() => p.addManyToQueue(selTracks, 'end')}>
+            <button className="bb-btn" onClick={() => { queueToast(selTracks, p.queueState.queue, 'end'); p.addManyToQueue(selTracks, 'end') }}>
               <IconPlus width={12} height={12} /> 加入播放列表
             </button>
             <button className="bb-btn" onClick={() => setAddTo(selTracks.map(t => t.id))}>
@@ -286,7 +287,7 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
             <span className="plp-dur">时长</span>
             <span className="plp-rmcol" />
           </div>
-          <div className="plp-list">
+          <div className="plp-list" data-selecting={sel.size > 0 ? 'true' : undefined}>
             {tracks.map((t, i) => {
               const live = p.current?.id === t.id
               const on = sel.has(t.id)
@@ -303,7 +304,7 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
                     if (!on) { setSel(new Set([t.id])); anchor.current = i }
                     setMenu({ x: e.clientX, y: e.clientY, track: t, index: i })
                   }}
-                  title="单击播放 · Ctrl 点多选 · 右键更多"
+                  title="单击播放 · 长按多选"
                 >
                   <button
                     className={'cbx plp-cbx' + (on ? ' on' : '')}

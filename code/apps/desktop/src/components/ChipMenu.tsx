@@ -45,6 +45,17 @@ export function ChipMenu({
 }: Props) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  /*
+   * 退场留白：列表是「小浮层」这一档，110ms 就够。
+   * 直接 `open && …` 的话点完选项面板是瞬间消失的，和进场那 120ms 不对称，
+   * 看着像「闪了一下」。
+   */
+  const [shown, setShown] = useState(false)
+  useEffect(() => {
+    if (open) { setShown(true); return }
+    const t = window.setTimeout(() => setShown(false), 130)
+    return () => window.clearTimeout(t)
+  }, [open])
 
   useEffect(() => {
     if (!open) return
@@ -81,8 +92,14 @@ export function ChipMenu({
         <IconChevronDown width={11} height={11} />
       </button>
 
-      {open && (
-        <div className="chip-pop" role="listbox" aria-label={label} style={{ minWidth: width }}>
+      {shown && (
+        <div
+          className="chip-pop"
+          role="listbox"
+          aria-label={label}
+          style={{ minWidth: width }}
+          data-closing={open ? undefined : 'true'}
+        >
           {options.map(o => {
             const on = o.id === activeId
             return (

@@ -7,7 +7,7 @@
  *
  * 交互：Esc 关闭、点遮罩关闭、打开时把焦点收进来、关闭后还给原来的元素。
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { IconClose } from './icons'
 
 interface Props {
@@ -33,6 +33,20 @@ export function Modal({ open, title, hint, onClose, children, footer, width = 46
   const closeRef = useRef(onClose)
   closeRef.current = onClose
 
+  /**
+   * 退场留白：`open` 已经变 false 了还留它 200ms，让动画把卡片收回去。
+   *
+   * 以前这里是 `if (!open) return null`——弹窗一亮一灭都是硬切，
+   * 用户说的「弹窗没有动画，很僵硬」主要就是指关上这一下：
+   * 进场有 modal-rise，退场是瞬间消失，反而更刺眼。
+   */
+  const [shown, setShown] = useState(open)
+  useEffect(() => {
+    if (open) { setShown(true); return }
+    const t = window.setTimeout(() => setShown(false), 200)
+    return () => window.clearTimeout(t)
+  }, [open])
+
   useEffect(() => {
     if (!open) return
     const prev = document.activeElement as HTMLElement | null
@@ -45,7 +59,13 @@ export function Modal({ open, title, hint, onClose, children, footer, width = 46
       if (cur && cur !== document.body && card.contains(cur) && cur !== card) return
       // 优先把焦点给「要填写/拖动的东西」，没有才落在按钮上
       const first =
-        card.querySelector<HTMLElement>('input:not([type=range]), textarea, select')
+        /*
+         * `data-modal-focus`：调用方指定的落点（比如配比滑块）。
+         * 没有它的时候退到第一个输入框 —— 最后才退按钮：把焦点落在
+         * 右上角那个「×」上，触屏会顶出一圈蓝色焦点环，像按钮坏了。
+         */
+        card.querySelector<HTMLElement>('[data-modal-focus]')
+        ?? card.querySelector<HTMLElement>('input:not([type=range]), textarea, select')
         ?? card.querySelector<HTMLElement>('input[type=range]')
         ?? card.querySelector<HTMLElement>('button')
       first?.focus({ preventScroll: true })
@@ -67,10 +87,17 @@ export function Modal({ open, title, hint, onClose, children, footer, width = 46
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  if (!open) return null
+  if (!shown) return null
 
   return (
-    <div className="modal-scrim" role="presentation" onPointerDown={e => { if (e.target === e.currentTarget) onClose() }}>
+    <div
+      className="modal-scrim"
+      role="presentation"
+      /* 退场这一帧只负责放动画：遮罩立刻不吃点击，否则关掉后 200ms 里点哪都没反应 */
+      data-closing={open ? undefined : 'true'}
+      aria-hidden={open ? undefined : true}
+      onPointerDown={e => { if (open && e.target === e.currentTarget) onClose() }}
+    >
       <div
         className="modal-card themed"
         ref={cardRef}

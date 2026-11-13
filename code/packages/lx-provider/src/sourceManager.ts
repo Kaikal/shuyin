@@ -26,6 +26,13 @@ export const SOURCE_TIMEOUT_MS = 6_000
 const HEDGE_SOURCE_MS = 320
 /** 脚本初始化超时 */
 export const INIT_TIMEOUT_MS = 15_000
+/**
+ * 取链前最多等装载多久。
+ *
+ * 装载是并发的两三个脚本，正常 1~3 秒；等到 8 秒还没完就按现状往下走
+ * （宁可按真实状态失败，也别让用户点了一首歌却干等）。
+ */
+const LOAD_WAIT_MS = 8_000
 
 export interface SourceManagerOptions {
   host: LxHostAdapter
@@ -44,7 +51,7 @@ export interface SourceManagerOptions {
    * 必须**随调用传**、不能放模块级共享变量：现在多个平台是同时开跑的，
    * 共享变量会被别的平台覆盖，校验就会拿着错的时长去判。
    */
-  verify?: (url: string, expect?: { duration?: number }) => Promise<void>
+  verify?: (url: string, expect?: { duration?: number; title?: string }) => Promise<void>
 }
 
 export interface GetUrlAttempt {
@@ -99,7 +106,9 @@ export class SourceManager {
   private lastGood = new Map<PlatformSource, string>()
   private listeners = new Set<SourceManagerListener>()
   private loading = false
-  private verify?: (url: string, expect?: { duration?: number }) => Promise<void>
+  /** 正在跑的这一轮装载（完成即 resolve，永不 reject）。取链前要等它 */
+  private pendingLoad: Promise<void> | null = null
+  private verify?: (url: string, expect?: { duration?: number; title?: string }) => Promise<void>
   /**
    * 要扫描的音源目录。
    *
@@ -187,8 +196,20 @@ export class SourceManager {
     return out
   }
 
-  /** 读目录 + 逐个装载。失败的音源以 status='error' 留在列表里，不静默丢弃 */
+  /**
+   * 读目录 + 逐个装载。失败的音源以 status='error' 留在列表里，不静默丢弃
+   *
+   * 包一层是为了留下「这一轮装载什么时候结束」的凭据：冷启动时取链和装载是
+   * 并发的（见 `waitLoaded`），调用方必须先能等它。
+   */
   async loadAll(dir?: string | string[]): Promise<LoadedSource[]> {
+    const task = this.doLoadAll(dir)
+    // 吞掉 rejection：这里只关心「什么时候跑完」，失败由调用方从返回值 / 状态里看
+    this.pendingLoad = task.then(() => {}, () => {})
+    return task
+  }
+
+  private async doLoadAll(dir?: string | string[]): Promise<LoadedSource[]> {
     if (dir !== undefined) this.applyDirs(dir)
     this.loading = true
     this.emit()
@@ -317,6 +338,29 @@ export class SourceManager {
   /* ---------------- 取播放链接 ---------------- */
 
   /**
+   * 等这一轮装载跑完（最多 [ms]）。
+   *
+   * 冷启动就是「恢复上次那首歌 → 立刻取链」和「装载两个音源脚本」同时在跑，
+   * 装载慢一步，取链就会在「一个 ready 音源都没有」的世界里失败，用户看到
+   * 「各平台都没有可用音源」，可手动点播放又好了（那时脚本已经装完）。
+   * 所以取链前先等它一下——只等装载，不等网络。
+   */
+  private async waitLoaded(ms = LOAD_WAIT_MS): Promise<void> {
+    const p = this.pendingLoad
+    if (!p) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      p,
+      new Promise<void>(res => { timer = setTimeout(res, ms) }),
+    ]).finally(() => { if (timer) clearTimeout(timer) })
+  }
+
+  /** 还有音源停在 loading 上（脚本还没声明完自己会什么） */
+  private anyLoading(): boolean {
+    return this.sources.some(s => s.status === 'loading')
+  }
+
+  /**
    * 拿可播放 URL。失败不会静默返回空串，而是抛 NoPlayableSourceError，
    * 由 UI 展示「该音源暂无版权」+「换源」。
    *
@@ -334,8 +378,17 @@ export class SourceManager {
     platform: PlatformSource,
     musicInfo: unknown,
     quality = '320k',
-    opts: { exclude?: string[]; sourceId?: string; expectDuration?: number } = {},
+    opts: { exclude?: string[]; sourceId?: string; expectDuration?: number; expectTitle?: string } = {},
   ): Promise<{ url: string; sourceId: string; sourceName: string; quality: string }> {
+    /*
+     * 冷启动那一拍的「各平台都没有可用音源」：
+     * 恢复上次曲目时会立刻预加载并取链，而音源脚本还在装载 —— 此刻
+     * `getReadySourcesFor` 是空的，链子一条都没有，抛出去就是满屏失败提示；
+     * 等两秒用户自己点播放，脚本装完了，又能播。只在这种情况下等装载。
+     */
+    if (!this.getReadySourcesFor(platform).length && (this.anyLoading() || this.pendingLoad)) {
+      await this.waitLoaded()
+    }
     const chain = this.chainFor(platform).filter(s => !opts.exclude?.includes(s.id))
     const tries = opts.sourceId ? chain.filter(s => s.id === opts.sourceId) : chain
     if (!tries.length) throw new NoPlayableSourceError(platform, [])
@@ -360,7 +413,7 @@ export class SourceManager {
         if (done || started >= tries.length) return
         const src = tries[started++]
         pending++
-        this.trySource(platform, src, musicInfo, quality, opts.expectDuration).then(
+        this.trySource(platform, src, musicInfo, quality, opts.expectDuration, opts.expectTitle).then(
           hit => {
             if (done) return
             done = true
@@ -407,6 +460,7 @@ export class SourceManager {
     musicInfo: unknown,
     quality: string,
     expectDuration?: number,
+    expectTitle?: string,
   ): Promise<{ url: string; sourceId: string; sourceName: string; quality: string }> {
     const sup = src.supports.find(x => x.source === platform)
     const wanted = pickQuality(sup?.qualitys ?? [], quality)
@@ -424,7 +478,7 @@ export class SourceManager {
         // 出链成功不代表能播：落地验一次，坏的当这一档失败，继续降档/换源
         if (this.verify) {
           await withTimeout(
-            this.verify(url, { duration: expectDuration }),
+            this.verify(url, { duration: expectDuration, title: expectTitle }),
             6_000,
             '直链校验超时',
           )

@@ -24,9 +24,15 @@ object Sy {
     /** 播放缓存（听过的歌留一份），清缓存不动它以外的任何东西 */
     val cacheAudio: File get() = File(app.cacheDir, "audio").apply { mkdirs() }
 
-    /** 下载目录：应用专属外部目录，不需要任何权限，卸载时一并清掉 */
+    /**
+     * 下载目录：**公共存储**的 `Music/疏音`（不是 `Android/data/…`）。
+     *
+     * 以前是 `getExternalFilesDir("Music")`——不需要权限、卸载即清，听起来干净，
+     * 但 Android 11 起文件管理器点进去只显示「无法访问」，别的播放器更扫不到，
+     * 用户下完的歌在系统里等于不存在。落盘细节见 `DownloadStore`。
+     */
     val downloads: File
-        get() = (app.getExternalFilesDir("Music") ?: File(files, "Music")).apply { mkdirs() }
+        get() = DownloadStore.defaultDir()
 
     /** 本地歌曲封面导出目录（WebView 通过本地资产域取图） */
     val covers: File get() = File(app.cacheDir, "covers").apply { mkdirs() }

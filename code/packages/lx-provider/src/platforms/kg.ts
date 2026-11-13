@@ -22,7 +22,8 @@
  *   · 首屏只给 `reply_num`（回复数量），**不给回复内容**，要点开再取一次。
  */
 import {
-  b64decodeUtf8, clean, cnTimeToSec, commentText, emojiCode, getJson, imageUrlsOf, toSeconds,
+  b64decodeUtf8, clean, cnTimeToSec, commentText, emojiCode, getJson, imageUrlsOf, nicknameText,
+  toSeconds,
 } from '../http'
 import { md5Hex } from '../md5'
 import { asRankId, isRankId, rankRawId } from '../types'
@@ -38,7 +39,12 @@ const HEADERS: Record<string, string> = {
 }
 
 /** 封面 `{size}` 占位 → 真尺寸 */
-const cover = (u: any, size = 400) =>
+/**
+ * 封面：酷狗的路径里带一档尺寸（`stdmusic/{size}/…`），任意整数都能取到。
+ * 400 在高分屏的播放页大封面上明显发虚，基线提到 500；
+ * 需要更大的场合（播放页 / 详情页）由 `coverUrlOf` 升到 800。
+ */
+const cover = (u: any, size = 500) =>
   u ? String(u).replace('{size}', String(size)).replace(/^http:\/\//, 'https://') : undefined
 
 /* ------------------------------------------------------------------ */
@@ -71,21 +77,44 @@ function cookieBag(s: string): Map<string, string> {
 }
 
 /**
- * 登录凭证：酷狗把它整串塞在 `KuGoo` 里（`uid=…&token=…`，值 URL 编码过），
- * 不是单独的同名 cookie。拿不到就是未登录，此时网关给的是公共日推。
+ * 登录凭证：酷狗把整串塞在 `KuGoo` 里，不是单独的同名 cookie。
+ *
+ * **字段名有两套，两套都得认**——这是「日推第一首永远不对」的根源：
+ *   · App 端写入：`uid=…&token=…`
+ *   · 网页登录写入（我们桌面/安卓走的就是这条）：`KugooID=…&KugooPwd=…&t=…`
+ * 早期只认第一套，网页登录的账号一律被判成未登录，`userid=0` 打过去拿到的是
+ * **公共日推**（`rec_copy_write` 全写「人气歌曲推荐」），不是账号自己那份——
+ * 表现就是「第一首永远是当天的热门，不是我的」。
+ *
+ * 另外 `KuGoo` 的值里有 `%u006b` 这种老式转义，`decodeURIComponent` 遇它会抛
+ * URIError（整串作废），所以先手动把 `%uXXXX` 换成字符再解码。
  */
-function loginOf(bag: Map<string, string>): { uid?: string; token?: string } {
+function loginOf(bag: Map<string, string>): { uid?: string; token?: string; nick?: string; pic?: string } {
   const raw = bag.get('KuGoo') ?? ''
-  let text = raw
-  try { text = decodeURIComponent(raw) } catch { /* 不是编码过的就原样用 */ }
+  let text = raw.replace(/%u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+  try { text = decodeURIComponent(text) } catch { /* 不是编码过的就原样用 */ }
   const kv = new Map<string, string>()
   for (const part of text.split('&')) {
     const i = part.indexOf('=')
     if (i > 0) kv.set(part.slice(0, i).trim().toLowerCase(), part.slice(i + 1).trim())
   }
+  // 游客态也会写 `KugooID=0`，别当成登录（传 userid=0 等于没登录）
+  const rawId = kv.get('uid') || kv.get('userid') || kv.get('kugooid')
+    || bag.get('userid') || bag.get('KugooID') || ''
   return {
-    uid: kv.get('uid') || kv.get('userid') || bag.get('userid'),
-    token: kv.get('token') || bag.get('token'),
+    uid: rawId && rawId !== '0' ? rawId : undefined,
+    // `t` 是网页登录的 token，App 那份叫 token
+    token: kv.get('token') || kv.get('t') || bag.get('token'),
+    /*
+     * 昵称和头像**也在 `KuGoo` 里**（`NickName` / `Pic`），网页登录时一并写进去，
+     * 不用再打任何接口。`%uXXXX` 的解码上面已经做过了，这里拿到的就是明文。
+     *
+     * 别改成「请求 user/info」：酷狗那几个资料接口（`mobiles/v3/user/info`、
+     * `www.kugou.com/yy/index.php?r=user/info`）实测一律回 `Access Deny !!!`，
+     * 要签名的那条还得再补 appid/客户端版本一堆参数——而 cookie 里本来就有答案。
+     */
+    nick: kv.get('nickname') || bag.get('UserName') || undefined,
+    pic: kv.get('pic') || undefined,
   }
 }
 
@@ -187,6 +216,57 @@ function normalizeEveryday(s: any): SearchSong {
 }
 
 /**
+ * 云歌单（`get_list_all_file_v3`）的一首歌。
+ *
+ * 和每日推荐那份长得像但字段名不同，几个坑：
+ *   · `name` 是 **`歌手 - 歌名.mp3`**，带扩展名；不剥掉的话列表每行末尾都挂着「.mp3」
+ *   · `timelen` 是**毫秒**（261000），不是秒
+ *   · 封面在顶层 `cover`（带 `{size}` 占位），专辑名在 `albuminfo.name`
+ *   · `bitrate` 是**实际码率**（128 / 320 / 999 无损），比 hash 字段靠谱
+ */
+function normalizeCloud(s: any): SearchSong {
+  const hash = String(s.hash ?? '')
+  const rawName = clean(s.name ?? s.filename).replace(/\.(mp3|flac|m4a|ape|wav|ogg)$/i, '')
+  const cut = rawName.indexOf(' - ')
+  const artist = cut > 0 ? rawName.slice(0, cut).trim() : ''
+  const name = cut > 0 ? rawName.slice(cut + 3).trim() : rawName
+  const singers: string[] = Array.isArray(s.singerinfo)
+    ? s.singerinfo.map((x: any) => clean(x?.name)).filter(Boolean)
+    : []
+  const rate = Number(s.bitrate ?? 0) || 0
+  const q: string[] = []
+  if (hash) q.push('128k')
+  if (rate >= 320) q.push(rate >= 900 ? 'flac' : '320k')
+  const len = Number(s.timelen ?? 0) || 0
+  return {
+    id: hash,
+    songmid: hash,
+    source: 'kg',
+    name,
+    singer: singers.length ? singers : artist.split(/[&、,，]/).map(x => x.trim()).filter(Boolean),
+    albumName: clean(s.albuminfo?.name ?? s.album_name),
+    albumId: s.album_id != null ? String(s.album_id) : undefined,
+    interval: len > 10_000 ? Math.round(len / 1000) : Math.round(len),
+    img: cover(s.cover ?? s.trans_param?.union_cover),
+    qualities: q.length ? q : undefined,
+    raw: { ...s, hash, songmid: hash, songId: hash },
+  }
+}
+
+/**
+ * 云歌单的 `listid`。
+ *
+ * `get_all_list` 给的是 `kgc:collection_3_<uid>_<listid>_0`，取歌接口只认那个
+ * 自增序号。两种写法都兜：纯数字直接用，`collection_…` 取第 4 段。
+ */
+function cloudListId(id: string): number {
+  const raw = id.startsWith('kgc:') ? id.slice(4) : id
+  if (/^\d+$/.test(raw)) return Number(raw)
+  const m = /^collection_\d+_\d+_(\d+)_\d+$/.exec(raw)
+  return m ? Number(m[1]) : 0
+}
+
+/**
  * 从搜索结果的几个 hash 字段推出「这首歌真实可用的档位」。
  *
  * 酷狗的分档：普通 `FileHash` = 128k，`HQFileHash` = 320k，
@@ -246,7 +326,15 @@ function normalizeDetail(s: any): SearchSong {
     albumName: clean(s.album_name ?? s.albumname ?? ''),
     albumId: s.album_id != null ? String(s.album_id) : undefined,
     interval: Number(s.duration ?? s.timelen ?? 0) || 0,
-    img: cover(s.album_img ?? s.album_sizable_cover ?? s.img ?? s.image),
+    /*
+     * `special/song`（歌单详情）这份响应里**没有任何 album_img / img 字段**，
+     * 封面只藏在 `trans_param.union_cover`（带 `{size}` 占位）里——
+     * 漏了它就整张歌单的封面全是灰块，队列快照存下来也是 cover:null，
+     * 播放页的黑胶标签跟着一起没图。榜单接口走的是 `album_sizable_cover`，
+     * 两边的字段名不一样，所以这里要把两条都兜住。
+     */
+    img: cover(s.album_img ?? s.album_sizable_cover ?? s.img ?? s.image
+      ?? s.trans_param?.union_cover),
     qualities: q.length ? q : undefined,
     raw: { ...s, hash, songmid: hash, songId: hash },
   }
@@ -360,7 +448,7 @@ export function createKgApi(client: HttpClient): PlatformApi {
           id: String(p.specialid),
           source: 'kg' as const,
           name: clean(p.specialname),
-          cover: cover(p.imgurl, 400),
+          cover: cover(p.imgurl),
           creator: clean(p.nickname),
           songCount: Number(p.songcount ?? 0),
           playCount: Number(p.playcount ?? 0),
@@ -390,7 +478,7 @@ export function createKgApi(client: HttpClient): PlatformApi {
           id: String(p.specialid),
           source: 'kg' as const,
           name: clean(p.specialname),
-          cover: cover(p.imgurl, 400),
+          cover: cover(p.imgurl),
           creator: clean(p.username ?? p.singername),
           songCount: Number(p.songcount ?? 0),
           playCount: Number(p.playcount ?? 0),
@@ -423,7 +511,7 @@ export function createKgApi(client: HttpClient): PlatformApi {
           source: 'kg' as const,
           name: clean(r.rankname),
           // `img_9` 是带榜单排名的方形海报，`album_img_9` 只是第一名的专辑图
-          cover: cover(r.img_9 ?? r.album_img_9 ?? r.imgurl, 400),
+          cover: cover(r.img_9 ?? r.album_img_9 ?? r.imgurl),
           intro: clean(r.intro) || clean(r.update_frequency) || undefined,
           songCount: Number(r?.extra?.resp?.all_total ?? 0) || undefined,
           playCount: Number(r.play_times ?? 0) || undefined,
@@ -463,6 +551,25 @@ export function createKgApi(client: HttpClient): PlatformApi {
     },
 
     /**
+     * 当前登录的账号。
+     *
+     * 昵称 / 头像 / uid **全在 `KuGoo` cookie 里**，一次请求都不用发——见 `loginOf`。
+     * 界面上必须能看出登的是谁：「我的歌单」拉回来的是**这个账号**的云歌单，
+     * 名字对不上（比如登成了另一个号）时，用户只看到「歌单少了一半」，
+     * 根本想不到是登录的问题。
+     */
+    async getAccount() {
+      const bag = cookieBag(client.cookieFor?.('https://www.kugou.com/') ?? '')
+      const { uid, nick, pic } = loginOf(bag)
+      if (!uid) return null
+      return {
+        userId: uid,
+        nickname: nicknameText(nick) || `酷狗用户 ${uid.slice(-6)}`,
+        avatar: cover(pic, 400),
+      }
+    },
+
+    /**
      * 登录账号自己建的歌单：`POST gateway.kugou.com/v7/get_all_list`
      * （`x-router: cloudlist.service.kugou.com`）。
      *
@@ -487,8 +594,29 @@ export function createKgApi(client: HttpClient): PlatformApi {
           ...p,
           plat: 1,
         }, body)
-      } catch {
-        return null
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        /*
+         * `20017` = 这份 token 读不了云歌单。
+         *
+         * 云歌单要求 **App 签发的 token**：网页登录窗写进 cookie 的 `t` 只能过
+         * 网页接口和「每日推荐」，拿它来读云歌单一律 `20017`（实网对比过：
+         * 签名错是 `20006`、token 为空是 `20010`、token 是网页那份就是 `20017`）。
+         *
+         * 现在登录走的是 `lib/kgLogin.ts` 的验证码接口，签的就是 App token，
+         * 正常不会再撞上这个码；还会撞上只有一种情况——**老存档**：
+         * 用户之前用网页登录窗登过，凭证还留着，界面显示「已登录」但读不了歌单。
+         * 所以文案要指路「退出重登」，而不是让他去猜。
+         *
+         * 这里不再吞成 `null`：界面要能说出「为什么一张歌单都没有」，
+         * 否则用户看到的是「登录了但歌单没了」。
+         */
+        if (/20017/.test(msg)) {
+          throw new Error('酷狗这份登录凭证读不了云歌单，退出后用短信验证码重登一次')
+        }
+        // 20010 = 没登录（游客态）：按「这个账号没有歌单」处理，不算错误
+        if (/20010/.test(msg)) return null
+        throw e
       }
       const raw: any[] = j?.data?.info ?? j?.data?.list ?? j?.data?.lists ?? []
       const list: HotPlaylistItem[] = raw
@@ -505,30 +633,69 @@ export function createKgApi(client: HttpClient): PlatformApi {
       return list.length ? { list, hasMore: false, source: 'kg' } : null
     },
 
+    /**
+     * 云歌单（「我的歌单」）取歌。
+     *
+     * **别再拿 `/v3/get_list_info` 取歌**（2026-11 实测）：那个接口只回歌单
+     * **元数据**——`count` 有 18、`plist` 却是空数组，歌在任何字段里都没有。
+     * 老代码从 `one.songs ?? songlist ?? info` 里找，全落空，于是每张云歌单
+     * 都变成「能进去、里面是空的」。界面看到的正是用户报的那句
+     * 「能获取到歌单，但是歌单里面都是空的」。
+     *
+     * 真正的取歌端点是 `/v4/get_list_all_file_v3`（x-router 走 cloudlist），
+     * 认 `listid` 而不是 `global_collection_id`；它同时回 `data.count`，
+     * 所以分页上限按它算。`pagesize` 一次最多 300，多的要翻页。
+     */
     async getPlaylistDetail(id, page = 1, limit = 300): Promise<PlaylistDetail> {
-      // 云歌单（「我的歌单」）走另一条：用 global_collection_id 换歌
       if (id.startsWith('kgc:')) {
-        const gcid = id.slice(4)
+        const listid = cloudListId(id)
+        if (!listid) throw new Error('这个歌单的编号认不出来')
         const p = deviceParams(client)
-        const body = JSON.stringify({
-          data: [{ global_collection_id: gcid }],
-          userid: Number(p.userid ?? 0),
-          token: String(p.token ?? ''),
-        })
-        const j = await gatewayPost(client, 'pubsongs.kugou.com', '/v3/get_list_info', p, body)
-        const one = j?.data?.list?.[0] ?? j?.data?.info?.[0] ?? j?.data?.data?.[0] ?? j?.data ?? {}
-        const raw: any[] = one?.songs ?? one?.songlist ?? one?.song_list ?? one?.info ?? []
-        const songs = raw.map(normalizeEveryday)
-        if (!songs.length) throw new Error('这个歌单里还没有歌')
+        /*
+         * 一次最多 300 条，多的自己翻页。
+         * 详情页是 `getPlaylistDetail(id, 1, 1000)` 一次要全，不翻页的话
+         * 500 首的歌单只会出现前 300 首——而且没有任何提示。
+         */
+        const want = Math.max(1, Math.min(1200, limit))
+        const songs: SearchSong[] = []
+        let total = 0
+        let at = page
+        while (songs.length < want) {
+          const size = Math.min(300, want - songs.length)
+          const body = JSON.stringify({
+            listid,
+            userid: Number(p.userid ?? 0),
+            type: 0,
+            page: at,
+            pagesize: size,
+            area_code: 1,
+            allplatform: 1,
+            show_cover: 1,
+            token: String(p.token ?? ''),
+          })
+          const j = await gatewayPost(client, 'cloudlist.service.kugou.com', '/v4/get_list_all_file_v3', p, body)
+          const raw: any[] = j?.data?.info ?? []
+          total = Number(j?.data?.count ?? 0) || total
+          songs.push(...raw.map(normalizeCloud))
+          // 到底了（或平台只肯给这么多），收工
+          if (raw.length < size || (total && songs.length >= total)) break
+          at++
+        }
+        if (!songs.length) {
+          throw new Error(total
+            ? '这次没取到歌（平台限流），过一会儿再点一次'
+            : '这个歌单里还没有歌')
+        }
         return {
           id,
           source: 'kg',
-          name: clean(one?.listname ?? one?.list_name ?? one?.name),
-          cover: cover(one?.list_pic ?? one?.pic) ?? songs[0]?.img,
-          songCount: songs.length,
+          // 歌单名/封面由调用方沿用列表页那份，这里留空
+          name: '',
+          cover: songs[0]?.img,
           songs,
-          total: songs.length,
-          hasMore: false,
+          songCount: total || songs.length,
+          total: total || songs.length,
+          hasMore: total > songs.length,
         }
       }
       if (isRankId(id)) return rankSongs(client, rankRawId(id), page, limit)

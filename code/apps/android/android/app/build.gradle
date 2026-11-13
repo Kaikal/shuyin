@@ -18,8 +18,8 @@ android {
     defaultConfig {
         minSdk 24
         targetSdk 34
-        versionCode 5
-        versionName '0.6.4'
+        versionCode 108
+        versionName '0.6.107'
         resValue "string", "app_name", "疏音"
     }
 
@@ -93,3 +93,19 @@ tasks.register('checkWebAssets') {
     }
 }
 tasks.named('preBuild') { dependsOn 'checkWebAssets' }
+
+/*
+ * 播放器：media3 ExoPlayer。
+ *
+ * 换掉系统 MediaPlayer 的唯一理由是**频谱**：MediaPlayer 只能通过
+ * `android.media.audiofx.Visualizer` 拿输出音频，而那玩意要 RECORD_AUDIO
+ * （用户不想给「一个音乐播放器要录音权限」）。ExoPlayer 的音频处理链允许插一个
+ * 自定义 AudioProcessor，在 PCM 送去扬声器之前复制一份——不需要任何权限，
+ * 而且拿到的是自己解码的原始数据，和播放进度严格同步（见 TapAudioProcessor.kt）。
+ *
+ * 只引 exoplayer 主包：MediaSession / UI 组件都用不上，通知和锁屏控制
+ * 继续走现成的自研实现（PlaybackService 里的 MediaSession 是系统类，不是 media3 的）。
+ */
+dependencies {
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+}

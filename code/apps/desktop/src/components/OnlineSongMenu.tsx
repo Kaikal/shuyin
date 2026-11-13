@@ -13,6 +13,7 @@
 import { usePlayer } from '../lib/PlayerProvider'
 import { useDownloads } from '../lib/DownloadsProvider'
 import { platformName, toLocalTrack } from '../lib/online'
+import { queueToast } from '../lib/queueToast'
 import type { SearchSong } from '@shuyin/lx-provider'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { IconDownload, IconNext, IconPlay, IconPlus } from './icons'
@@ -53,8 +54,8 @@ export function OnlineSongMenu({ x, y, song, onClose }: Props) {
 
   const items: MenuItem[] = [
     { id: 'play', label: '立即播放', icon: <IconPlay width={13} height={13} />, onSelect: () => p.playOne(track) },
-    { id: 'next', label: '下一首播放', icon: <IconNext width={13} height={13} />, onSelect: () => p.addToQueue(track, 'next') },
-    { id: 'queue', label: '加入播放列表', icon: <IconPlus width={13} height={13} />, onSelect: () => p.addToQueue(track, 'end') },
+    { id: 'next', label: '下一首播放', icon: <IconNext width={13} height={13} />, onSelect: () => { queueToast([track], p.queueState.queue, 'next'); p.addToQueue(track, 'next') } },
+    { id: 'queue', label: '加入播放列表', icon: <IconPlus width={13} height={13} />, onSelect: () => { queueToast([track], p.queueState.queue, 'end'); p.addToQueue(track, 'end') } },
     { id: 'div', divider: true, label: '', onSelect: () => {} },
     {
       id: 'dl',

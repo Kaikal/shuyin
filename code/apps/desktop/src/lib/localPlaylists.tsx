@@ -64,6 +64,10 @@ interface Ctx {
   }): LocalPlaylist
   rename(id: string, name: string): void
   remove(id: string): void
+  /** 歌单卡在「我的」里的排列顺序（拖动排序用，索引是 `lists` 里下标） */
+  reorder(from: number, to: number): void
+  /** 收藏的在线歌单排序（同上，下标是 `favs` 的） */
+  moveFav(from: number, to: number): void
   addTracks(id: string, ids: string[]): number
   removeTrack(id: string, trackId: string): void
   moveTrack(id: string, from: number, to: number): void
@@ -142,6 +146,36 @@ export function PlaylistsProvider({ children }: { children: ReactNode }) {
     setLists(prev => prev.filter(x => x.id !== id))
   }, [])
 
+  /**
+   * 拖动排序：把第 from 个挪到第 to 个。
+   *
+   * 数组顺序就是首页的展示顺序（`lists` 原样渲染），所以这里只动数组，
+   * 不需要额外的 order 字段——少一份状态就少一处能不一致的地方。
+   */
+  const reorder = useCallback((from: number, to: number) => {
+    if (from === to) return
+    dirty.current = true
+    setLists(prev => {
+      if (from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev
+      const arr = [...prev]
+      const [item] = arr.splice(from, 1)
+      arr.splice(to, 0, item)
+      return arr
+    })
+  }, [])
+
+  const moveFav = useCallback((from: number, to: number) => {
+    if (from === to) return
+    dirty.current = true
+    setFavs(prev => {
+      if (from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev
+      const arr = [...prev]
+      const [item] = arr.splice(from, 1)
+      arr.splice(to, 0, item)
+      return arr
+    })
+  }, [])
+
   const addTracks = useCallback((id: string, ids: string[]) => {
     let added = 0
     dirty.current = true
@@ -211,9 +245,9 @@ export function PlaylistsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const value = useMemo<Ctx>(() => ({
-    ready, lists, favs, create, rename, remove, addTracks, removeTrack, moveTrack,
+    ready, lists, favs, create, rename, remove, reorder, moveFav, addTracks, removeTrack, moveTrack,
     tracksOf, isFav, toggleFav, replaceAll,
-  }), [ready, lists, favs, create, rename, remove, addTracks, removeTrack, moveTrack, tracksOf, isFav, toggleFav, replaceAll, index])
+  }), [ready, lists, favs, create, rename, remove, reorder, moveFav, addTracks, removeTrack, moveTrack, tracksOf, isFav, toggleFav, replaceAll, index])
 
   return <PlaylistsCtx.Provider value={value}>{children}</PlaylistsCtx.Provider>
 }

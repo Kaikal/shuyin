@@ -17,6 +17,7 @@
  */
 import { bridge } from './bridge'
 import { settings } from './settings'
+import { titleMismatch } from './titleMatch'
 
 interface CacheEntry {
   /** 文件扩展名（含点），如 `.mp3` */
@@ -73,7 +74,7 @@ function extOf(url: string): string {
  * 都命中缓存，压根不出网，`verify` 一次都不会跑——用户听到的就是「标题写着花海，
  * 声音是邓紫棋唯一」，而且怎么重开都还是它。只有把文件本身读一遍才能发现。
  */
-export async function cachedAudio(trackId: string, expectSec = 0): Promise<string | null> {
+export async function cachedAudio(trackId: string, expectSec = 0, expectTitle = ''): Promise<string | null> {
   await boot()
   const e = index.get(trackId)
   if (!e) return null
@@ -84,16 +85,32 @@ export async function cachedAudio(trackId: string, expectSec = 0): Promise<strin
     persist()
     return null
   }
+  /** 判死刑：索引和文件一起清掉，让上层重新取链 */
+  const dropWrong = async (): Promise<null> => {
+    index.delete(trackId)
+    persist()
+    void bridge.cacheDrop(trackId, e.ext).catch(() => false)
+    return null
+  }
   // 短于 45 秒的不判（搜索结果时长误差占比太大，见 online.ts 里的同一套阈值）
   if (expectSec >= 45) {
     const real = await bridge.localAudioDuration(p).catch(() => 0)
     if (real > 0 && Math.abs(real - expectSec) > Math.max(10, expectSec * 0.06)) {
-      // 缓存里是别人的歌：索引和文件一起清掉，让上层重新取链
-      index.delete(trackId)
-      persist()
-      void bridge.cacheDrop(trackId, e.ext).catch(() => false)
-      return null
+      // 缓存里是别人的歌
+      return dropWrong()
     }
+  }
+  /*
+   * 名字这一道必须有，而且**不能只在时长上判**。
+   *
+   * 实测：播《孤勇者》（256 秒）拿到的文件是邓紫棋《唯一》（253.7 秒），
+   * 差 2.3 秒，6% 容差里全绿；可文件标签明明白白写着 TITLE=唯一。
+   * 缓存又是「按 id 永久定居」的，这份错文件之后永远跟着这首歌，
+   * 用户点了多少次都是错的，而且因为命中缓存根本不会再出网。
+   */
+  if (expectTitle) {
+    const t = await bridge.localAudioTags(p).catch(() => ({ title: '', artist: '' }))
+    if (titleMismatch(t.title, expectTitle)) return dropWrong()
   }
   return p
 }
@@ -106,30 +123,53 @@ export async function cachedAudio(trackId: string, expectSec = 0): Promise<strin
  * 会和流式播放抢同一批连接——用户感知到的就是「怎么点了半天才响」。
  * 6 秒后声音已经稳定、首段也缓够了，再补下载才不影响体感。
  */
-export function warmCache(trackId: string, url: string, delay = 6000): void {
-  if (!bridge.isNative || !url) return
-  if (index.has(trackId) || warming.has(trackId)) return
+/**
+ * 后台补一份缓存。返回实际写入的字节数（0 = 没写/已有/失败）。
+ *
+ * 返回 Promise 是为了让「暂停时批量预取」能**串行**执行：一条一条下，
+ * 恢复播放时才不会有一堆下载跟当前这首抢带宽。播放中的单首补缓存照旧
+ * 不用 await（`void warmCache(...)`）。
+ */
+export function warmCache(trackId: string, url: string, delay = 6000): Promise<number> {
+  if (!bridge.isNative || !url) return Promise.resolve(0)
+  if (index.has(trackId) || warming.has(trackId)) return Promise.resolve(0)
   warming.add(trackId)
   const ext = extOf(url)
-  window.setTimeout(() => {
-    void (async () => {
-      try {
-        const slot = await bridge.cacheSlot(trackId, ext)
-        if (!slot) return
-        const n = await bridge.downloadTrack(url, slot)
-        if (n > 0) {
-          index.set(trackId, { ext, at: Date.now(), size: n })
-          persist()
+  return new Promise<number>(resolve => {
+    window.setTimeout(() => {
+      void (async () => {
+        let wrote = 0
+        try {
+          const slot = await bridge.cacheSlot(trackId, ext)
+          if (!slot) return
+          const n = await bridge.downloadTrack(url, slot)
+          if (n > 0) {
+            index.set(trackId, { ext, at: Date.now(), size: n })
+            persist()
+            wrote = n
+          }
+        } catch { /* 缓存失败不影响播放，下次再补 */ } finally {
+          warming.delete(trackId)
+          resolve(wrote)
         }
-      } catch { /* 缓存失败不影响播放，下次再补 */ } finally {
-        warming.delete(trackId)
-      }
-    })()
-  }, delay)
+      })()
+    }, delay)
+  })
 }
 
 /** 缓存占用（字节）。索引只记已知条目，真值问 Rust 目录 */
 export const audioCacheSize = () => bridge.cacheSize().catch(() => 0)
+
+/**
+ * 这首歌有没有现成的缓存（只查索引，不碰磁盘）。
+ *
+ * 预缓存要用：已经在本机的那几首别再走一遍「音源脚本 → 平台接口 → 探活」，
+ * 那几次请求既慢又快被限流。真正播的时候 `cachedAudio` 还会再验一次文件。
+ */
+export async function hasCachedAudio(trackId: string): Promise<boolean> {
+  await boot()
+  return index.has(trackId)
+}
 
 /** 清空缓存：删目录 + 清索引，返回释放的字节数 */
 export async function clearAudioCache(): Promise<number> {

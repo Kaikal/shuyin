@@ -16,7 +16,18 @@
   overflow: hidden;
 }
 .page h1 { margin: 0 0 2px; font-size: 21px; font-weight: 600; letter-spacing: 0.01em; }
-.page-host { position: relative; height: 100%; }
+/*
+ * 页面外壳 + 横向长条。
+ *
+ * `.page-track` 是这条长条：五页并排，每页占满一屏宽。横滑时位移写在它身上，
+ * 所以手指拖到哪，隔壁那屏就跟着露出多少（以前屏幕上只有当前页，抬手后才有
+ * 第二段入场动画——用户说的「下一个进来的没跟上」就是那个）。
+ *
+ * `overflow: hidden` 必须在 `.page-host` 上：长条总宽是五屏，不裁就横向滚动了。
+ */
+.page-host { position: relative; height: 100%; overflow: hidden; }
+.page-track { display: flex; height: 100%; width: 100%; }
+.page-slot { position: relative; flex: 0 0 100%; height: 100%; min-width: 0; }
 
 /*
  * 常驻页面槽：让「在线搜索」在切走时只隐藏、不卸载（见 App.tsx 的说明）。
@@ -25,6 +36,37 @@
  */
 .page-keep { position: absolute; inset: 0; }
 .page-keep[hidden] { display: none; }
+
+/* ============================================================
+   页面切换
+   ------------------------------------------------------------
+   桌面：跨整屏的 Tab 切换走 `page-enter`（淡入 + 8px 上移），
+   节奏给 --sy-dur-page（320ms，手机 220ms）。
+
+   **手机不再用这条**：手机上换页是横向滑动（`.page-track`），
+   位移本身就是切换过程，再叠一层淡入会让「跟手」变成「滑完闪一下」。
+   ============================================================ */
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+html:not([data-shell='phone']) .page-slot[data-active='true'] > .page-keep:not([hidden]),
+html:not([data-shell='phone']) .page-slot[data-active='true'] > .page:not([hidden]) {
+  animation: page-enter var(--sy-dur-page, 320ms) var(--sy-ease-panel) both;
+}
+
+/*
+ * 二层页面（歌单详情 / 本地曲库 / 导入歌单）：从右侧推进来一点。
+ * 它压在上一页**上面**，方向必须和 Tab 切换区分开——否则「点了进去」
+ * 和「换了个 Tab」看起来一模一样。
+ */
+@keyframes page-push {
+  from { opacity: 0; transform: translateX(26px); }
+  to { opacity: 1; transform: none; }
+}
+.page-keep.push {
+  animation: page-push 240ms var(--sy-ease-panel) both;
+}
 
 /* ---------- 本地音乐 ---------- */
 .lib-head {
@@ -208,7 +250,18 @@
   mask-image: linear-gradient(to bottom, transparent 0, #000 14%, #000 86%, transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14%, #000 86%, transparent 100%);
 }
-.lyrics-track { position: absolute; left: 0; right: 0; top: 0; z-index: 1; will-change: transform; }
+/* 位移由 JS 直写 transform（拖动要 1:1 跟手，不走 React）；
+   这里的过渡管的是「松手回弹 / 换句跟随 / 点某行跳转」的平滑，
+   拖动开始时 JS 会把它设成 none。 */
+.lyrics-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 1;
+  will-change: transform;
+  transition: transform 320ms var(--sy-ease-panel);
+}
 /* 字号统一乘 --lf（每行的长句缩放，由 LyricsView 算出来）：
    太长的句子收字号而不是截断，整句都能读全。 */
 .lyric-line {
@@ -274,7 +327,14 @@
 .lyric-ref-rule {
   flex: 1;
   height: 0;
-  border-top: 1px dashed color-mix(in srgb, var(--sy-accent) 40%, transparent);
+  /*
+   * 词曲署名和正文之间那条分隔线，原来是 1px 虚线 + 40% 强调色。
+   * 强调色是给「可点 / 有状态」的东西用的，拿来做装饰分隔线，在近黑的播放页上
+   * 就是一条刺眼的青色虚线——用户会觉得「播放页颜色乱了」，很大一部分是这种线。
+   * 换成中性 hairline；`--sy-line-strong` 只在触屏那套令牌里有，
+   * 桌面回落到主题的 --sy-line。
+   */
+  border-top: 1px dashed var(--sy-line-strong, var(--sy-line));
 }
 /* 沉浸式里整行居中、字号更大，参考线的字也要跟着放大一点 */
 .lyrics.immersive .lyric-ref-time { font-size: 12px; padding: 2px 8px; }
@@ -481,6 +541,104 @@
 /* ---------- 设置 ---------- */
 .settings-page { overflow-y: auto; }
 .settings-page h1 { margin-bottom: 18px; }
+
+/*
+ * 分类条。
+ *
+ * 贴顶吸住：设置页是可滚的，滚到「桌面歌词」那一屏时分类条还在头上，
+ * 想换去「存储」直接点，不用先滚回顶端。
+ *
+ * 负 margin 是用来抵消 `.page` 的左右 32px 内边距的——不抵消的话，
+ * 条子只有内容那么宽，背景遮不住下面的滚动内容，上下会漏出两条缝。
+ */
+.set-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  /*
+   * `flex: none` 不能少。
+   *
+   * `.settings-page` 是 `display:flex; flex-direction:column`，滚动内容超出容器后
+   * 各个子项按 `flex-shrink:1` 参与收缩——**吸顶的那一条最先被压扁**（实测压到 12px，
+   * 标签被裁成半截，屏幕上看着像「顶部有多余的重影」）。它高度本来是内容决定的，
+   * 一旦允许收缩就必然被削。
+   */
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: -12px -32px 16px;
+  padding: 12px 32px 10px;
+  background: var(--sy-bg-base);
+  border-bottom: 1px solid var(--sy-line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  /* 手机上横向划一下切类，别让浏览器把这当成「滚页面」 */
+  touch-action: pan-x;
+}
+.set-tabs::-webkit-scrollbar { display: none; }
+
+.set-tab {
+  appearance: none;
+  flex: none;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--sy-radius-pill);
+  border: 1px solid transparent;
+  background: none;
+  color: var(--sy-text-2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--sy-dur-fast), color var(--sy-dur-fast), border-color var(--sy-dur-fast);
+}
+.set-tab:hover { background: var(--sy-surface); color: var(--sy-text-1); }
+.set-tab.on {
+  background: var(--sy-accent-a15);
+  border-color: var(--sy-accent-a26);
+  color: var(--sy-accent-soft);
+}
+.set-tab:focus-visible { outline: 2px solid var(--sy-accent-soft); outline-offset: 2px; }
+
+/*
+ * 只显示当前分类的分组。
+ *
+ * 没用「条件渲染」而是留着全部 DOM 只做显隐：SourcesSection / AccountSection
+ * 各自要拉音源清单、问云同步状态，反复卸载重挂会每切一次类就重扫一遍目录。
+ * 分组本来就很轻，藏起来比拆掉划算。
+ */
+.settings-page > [data-pane] { display: none; }
+.settings-page[data-pane='look'] > [data-pane='look'],
+.settings-page[data-pane='play'] > [data-pane='play'],
+.settings-page[data-pane='shell'] > [data-pane='shell'],
+.settings-page[data-pane='source'] > [data-pane='source'],
+.settings-page[data-pane='account'] > [data-pane='account'],
+.settings-page[data-pane='storage'] > [data-pane='storage'],
+.settings-page[data-pane='about'] > [data-pane='about'] { display: block; }
+
+/*
+ * 「播放」类里的先后：先音质，再频谱，再音效，最后启动行为。
+ * 源码顺序是按历史堆出来的，不改 DOM 只改视觉顺序，省得动那一大段 JSX。
+ */
+.settings-page[data-pane='play'] > [data-sec='quality'] { order: 1; }
+.settings-page[data-pane='play'] > [data-sec='spectrum'] { order: 2; }
+.settings-page[data-pane='play'] > [data-sec='fx'] { order: 3; }
+.settings-page[data-pane='play'] > [data-sec='boot'] { order: 4; }
+
+/*
+ * 「界面」页：先播放页外观（最常改），再锁屏，最后桌面那两样。
+ * 播放页那三项原来在「播放」页里，源码位置也跟着搬到了页面后半段，
+ * 不改 DOM 的话它会排到桌面歌词后面去。
+ */
+.settings-page[data-pane='shell'] > [data-sec='view'] { order: 1; }
+.settings-page[data-pane='shell'] > [data-sec='lock'] { order: 2; }
+.settings-page[data-pane='shell'] > [data-sec='desk'] { order: 3; }
+.settings-page[data-pane='shell'] > [data-sec='dl'] { order: 4; }
+
 .set-group {
   margin: 0 0 18px;
   padding: 18px;
@@ -595,7 +753,7 @@
 .pos-card .spv { height: 30px; }
 .pos-name { font-size: 11.5px; font-weight: 500; color: var(--sy-text-1); }
 
-/* 音效：预设小卡 + 三段滑块 */
+/* 音效：预设小卡 + 空间音效 chip */
 .fx-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
@@ -609,22 +767,284 @@
   padding: 8px 10px 7px;
   border-radius: 11px;
   border: 1px solid var(--sy-surface-border);
-  background: color-mix(in srgb, var(--sy-text-1) 3%, transparent);
+  /* 不用 color-mix：真机 WebView 104 不认，整条声明会失效变成透明底 */
+  background: var(--sy-chip-bg);
   color: var(--sy-text-2);
   text-align: left;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
   transition: border-color var(--sy-dur-fast) var(--sy-ease-soft),
               background var(--sy-dur-fast) var(--sy-ease-soft),
               transform var(--sy-dur-fast) var(--sy-ease-soft);
 }
-.fx-card:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--sy-accent) 45%, var(--sy-line)); }
+.fx-card:hover { transform: translateY(-1px); border-color: var(--sy-accent-a42); }
 .fx-card.active {
   border-color: var(--sy-accent);
-  background: color-mix(in srgb, var(--sy-accent) 11%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sy-accent) 22%, transparent);
+  background: var(--sy-accent-a15);
+  box-shadow: 0 0 0 2px var(--sy-accent-a26);
+}
+.fx-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
 }
 .fx-name { font-size: 12.5px; font-weight: 600; color: var(--sy-text-1); }
 .fx-desc { font-size: 10.5px; line-height: 1.35; color: var(--sy-text-3); }
+
+/*
+ * 角标：让「预设」和「自定义」一眼分得开。
+ * 预设是只读的数字，自定义才是可以拖的——用户在卡面上就得看出这个区别，
+ * 而不是点进弹窗才发现推子按不动。
+ */
+.fx-badge {
+  flex: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--sy-surface-border);
+  font-size: 9px;
+  line-height: 11px;
+  color: var(--sy-text-3);
+  letter-spacing: 0.02em;
+}
+.fx-card.active .fx-badge { color: var(--sy-accent); border-color: var(--sy-accent-a42); }
+.fx-badge-own { color: var(--sy-text-2); border-style: dashed; }
+.fx-card-custom { border-style: dashed; }
+.fx-card-custom.active { border-style: solid; }
+
+/*
+ * 窄屏只留名字：卡片描述在 390 宽下会折成三四行，9 张卡就是 340px 高度。
+ * 主流播放器的音效页也是这样——一排方块，名字 + 选中态，描述留给 title。
+ */
+@media (max-width: 560px) {
+  .fx-desc { display: none; }
+  .fx-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+}
+
+/* 空间音效：一排胶囊，点一下立刻切换 */
+.fx-spaces {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.space-chip {
+  appearance: none;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--sy-surface-border);
+  background: var(--sy-chip-bg);
+  color: var(--sy-text-2);
+  font: 500 11.5px/1 var(--sy-font-cn);
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color var(--sy-dur-fast) var(--sy-ease-soft),
+              background var(--sy-dur-fast) var(--sy-ease-soft),
+              color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.space-chip:hover { border-color: var(--sy-accent-a42); }
+.space-chip.active {
+  border-color: var(--sy-accent);
+  background: var(--sy-accent-a15);
+  color: var(--sy-accent);
+}
+
+/*
+ * 音效页只留这一行入口：预设名 + 五段形状 + 平衡状态。
+ * 想看细节点进去（弹窗里才是推子），这样「播放」页不会被一根根推子占掉半屏。
+ */
+.eq-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--sy-surface-border);
+  border-radius: 12px;
+  background: var(--sy-chip-bg);
+  color: var(--sy-text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.eq-entry:hover { border-color: var(--sy-accent); }
+.eq-entry-label { flex: none; font-size: 12.5px; font-weight: 600; color: var(--sy-text-1); }
+/* 五个小柱子：高度就是当前五段增益，一眼看出形状 */
+.eq-entry-shape {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 18px;
+}
+.eq-entry-shape i {
+  width: 3px;
+  border-radius: 1.5px;
+  background: var(--sy-accent);
+  opacity: 0.9;
+}
+.eq-entry-sum {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--sy-text-3);
+  text-align: right;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.eq-entry-chev {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  color: var(--sy-text-3);
+}
+
+/*
+ * 图形均衡器。
+ *
+ * 竖推子的做法：range 本质是横向控件，只能旋转 -90° 再靠负 margin 把占位收回去。
+ * `writing-mode: vertical-lr` 是更干净的写法，但真机 WebView 104 不认（Chrome 121 才有），
+ * 所以这里坚持 rotate —— 兼容性和观感都对得上。
+ *
+ * 32px 是**可点区域的宽度**（旋转后的横向厚度）：12px 的 thumb 在手机上抠不住，
+ * 视觉上仍旧是那根细轨，指头按下去有 32px 的容错。
+ */
+/*
+ * 预设锁条：当前挂在预设上时推子只读，这里给一句话 + 一个「接着它自己调」的出口。
+ * 不写「禁用」两个字——用户看到的是「怎么才能调」，不是一句拒绝。
+ */
+.eq-lock {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--sy-surface-border);
+  background: var(--sy-chip-bg);
+}
+.eq-lock-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--sy-text-2);
+}
+.ghost-btn.xs {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+}
+
+/* 锁住的推子：压暗 + 不响应手势（preset 不可被拖成「改过的预设」） */
+.slider:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.slider:disabled::-webkit-slider-thumb {
+  transform: none;
+  box-shadow: none;
+}
+
+.eq-wrap {
+  padding: 10px 12px 6px;
+  border-radius: 12px;
+  border: 1px solid var(--sy-surface-border);
+  background: var(--sy-chip-bg);
+}
+.eq-curve {
+  display: block;
+  width: 100%;
+  height: 44px;
+  margin-bottom: 2px;
+  overflow: visible;
+  color: var(--sy-text-3);
+}
+.eq-mid-line { stroke: currentColor; stroke-opacity: 0.16; stroke-width: 1; }
+.eq-line {
+  fill: none;
+  stroke: var(--sy-accent);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.eq-bands { display: flex; align-items: flex-end; gap: 2px; }
+.eq-band {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.eq-val {
+  font-size: 10px;
+  line-height: 12px;
+  height: 12px;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+}
+.eq-fader-wrap {
+  height: 116px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.eq-fader {
+  width: 116px;
+  height: 32px;
+  flex: none;
+  transform: rotate(-90deg);
+  /* 旋转后布局占位还是 116×32，横向用负 margin 收回成 32 */
+  margin: 0 -42px;
+  /*
+   * 盒子是 32px（手指要按住），但轨道只有 4px：
+   * 所以底色必须画在 runnable-track 上，元素本身保持透明，
+   * 否则整块 32px 会被涂成一根粗灰条。
+   */
+  background: transparent;
+}
+.eq-fader::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(128, 128, 128, 0.32);
+}
+.eq-hz { font-size: 10px; line-height: 12px; color: var(--sy-text-3); }
+
+.eq-balance { display: flex; align-items: center; gap: 10px; margin: 8px 0 2px; }
+.eq-balance .slider { flex: 1 1 auto; min-width: 0; }
+.eq-bal-end { flex: none; font-size: 10.5px; color: var(--sy-text-3); }
+.eq-pre { width: 100%; margin: 6px 0 2px; }
+
+/* 弹窗里的小节标题行：名字 + 右侧当前值 */
+.eq-line-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0 6px;
+}
+.eq-line-name { font-size: 12.5px; color: var(--sy-text-1); }
+.eq-line-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--sy-text-3);
+}
+.eq-line-val { flex: none; font-size: 11.5px; color: var(--sy-text-2); }
 
 .fx-foot {
   display: flex;
@@ -862,11 +1282,30 @@
   place-items: center;
   padding: 32px;
   background: color-mix(in srgb, var(--sy-bg-base) 64%, transparent);
-  animation: modal-fade 160ms var(--sy-ease-soft);
+  animation: modal-fade var(--sy-dur-modal, 220ms) var(--sy-ease-soft);
+}
+/*
+ * 退场：遮罩淡出、卡片往下沉一点点再消失（160ms，比进场略快）。
+ * 只动 opacity 和 8px 位移——弹窗卡片本身带阴影，缩放会让阴影重新算一遍。
+ */
+.modal-scrim[data-closing='true'] {
+  pointer-events: none;
+  animation: modal-fade-out 160ms var(--sy-ease-soft) forwards;
+}
+.modal-scrim[data-closing='true'] .modal-card {
+  animation: modal-rise-out 160ms var(--sy-ease-panel) forwards;
 }
 @keyframes modal-fade {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+@keyframes modal-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes modal-rise-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(8px); }
 }
 
 .modal-card {
@@ -882,7 +1321,7 @@
   background: var(--sy-bg-elevated);
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
   overflow: hidden;
-  animation: modal-rise 200ms var(--sy-ease-panel);
+  animation: modal-rise var(--sy-dur-modal, 220ms) var(--sy-ease-panel);
 }
 @keyframes modal-rise {
   from { opacity: 0; transform: translateY(10px) scale(0.985); }
@@ -925,18 +1364,7 @@
 .fx-dlg-name .text-input { flex: 1; min-width: 0; }
 .fx-dlg-tip { margin: 2px 0 0; font-size: 11px; color: var(--sy-text-3); }
 
-/* ---------- 自定义音效卡 / 尺寸摘要 ---------- */
-.fx-card-custom { border-style: dashed; }
-.fx-pen {
-  margin-left: 6px;
-  padding: 0 4px;
-  border-radius: 4px;
-  font-size: 9.5px;
-  font-weight: 600;
-  vertical-align: 1px;
-  color: var(--sy-accent-soft);
-  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
-}
+/* ---------- 尺寸摘要 ---------- */
 .fx-grid + .fx-foot { margin-top: 10px; }
 
 .dl-size-sum { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
@@ -1035,6 +1463,25 @@
   color: var(--sy-text-3);
   min-width: 0;
 }
+/* 歌手名单独一格：直接当 flex 的文本子项时无法单行省略，手机窄列会被
+   压成「邓寓 / 君（等 / 什么 / 君）」四个字的竖排。 */
+.dlp-artist {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 手机上的失败原因：摊在标题下面两行，别指望 hover 看 title */
+.dlp-reason {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--sy-error);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
 .dlp-tag {
   flex: none;
   padding: 1px 5px;
@@ -1057,6 +1504,9 @@
   background: var(--sy-accent);
   transition: width 320ms var(--sy-ease-soft);
 }
+/* 失败时不画进度条：右侧已经用红字写了原因，再压一条满格红条会被读成
+   「卡在 100%」，既不像失败也不像在走 */
+.dlp-bar[data-bad='true'] { display: none; }
 .dlp-bar[data-bad='true'] > i { background: color-mix(in srgb, var(--sy-error) 70%, transparent); }
 
 .dlp-state { display: flex; flex-direction: column; gap: 3px; text-align: right; min-width: 0; }

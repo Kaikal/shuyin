@@ -16,6 +16,7 @@ import {
 } from '../lib/playlistImport'
 import { isLxmcBuffer, parseLxmc, type LxPlaylist } from '../lib/lxmc'
 import { toast } from '../lib/toast'
+import { queueToast } from '../lib/queueToast'
 import { Cover } from '../components/Cover'
 import { HelpTip } from '../components/HelpTip'
 import { IconCheck, IconFile, IconFolder, IconPlay, IconPlus, IconUpload } from '../components/icons'
@@ -163,7 +164,9 @@ export function PlaylistImportPage({ onBack }: { onBack?(): void }) {
 
   const appendAll = () => {
     if (!matchedTracks.length) return
-    matchedTracks.forEach(t => p.addToQueue(t, 'end'))
+    /* 一次塞整份清单：提示要报「新加了几首」，别让用户以为没反应又点一遍 */
+    queueToast(matchedTracks, p.queueState.queue, 'end')
+    p.addManyToQueue(matchedTracks, 'end')
   }
 
   const playAll = () => {

@@ -116,15 +116,29 @@ export const KEYS = {
   autoResume: 'player.autoResume',    // 启动时自动接着播放
   repeat: 'queue.repeat',             // sequence | one | shuffle
   queueIds: 'queue.ids',              // 队列曲目 id 顺序
+  /**
+   * 队列曲目的完整快照（LocalTrack[]）。
+   *
+   * 只存 id 是不够的：在线曲目（`online:平台:id`）根本不在本地曲库里，
+   * 重启后拿曲库 map 去还原会把它们全部过滤掉——表现就是「每次打开
+   * 播放列表都是空的」（用户 2026-11 反馈）。存一份完整数据，
+   * 本地曲目改名/换路径也还能原样显示。
+   */
+  queueTracks: 'queue.tracks',
   uiPage: 'ui.page',                  // 上次停留的页面
+  settingsPane: 'ui.settingsPane',    // 设置页上次停在哪个分类（外观 / 播放 / 界面 …）
   uiQuery: 'ui.query',                // 上次曲库搜索词
   lyricsSolo: 'ui.lyricsSolo',        // 沉浸式歌词（全屏歌词）是否开启
   foliaFx: 'ui.foliaFx',              // Folia 歌词动效（逐字弹出 + 错落排版）
   vinylView: 'ui.vinylView',          // 播放页封面样式：唱片（黑胶）/ 方形封面
+  swipeHint: 'ui.swipeHint',          // 手机播放页「左右滑动切换」提示是否已经看过（看一次就不再打扰）
   lyricsLook: 'ui.lyricsLook',        // 沉浸式歌词观感（流光 / 浮名 / 群唱）
   lyricAlign: 'ui.lyricAlign',        // 播放页右栏歌词对齐（left | center | right）
   spectrumStyle: 'spectrum.style',     // 频谱样式（柱状 / 电平表 / 音浪 …）
   spectrumPos: 'spectrum.pos',         // 频谱摆放位置（播放条 / 四边 / 封面环绕）
+  /** 手机播放页的频谱位置（封面外圈 / 页面底部 / 页面顶部）——和桌面那套位置语义不同，分开存 */
+  spectrumPosMobile: 'spectrum.posMobile',
+  spectrumOn: 'spectrum.on',           // 边缘频谱要不要显示（关掉就只剩安静的黑边）
   audioFx: 'audio.fx',                 // 音效预设 id
   audioFxBands: 'audio.fxBands',       // 音效自定义三段增益 + 前置增益
   audioFxName: 'audio.fxName',         // 自定义音效的名字（用户自己取）
@@ -140,15 +154,38 @@ export const KEYS = {
   localPlaylists: 'playlists.local',
   /** 收藏的在线歌单（FavPlaylist[]） */
   favPlaylists: 'playlists.fav',
+  /** 平台同步歌单的本地偏好：隐藏了哪些、按什么顺序摆（PlatPrefs） */
+  platPrefs: 'playlists.platPrefs',
+  /**
+   * 「我的」页几个折叠区的开合状态。
+   *
+   * `homePlatsOpen` 默认 **false**（用户要求「登录那里默认折叠」——登完就
+   * 不太关心了，四行白占半屏）；`homeGroupsShut` 存的是被手动收起来的
+   * 平台分组 source 列表，**默认空表 = 全部展开**（用户要展开着拖卡片换位置）。
+   */
+  homePlatsOpen: 'home.platsOpen',
+  homeGroupsShut: 'home.groupsShut',
+  /**
+   * 「为你推荐」各平台的权重 = 每家出几首（`Record<平台, 首数>`）。
+   *
+   * 存在本地而不是账号里：它调的是这台设备上的口味配比，
+   * 和登录哪个账号无关，换号也不该跟着变。
+   */
+  recoWeights: 'reco.weights',
+  /** 收藏的本地歌曲 id（设计稿「收藏」心形 / 媒体库分类） */
+  favTracks: 'tracks.fav',
   /** 快捷键：总开关 / 媒体键 / 逐动作组合键 */
   hotkeysOn: 'hotkeys.enabled',
   hotkeysMedia: 'hotkeys.media',
   hotkeysMap: 'hotkeys.map',
   /** 云端同步：环境 ID + 同步范围 + 上次同步时间 */
   cloudEnv: 'cloud.envId',
+  /** 云存储桶名（PG 模式的环境不自动建桶，默认 shuyin，可在设置里改） */
+  cloudBucket: 'cloud.bucket',
   cloudScopes: 'cloud.scopes',
   cloudLastSync: 'cloud.lastSync',
   cloudProfile: 'cloud.profile',      // 上次登录的账号信息（邮箱/昵称）
+  cloudSession: 'cloud.session',      // refresh_token：SDK 不落盘，重启后靠它接回会话
   /** 音源脚本目录（默认 %APPDATA%\cn.shuyin.player\sources） */
   sourcesDir: 'sources.dir',
   /** 被禁用的音源 id 列表 */
@@ -161,8 +198,12 @@ export const KEYS = {
   searchHistory: 'search.history',
   /** 搜索时勾选的平台 */
   searchPlatforms: 'search.platforms',
+  /** 各平台热搜词（搜索页空态用；按天缓存，隔天重取） */
+  searchHotWords: 'search.hotWords',
   /** 歌单广场上一次选的平台（单选，下次打开还是它） */
   squarePlatform: 'square.platform',
+  /** 「我的」歌单的浏览方式：卡片网格 / 列表（用户选了就记住） */
+  homeView: 'home.view',
   /** 音乐桌面：窗口是否开着 */
   deskOn: 'desk.visible',
   /** 上次检查更新的时间戳（毫秒），太频繁就不查了 */

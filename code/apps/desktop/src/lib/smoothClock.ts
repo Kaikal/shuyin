@@ -15,9 +15,15 @@ import { useEffect, useRef, useState } from 'react'
 /** 快照之间最多外推这么快（秒），防止一次丢包把歌词推到天边 */
 const MAX_EXTRAPOLATE = 1
 /** 超过这么久没有新快照就不再外推 */
-const STALE_MS = 600
+/*
+ * 900ms 而不是 600ms：`snapshot.position` 现在按「跨过半秒」才提交一次
+ * （见 PlayerProvider 的 commitSnapshot），两帧之间本来就隔 500ms。
+ * 卡在 600 的话，只要原生那两帧稍微晚一点，外推就会先停一瞬，
+ * 歌词表现为「一顿一顿」。
+ */
+const STALE_MS = 900
 
-export function useSmoothTime(raw: number, hz = 15): number {
+export function useSmoothTime(raw: number, hz = 15, enabled = true): number {
   const st = useRef({ raw, base: raw, at: performance.now() })
   const [, force] = useState(0)
 
@@ -27,13 +33,14 @@ export function useSmoothTime(raw: number, hz = 15): number {
   }
 
   useEffect(() => {
+    if (!enabled) return
     const period = Math.max(16, Math.round(1000 / hz))
     const id = window.setInterval(() => {
       if (performance.now() - st.current.at > STALE_MS) return
       force(v => (v + 1) % 100000)
     }, period)
     return () => window.clearInterval(id)
-  }, [hz])
+  }, [hz, enabled])
 
   const elapsed = (performance.now() - st.current.at) / 1000
   return st.current.base + Math.min(MAX_EXTRAPOLATE, Math.max(0, elapsed))

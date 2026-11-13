@@ -38,10 +38,33 @@ interface Props {
   /** 预填到搜索框里的当前曲目信息 */
   trackTitle?: string
   trackArtist?: string
+  /**
+   * 这块歌词现在看不看得见（默认 true）：看不见就别开 16Hz 的平滑时钟。
+   * 不叫 active：组件里 `active` 已经是「当前句下标」。
+   */
+  live?: boolean
+  /**
+   * 手机用的「平铺」版本：前后句**同一字号、不缩放、不倾斜、不虚化**。
+   *
+   * 纯 Folia 那套是按「离当前句多远」逐行缩放的（scale 0.6 / 0.4），放到
+   * 360dp 的手机上就变成「一行大一行小」，正是用户之前吐槽过的那句。
+   * 但把动效整个从手机上拿掉又走到了另一个极端——现在保留逐字弹出（这才是动效本身），
+   * 只把周围几行拉平：一个大的当前句 + 一圈同样大小的上下文。
+   */
+  flat?: boolean
 }
 
 /** 用户滚轮翻歌词后，多久回到「跟随当前句」 */
 const HOLD_MS = 3200
+
+/**
+ * flat（手机）下前后句的不透明度：只有远近两层。
+ *
+ * 0.5 / 0.26 那版在 360dp 的屏幕上太亮了——屏幕上就那么几行字，白色半亮
+ * 的「下一句」比正在唱的那句还显眼，视线一直被拉走（用户 2026-11-09：
+ * 「注意力大部分都被其他句吸引了」）。压到 0.34 / 0.13，焦点回到当前句。
+ */
+const FLAT_OP = [0.34, 0.13]
 
 /** 攒够这么多 deltaY 才算翻一句：触摸板一次手势会发几十个 3~8 的小值 */
 const WHEEL_STEP = 56
@@ -81,7 +104,7 @@ function rand(seed: number): number {
   return x - Math.floor(x)
 }
 
-export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, onSearchOnline, trackTitle, trackArtist }: Props) {
+export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, onSearchOnline, trackTitle, trackArtist, live = true, flat = false }: Props) {
   const [lookId] = useLyricsLook()
   const look = lyricsLookDef(lookId)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -95,7 +118,7 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
   const wheelAcc = useRef(0)
 
   /* 250ms 的台阶插值成连续时间：字亮起的时机跟着歌走，而不是跟着快照走 */
-  const now = useSmoothTime(currentTime, 16)
+  const now = useSmoothTime(currentTime, 16, live)
 
   useEffect(() => {
     const el = boxRef.current
@@ -146,9 +169,21 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
     holdRef.current = window.setTimeout(() => setOff(0), HOLD_MS)
   }, [lines.length])
 
-  /* 基准字号：跟着窗口长，窄窗收一档，别让一句 20 字直接顶出画面 */
-  const base = Math.max(24, Math.min(72, Math.min(box.w * 0.062, box.h * 0.15)))
-  const gap = base * look.gap
+  /* 基准字号：跟着窗口长，窄窗收一档，别让一句 20 字直接顶出画面。
+     手机（flat）用另一套：容器只有 360 宽，按桌面那套算出来的字小到看不清，
+     大字靠「换行」而不是「缩到 0.3」——手机上读歌词第一要求是可读。 */
+  const base = flat
+    ? Math.max(26, Math.min(44, Math.min(box.w * 0.085, box.h * 0.12)))
+    : Math.max(24, Math.min(72, Math.min(box.w * 0.062, box.h * 0.15)))
+  /*
+   * 前后句的行距。
+   *
+   * 桌面上字号能到 72，`look.gap`（1.44~1.95 倍字号）自然够开；
+   * 手机上 base 只有 30 上下，按同一倍率算出来的行距不到一行高，
+   * 当前句和下面那句会**贴在一起**（真机上「梁家姑娘」压着「倾诉衷肠」）。
+   * flat 给一个绝对下限：至少 1.95 倍字号。
+   */
+  const gap = base * (flat ? Math.max(look.gap, 1.95) : look.gap)
   const avail = Math.max(240, box.w * 0.9)
 
   const cur = viewIndex >= 0 ? lines[viewIndex] : undefined
@@ -176,9 +211,11 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
    * 结果还是比容器宽，直接顶出屏幕。收到 0.3 再加允许换行（见 .folia-line），
    * 极端长句也不会跑出窗口。
    */
-  const fit = Math.min(1, Math.max(0.3, avail / Math.max(1, visualWidth(curText) * base * 1.05)))
+  const fit = flat
+    ? Math.min(1, Math.max(0.7, avail / Math.max(1, visualWidth(curText) * base * 1.05)))
+    : Math.min(1, Math.max(0.3, avail / Math.max(1, visualWidth(curText) * base * 1.05)))
   const size = Math.round(base * fit)
-  const spread = Math.min(16, Math.max(5, size * 0.18))
+  const spread = Math.min(16, Math.max(5, size * (flat ? 0.16 : 0.18)))
 
   const rows = useMemo(() => {
     if (focus < 0) return []
@@ -196,6 +233,15 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
     const k = Math.min(Math.abs(d), 2)
     const text = l.text || ' '
     const f = Math.min(1.2, Math.max(0.34, (avail * 0.72) / Math.max(1, visualWidth(text) * base)))
+    /*
+     * flat（手机）：前后句**同一字号、不缩放、不倾斜、不虚化**，只按距离压不透明度。
+     * Folia 原版那套「离当前句越远越小」是按宽屏写的，压到 360dp 上就变成
+     * 「一行大一行小」——用户明确吐槽过这一点，但把动效整个拿掉又走到了另一个极端。
+     */
+    const op = flat ? FLAT_OP[k - 1] : look.opacity[k - 1]
+    const transform = flat
+      ? `translate(0, calc(-50% + ${d * gap}px)) scale(${f})`
+      : `translate(0, calc(-50% + ${d * gap}px)) rotateX(${d * look.tilt}deg) scale(${look.scale[k - 1] * f})`
     return (
       <div
         key={i}
@@ -204,9 +250,9 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
           fontSize: base,
           fontWeight: look.weight,
           letterSpacing: look.tracking,
-          opacity: look.opacity[k - 1],
-          filter: look.blur[k - 1] ? `blur(${look.blur[k - 1]}px)` : undefined,
-          transform: `translate(0, calc(-50% + ${d * gap}px)) rotateX(${d * look.tilt}deg) scale(${look.scale[k - 1] * f})`,
+          opacity: op,
+          filter: !flat && look.blur[k - 1] ? `blur(${look.blur[k - 1]}px)` : undefined,
+          transform,
           zIndex: 6 - Math.abs(d),
         }}
         onClick={() => { if (l.time >= 0) onSeek?.(l.time) }}
@@ -214,7 +260,7 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
         {text}
       </div>
     )
-  }), [rows, lines, viewIndex, base, gap, avail, look, onSeek])
+  }), [rows, lines, viewIndex, base, gap, avail, look, onSeek, flat])
 
   /* 逐字：偏移/旋转按行时间 + 序号做种子，同一句永远同一套错落 */
   const chars = useMemo(() => units.map((u, i) => {
@@ -236,7 +282,7 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
   if (!lines.length) {
     return (
       <div className="folia" ref={boxRef}>
-        <div className="folia-empty">
+        <div className="folia-empty" data-searching={searching ? 'true' : undefined}>
           <div className="t">暂无歌词</div>
           <div className="s">已检查同名 .lrc 文件与内嵌歌词标签</div>
           {onSearchOnline && (searching ? (
@@ -263,6 +309,7 @@ export function FoliaLyrics({ doc, loading, currentTime, progress = 0, onSeek, o
       ref={boxRef}
       data-look={look.id}
       data-fx="folia"
+      data-flat={flat ? 'true' : undefined}
       data-scrolling={off !== 0 ? 'true' : 'false'}
       onWheel={onWheel}
     >

@@ -19,7 +19,7 @@ import { bridge, isAndroid } from './bridge'
 import { KEYS, settings } from './settings'
 
 export type HotkeyAction =
-  | 'playpause' | 'next' | 'prev'
+  | 'playpause' | 'next' | 'prev' | 'fav'
   | 'volumeUp' | 'volumeDown' | 'mute'
   | 'seekBack' | 'seekFwd'
   | 'toggleLyrics' | 'openSearch' | 'toggleWindow' | 'musicLock'
@@ -211,8 +211,14 @@ export interface HotkeyHandlers {
   playpause(): void
   next(): void
   prev(): void
+  /** 收藏当前曲目（安卓通知栏的收藏键走这条通道；不进热键表，无需注册） */
+  fav(): void
   setVolume(v: number): void
   getVolume(): number
+  /** 增量调音量（±0.05）：静音态下以静音前的音量为基准 */
+  nudgeVolume(delta: number): void
+  /** 静音 / 取消静音（真调输出音量，见 PlayerProvider） */
+  toggleMute(): void
   seek(delta: number): void
   seekable(): boolean
   toggleLyrics(): void
@@ -230,7 +236,6 @@ export interface HotkeyHandlers {
 export function useGlobalHotkeys(h: HotkeyHandlers) {
   const ref = useRef(h)
   ref.current = h
-  const mutedAt = useRef<number | null>(null)
   /** 媒体键开关的实时值：配置还没读出来时按「开」处理 */
   const mediaOn = useRef(true)
 
@@ -273,14 +278,15 @@ export function useGlobalHotkeys(h: HotkeyHandlers) {
       case 'playpause': fn.playpause(); break
       case 'next': fn.next(); break
       case 'prev': fn.prev(); break
-      case 'volumeUp': fn.setVolume(Math.min(1, fn.getVolume() + 0.05)); break
-      case 'volumeDown': fn.setVolume(Math.max(0, fn.getVolume() - 0.05)); break
-      case 'mute': {
-        const v = fn.getVolume()
-        if (v > 0) { mutedAt.current = v; fn.setVolume(0) }
-        else fn.setVolume(mutedAt.current && mutedAt.current > 0 ? mutedAt.current : 0.6)
-        break
-      }
+      case 'fav': fn.fav(); break
+      /*
+       * 音量 / 静音：状态归 `PlayerProvider` 管（真调输出音量、记住静音前的值）。
+       * 这里原来自己记了一个 `mutedAt`，于是「快捷键静音 → 再点界面上的按钮」
+       * 两条路各记一份，恢复不到上次的音量。
+       */
+      case 'volumeUp': fn.nudgeVolume(0.05); break
+      case 'volumeDown': fn.nudgeVolume(-0.05); break
+      case 'mute': fn.toggleMute(); break
       case 'seekFwd': if (fn.seekable()) fn.seek(5); break
       case 'seekBack': if (fn.seekable()) fn.seek(-5); break
       case 'toggleLyrics': fn.toggleLyrics(); break

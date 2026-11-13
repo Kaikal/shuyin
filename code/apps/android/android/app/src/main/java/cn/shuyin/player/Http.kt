@@ -1,8 +1,8 @@
 package cn.shuyin.player
 
+import android.util.Base64
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -19,6 +19,41 @@ import java.net.URL
 object Http {
 
     /**
+     * 下载二进制资源（封面图等）。`request()` 会把 body 按字符集解码成 String，
+     * 图片走那条路必坏；这里单独留一个字节级的口子，只给原生内部用。
+     * 任何失败都返回 null（封面拿不到就退回没有图，不值得为此报错）。
+     */
+    fun bytes(url: String, timeoutMs: Int = 8_000): ByteArray? {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return null
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) Shuyin")
+            try {
+                if (conn.responseCode !in 200..299) null
+                else conn.inputStream.use { input ->
+                    val out = ByteArrayOutputStream()
+                    val buf = ByteArray(16 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        // 封面再大也就几百 KB，超了肯定是拿错了资源
+                        if (out.size() > 4 * 1024 * 1024) return null
+                    }
+                    out.toByteArray()
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
      * 一次普通请求。返回值：{"status":200,"headers":{...},"body":"..."}
      * headers 的 key 一律小写（前端按 content-type 这种写法取）。
      */
@@ -28,12 +63,31 @@ object Http {
         headers: Map<String, String> = emptyMap(),
         body: String? = null,
         timeoutMs: Int = 10_000,
+        /**
+         * 原始字节体的 base64。
+         *
+         * 云开发的文件上传是 multipart——字节里有 boundary、图片/压缩包更是纯二进制，
+         * 一旦按字符串过一遍就废了（详见前端 `cloudFetch.ts` 的说明）。
+         * 有这个参数时优先用它，`body` 只用于普通 JSON / 表单文本。
+         */
+        bodyB64: String? = null,
+        /** 要求回包带上原始字节（base64）。普通接口不需要，别为它多编一次 */
+        wantBytes: Boolean = false,
     ): JSONObject {
         var current = url
         var verb = method.uppercase()
         var hops = 0
+        var payload: ByteArray? = when {
+            bodyB64 != null -> try {
+                Base64.decode(bodyB64, Base64.NO_WRAP)
+            } catch (_: Exception) {
+                null
+            }
+            body != null -> body.toByteArray(Charsets.UTF_8)
+            else -> null
+        }
         while (true) {
-            val conn = open(current, verb, headers, body, timeoutMs)
+            val conn = open(current, verb, headers, payload, timeoutMs)
             val code = conn.responseCode
             // 跨协议重定向（http→https）HttpURLConnection 默认不跟，自己跟
             if (code in 301..308 && hops < 5) {
@@ -42,17 +96,18 @@ object Http {
                 if (!loc.isNullOrBlank()) {
                     current = if (loc.startsWith("http")) loc else URL(URL(current), loc).toString()
                     hops++
-                    if (code == 303) { verb = "GET"; }
+                    if (code == 303) { verb = "GET"; payload = null }
                     continue
                 }
             }
-            val text = try {
-                conn.inputStream.use { readText(it, charsetOf(conn.contentType)) }
+            val raw: ByteArray = try {
+                conn.inputStream.use { it.readBytes() }
             } catch (e: Exception) {
                 // 4xx/5xx 的 body 在 errorStream 里——平台经常把错误原因写在里面，
                 // 丢掉它会让排查变成猜谜
-                conn.errorStream?.use { readText(it, charsetOf(conn.contentType)) } ?: ""
+                conn.errorStream?.use { it.readBytes() } ?: ByteArray(0)
             }
+            val text = readText(raw, charsetOf(conn.contentType))
             val h = JSONObject()
             for ((k, v) in conn.headerFields) {
                 if (k == null) continue
@@ -65,6 +120,8 @@ object Http {
             out.put("status", code)
             out.put("headers", h)
             out.put("body", text)
+            // 文本可能已经被字符集解码改写过（GB18030 兜底），二进制请求只能认这串
+            if (wantBytes) out.put("bodyB64", Base64.encodeToString(raw, Base64.NO_WRAP))
             conn.disconnect()
             return out
         }
@@ -74,7 +131,7 @@ object Http {
         url: String,
         verb: String,
         headers: Map<String, String>,
-        body: String?,
+        body: ByteArray?,
         timeoutMs: Int,
     ): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
@@ -90,7 +147,7 @@ object Http {
         }
         if (body != null && verb != "GET" && verb != "HEAD") {
             conn.doOutput = true
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            conn.outputStream.use { it.write(body) }
         }
         return conn
     }
@@ -101,8 +158,7 @@ object Http {
     }
 
     /** 读成文本。按 Content-Type 声明的字符集解；解不了就 UTF-8，再不行 GB18030（国产接口偶有 GBK） */
-    private fun readText(input: InputStream, charset: String): String {
-        val bytes = input.readBytes()
+    private fun readText(bytes: ByteArray, charset: String): String {
         if (bytes.isEmpty()) return ""
         val enc = try {
             java.nio.charset.Charset.forName(charset)
@@ -166,6 +222,7 @@ object Http {
 
         val head = buf.toByteArray()
         val dur = sniffDuration(head, total, ct)
+        val (tTitle, tArtist) = sniffTags(head, ct)
         return JSONObject().apply {
             put("got", head.size)
             put("total", total)
@@ -175,7 +232,108 @@ object Http {
             put("contentType", ct)
             put("status", status)
             put("duration", dur)
+            // 文件自己写的歌名/歌手：时长拦不住「长度差不多的两首歌」，
+            // 名字是最后一道（见 online.ts 的 verify，与 net.rs 的 sniff_tags 同一套规则）
+            put("title", tTitle)
+            put("artist", tArtist)
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 文件头里读标签（移植自 net.rs 的 sniff_tags）                         */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * 从文件头读「这个文件自己说自己是谁」（标题 / 歌手）。
+     *
+     * 为什么需要：时长只能挡住差十几秒的错歌。《孤勇者》256 秒被解析成邓紫棋《唯一》
+     * 253.7 秒，差 2.3 秒，容差里全放行——但文件标签明明白白写着 TITLE=唯一。
+     *
+     * 只认三种最常见封装：FLAC / Ogg（VORBIS_COMMENT）、MP3（ID3v2）。
+     * M4A 的 ilst 在 moov 里位置不固定，这里不做；读不到就返回空串，前端跳过校验。
+     */
+    private fun sniffTags(h: ByteArray, ct: String): Pair<String, String> {
+        if (h.isEmpty()) return "" to ""
+        // 整个 16KB 都扫：FLAC 的 VORBIS_COMMENT 常排在封面后面，8KB 窗口会整块跳过
+        val head = if (h.size > 16384) h.copyOfRange(0, 16384) else h
+        fun at(vararg sig: Int): Boolean =
+            head.size >= sig.size && sig.indices.all { head[it] == sig[it].toByte() }
+        if (at('I'.code, 'D'.code, '3'.code)) return id3Tags(head)
+        val ogg = at('O'.code, 'g'.code, 'g'.code, 'S'.code)
+        val flac = at('f'.code, 'L'.code, 'a'.code, 'C'.code)
+        if (ogg || flac || ct.contains("ogg") || ct.contains("flac") || ct.contains("opus")) {
+            return vorbisField(head, "TITLE") to vorbisField(head, "ARTIST")
+        }
+        return "" to ""
+    }
+
+    /** 在头部字节里找 `KEY=value`（Vorbis 注释就长这样），大小写都认 */
+    private fun vorbisField(buf: ByteArray, key: String): String {
+        for (k in listOf(key.uppercase(), key.lowercase())) {
+            val needle = k.toByteArray()
+            var i = 0
+            while (i + needle.size + 1 < buf.size) {
+                var hit = true
+                for (j in needle.indices) if (buf[i + j] != needle[j]) { hit = false; break }
+                if (hit && buf[i + needle.size] == '='.code.toByte()) {
+                    // 只认字段边界上的 KEY=，否则音频数据里凑巧出现的字面量也会被当成标签
+                    val prev = if (i == 0) 0 else buf[i - 1].toInt() and 0xFF
+                    if (i == 0 || prev <= 0x20 || prev >= 0x7f) {
+                        val start = i + needle.size + 1
+                        var end = start
+                        while (end < buf.size && buf[end] != 0.toByte() && end - start < 120) end++
+                        val s = String(buf, start, end - start, Charsets.UTF_8).trim()
+                        if (s.isNotEmpty()) return s
+                    }
+                }
+                i++
+            }
+        }
+        return ""
+    }
+
+    /** ID3v2 头 → TIT2（标题）/ TPE1（歌手） */
+    private fun id3Tags(h: ByteArray): Pair<String, String> {
+        if (h.size < 10) return "" to ""
+        var title = ""
+        var artist = ""
+        // 大小 = 4 个字节，每个只用低 7 位（syncsafe）
+        val size = ((h[6].toInt() and 0x7f) shl 21) or ((h[7].toInt() and 0x7f) shl 14) or
+            ((h[8].toInt() and 0x7f) shl 7) or (h[9].toInt() and 0x7f)
+        val end = minOf(10 + size, h.size)
+        var i = 10
+        while (i + 10 <= end) {
+            if (h[i] == 0.toByte()) break // padding
+            val id = String(h, i, 4, Charsets.ISO_8859_1)
+            val fsz = ((h[i + 4].toInt() and 0xFF) shl 24) or ((h[i + 5].toInt() and 0xFF) shl 16) or
+                ((h[i + 6].toInt() and 0xFF) shl 8) or (h[i + 7].toInt() and 0xFF)
+            val bodyStart = i + 10
+            val bodyEnd = minOf(bodyStart + fsz, end)
+            if (fsz == 0 || bodyEnd <= bodyStart) break
+            if (id == "TIT2" && title.isEmpty()) title = id3Text(h.copyOfRange(bodyStart, bodyEnd))
+            if (id == "TPE1" && artist.isEmpty()) artist = id3Text(h.copyOfRange(bodyStart, bodyEnd))
+            i = bodyEnd
+        }
+        return title to artist
+    }
+
+    /** ID3v2 帧正文 → 字符串。首字节是编码：0=Latin1、1=UTF-16(带 BOM)、2=UTF-16BE、3=UTF-8 */
+    private fun id3Text(body: ByteArray): String {
+        if (body.isEmpty()) return ""
+        val enc = body[0].toInt()
+        val rest = body.copyOfRange(1, body.size)
+        val s = when (enc) {
+            0 -> String(rest, Charsets.ISO_8859_1)
+            1, 2 -> {
+                val bomLe = rest.size >= 2 && rest[0] == 0xFF.toByte() && rest[1] == 0xFE.toByte()
+                val bomBe = rest.size >= 2 && rest[0] == 0xFE.toByte() && rest[1] == 0xFF.toByte()
+                val data = if (bomLe || bomBe) rest.copyOfRange(2, rest.size) else rest
+                val cs = if (bomLe || (enc == 1 && !bomBe)) Charsets.UTF_16LE else Charsets.UTF_16BE
+                String(data, cs)
+            }
+            else -> String(rest, Charsets.UTF_8)
+        }
+        return s.trim { it == '\u0000' || it.isWhitespace() }.take(80)
     }
 
     /* ------------------------------------------------------------------ */

@@ -79,10 +79,98 @@ function headersToObject(src: HeadersInit | undefined | null): Record<string, st
   return out
 }
 
+/* ------------------------------------------------------------------ */
+/* 字节：base64 往返                                                     */
+/* ------------------------------------------------------------------ */
+
+function b64Of(u8: Uint8Array): string {
+  let s = ''
+  // 一次 32K：`String.fromCharCode(...arr)` 的参数个数有上限，整块传会炸栈
+  const STEP = 0x8000
+  for (let i = 0; i < u8.length; i += STEP) {
+    s += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + STEP)))
+  }
+  return btoa(s)
+}
+
+function bytesOfB64(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const u = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
+  return u
+}
+
+/**
+ * 请求体分两类，绝不能混为一谈。
+ *
+ * 文本（JSON / 表单字面量）直接交给 `net_request` 的 `body`。
+ * 而 **FormData / Blob / ArrayBuffer 是字节**：以前统一走
+ * `new Response(x).text()`，FormData 转出来就是字符串 `"[object FormData]"`
+ * ——17 个字符、Content-Type 却声称是 multipart，服务端解析出来只能是空的或者
+ * 一堆垃圾。用户看到的现象就是「上传说成功，恢复时 JSON 解析失败」。
+ *
+ * 现在字节走 base64（`bodyB64`），原生按原始字节写出。
+ * 顺带解决另一件事：multipart 的 boundary 必须和实际字节一致，
+ * 只有 `new Response(formData)` 自己生成的这一对才是对的，所以 content-type
+ * 也从它身上取，覆盖 SDK 传下来的那份。
+ */
+interface EncodedBody {
+  text?: string
+  b64?: string
+  /** 字节体自带的 Content-Type（multipart 的 boundary 在里面） */
+  contentType?: string
+}
+
+async function encodeBody(body: BodyInit): Promise<EncodedBody> {
+  if (typeof body === 'string') return { text: body }
+  const r = new Response(body)
+  const buf = await r.arrayBuffer()
+  return {
+    b64: b64Of(new Uint8Array(buf)),
+    contentType: r.headers.get('content-type') ?? undefined,
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 诊断                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 最近若干次云开发请求的流水。
+ *
+ * SDK 的错误对象极难读（`new StorageError` 把内部错误 `String()` 成了
+ * `[object Object]`，message / code 全丢），出问题时前端只能看到一句
+ * 「上传失败」。把 URL、状态码、响应头几个字符留下来，设置页「复制诊断信息」
+ * 会带上——下次再出问题不用连电脑抓包。
+ */
+const LOG: Array<Record<string, unknown>> = []
+
+function note(rec: Record<string, unknown>): void {
+  try {
+    LOG.push(rec)
+    if (LOG.length > 24) LOG.shift()
+    ;(window as unknown as { __cloudLog?: unknown }).__cloudLog = LOG
+  } catch { /* 诊断失败不许影响主流程 */ }
+}
+
+/** 设置页诊断用：把最近的请求流水拼成几行纯文本 */
+export function cloudLogLines(): string[] {
+  return LOG.map(r => {
+    const u = String(r.url ?? '')
+    const short = u.length > 96 ? `${u.slice(0, 60)}…${u.slice(-30)}` : u
+    const body = r.bodyKind ? ` body=${r.bodyKind}${r.bodyLen ? `(${r.bodyLen})` : ''}` : ''
+    const st = r.status ?? r.error ?? '?'
+    const head = r.head ? ` ← ${String(r.head).replace(/\s+/g, ' ').slice(0, 60)}` : ''
+    return `${st} ${r.method} ${short}${body}${head}`
+  })
+}
+
 interface RawNetResponse {
   status: number
   headers: Record<string, string>
   body: string
+  /** 原始字节的 base64；新原生都会给，老版本没有就走 body 文本 */
+  bodyB64?: string
 }
 
 let installed = false
@@ -98,7 +186,6 @@ export function installCloudFetch(): void {
     let url = ''
     let method = init?.method || 'GET'
     let headers: Record<string, string> = headersToObject(init?.headers)
-    let body: string | undefined
     let raw: Request | null = null
 
     if (typeof input === 'string') url = input
@@ -115,20 +202,41 @@ export function installCloudFetch(): void {
       return raw ? orig(raw, init) : orig(input as RequestInfo, init)
     }
 
-    if (init?.body != null) {
-      body = typeof init.body === 'string' ? init.body : await new Response(init.body).text()
-    } else if (raw) {
-      body = await raw.clone().text()
-    }
-    if (body === '') body = undefined
-    if (method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD') body = undefined
+    const verb = method.toUpperCase()
+    const noBodyVerb = verb === 'GET' || verb === 'HEAD'
 
+    let payload: EncodedBody | null = null
+    if (!noBodyVerb) {
+      try {
+        if (init?.body != null) payload = await encodeBody(init.body)
+        else if (raw) payload = await encodeBody(await raw.clone().arrayBuffer())
+      } catch (e) {
+        note({ url, method: verb, error: `body 编码失败：${String(e).slice(0, 60)}` })
+        throw new TypeError('请求体编码失败')
+      }
+    }
+    if (payload?.text === '') payload = null
+    if (payload?.b64 && payload.contentType) {
+      headers = { ...headers, 'content-type': payload.contentType }
+    }
+
+    const started = Date.now()
     let res: RawNetResponse
     try {
       res = await invoke<RawNetResponse>('net_request', {
-        req: { url, method: method.toUpperCase(), headers, body, timeout: 20_000 },
+        req: {
+          url,
+          method: verb,
+          headers,
+          body: payload?.text,
+          bodyB64: payload?.b64,
+          // 文件内容必须按字节拿：文本通道在二进制上是有损的（换行、替换符、GB18030 兜底）
+          wantBytes: true,
+          timeout: 20_000,
+        },
       })
     } catch (e) {
+      note({ url, method: verb, error: String((e as Error)?.message || e).slice(0, 80), ms: Date.now() - started })
       // 让上层看到真实原因（DNS / 超时 / 证书），别伪装成通用的 Failed to fetch
       throw new TypeError(typeof e === 'string' ? e : (e as Error)?.message || '云开发请求失败')
     }
@@ -138,12 +246,26 @@ export function installCloudFetch(): void {
       if (DROP_RES.has(k.toLowerCase())) continue
       try { out.set(k, v) } catch { /* 非法头名直接丢，不影响 body */ }
     }
+
     // 204/304 规定不能有 body
     const noBody = res.status === 204 || res.status === 304 || res.status === 101
-    return new Response(noBody ? null : res.body ?? '', {
-      status: res.status,
-      headers: out,
+    let bytes: Uint8Array | null = null
+    if (!noBody) {
+      if (typeof res.bodyB64 === 'string' && res.bodyB64) bytes = bytesOfB64(res.bodyB64)
+      else bytes = new TextEncoder().encode(res.body ?? '')
+    }
+
+    note({
+      url, method: verb, status: res.status, ms: Date.now() - started,
+      bodyKind: payload?.b64 ? 'bytes' : payload?.text ? 'text' : undefined,
+      bodyLen: payload?.b64 ? Math.round((payload.b64.length * 3) / 4) : payload?.text?.length,
+      head: bytes ? new TextDecoder().decode(bytes.subarray(0, 80)) : undefined,
+      ct: out.get('content-type') || undefined,
     })
+
+    // 用 Blob 包一层：TS 的 BodyInit 不认 Uint8Array 的泛型形态，Blob 两边都合法
+    const bodyInit: BodyInit | null = bytes ? new Blob([bytes as unknown as BlobPart]) : null
+    return new Response(bodyInit, { status: res.status, headers: out })
   }
 }
 

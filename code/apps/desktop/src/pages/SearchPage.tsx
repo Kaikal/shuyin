@@ -1,11 +1,15 @@
 /**
  * 在线搜索页：单曲 / 歌单 两个 Tab，四个平台可任选。
  *
- * 三个必须做对的地方（都是踩过的坑）：
+ * 四个必须做对的地方（都是踩过的坑）：
  *   1. **300ms 防抖** —— 每敲一个字就发 4 个平台的请求，会被风控，也会把 UI 打满
  *   2. **requestId 竞态保护** —— 后发的请求可能先回来，回填前必须校验序号，
  *      否则「搜周杰」的结果会盖掉「搜周杰伦」的结果
  *   3. **来源标签不可省** —— 四个平台的歌重名极多，不标平台用户根本分不清点了哪个
+ *   4. **输入中走联想、不抢跑全量搜索** —— 打字时输入框下面是联想列表（见
+ *      `lib/searchSuggest.ts`），这时候再自动搜一遍等于每次停手打八个请求，
+ *      而且结果会把联想面板顶掉。回车 / 点联想 / 点搜索才真正开搜；
+ *      输入框失焦（点别处去了）仍然按老规矩自动搜，不至于「打了字没反应」。
  *
  * 动效克制：不做逐项 stagger 入场（列表几十行，入场动画会让滚动发飘）。
  */
@@ -18,11 +22,14 @@ import type {
 import { ALL_PLATFORMS } from '@shuyin/lx-provider'
 import { usePlayer } from '../lib/PlayerProvider'
 import { apiFor, onlineId, platformName, toLocalTrack } from '../lib/online'
+import { useHotWords } from '../lib/hotSearch'
+import { useSearchSuggest } from '../lib/searchSuggest'
 import { KEYS, settings } from '../lib/settings'
 import { toast } from '../lib/toast'
+import { queueToast } from '../lib/queueToast'
 import { consumeLongPress, longPressProps } from '../lib/longPress'
 import { usePlaylists } from '../lib/localPlaylists'
-import { IconNext, IconPause, IconPlay, IconPlus, IconSearch, IconStar } from '../components/icons'
+import { IconMusicNote, IconNext, IconPause, IconPlay, IconPlus, IconSearch, IconStar, IconUser } from '../components/icons'
 import { OnlineSongMenu } from '../components/OnlineSongMenu'
 
 type Tab = 'song' | 'playlist'
@@ -37,6 +44,25 @@ interface Row {
   platform: PlatformSource
 }
 
+/**
+ * 把命中的那几个字加粗。
+ *
+ * 联想列表里一眼要看出「我打的字在哪儿」——尤其是歌手名当联想词时，
+ * 不打亮的话「周杰伦」和「周杰」看起来没什么区别。
+ */
+function mark(text: string, q: string) {
+  if (!q) return text
+  const i = text.toLowerCase().indexOf(q.toLowerCase())
+  if (i < 0) return text
+  return (
+    <>
+      {text.slice(0, i)}
+      <b>{text.slice(i, i + q.length)}</b>
+      {text.slice(i + q.length)}
+    </>
+  )
+}
+
 export function SearchPage({ onOpenPlaylist }: Props) {
   const bookmarks = usePlaylists()
   /** 收藏/取消收藏的轻提示 */
@@ -46,8 +72,21 @@ export function SearchPage({ onOpenPlaylist }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number; song: SearchSong } | null>(null)
   const [input, setInput] = useState('')
   const [keyword, setKeyword] = useState('')
+  /*
+   * 联想面板的三个状态：有没有焦点、有没有被 Esc/回车关掉、键盘高亮第几条。
+   * 面板开着的判定是「有焦点 + 没手动关 + 有字」——都满足了再去要联想，
+   * 面板关着就别为一个看不见的列表打请求。
+   */
+  const [focused, setFocused] = useState(false)
+  const [sugDismissed, setSugDismissed] = useState(false)
+  const [hi, setHi] = useState(-1)
   const [platforms, setPlatforms] = useState<PlatformSource[]>(ALL_PLATFORMS)
   const [history, setHistory] = useState<string[]>([])
+  /** 空态里的「各平台热搜」（按当前勾选的平台，按天缓存） */
+  const hot = useHotWords(platforms)
+  const sugOpen = focused && !sugDismissed && input.trim().length > 0
+  const sug = useSearchSuggest(input, platforms, sugOpen, history)
+  const sugList = sugOpen ? sug.items : []
   const [songs, setSongs] = useState<Row[]>([])
   const [playlists, setPlaylists] = useState<PlaylistSearchItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -84,12 +123,21 @@ export function SearchPage({ onOpenPlaylist }: Props) {
     })
   }, [])
 
-  /* 300ms 防抖：停止输入后才发请求 */
+  /*
+   * 300ms 防抖：停止输入后才发请求。
+   *
+   * **输入框有焦点、有字时先不提交**——那段时间是联想面板的，同一句话再打
+   * 一轮全量搜索既浪费请求，结果回来了还会把联想顶掉。失焦（去点平台筛选 /
+   * 忽然不想搜了）就照老规矩自动搜，不会出现「打了字什么都没有」。
+   * 清空输入仍然立即生效：空关键字本身就是「回到热搜空态」。
+   */
   useEffect(() => {
     const kw = input.trim()
+    if (!kw) { setKeyword(''); return }
+    if (focused) return
     const t = window.setTimeout(() => setKeyword(kw), 300)
     return () => window.clearTimeout(t)
-  }, [input])
+  }, [input, focused])
 
   /* 真正搜索：并发打各平台，失败的平台单独记录但不影响其它平台 */
   useEffect(() => {
@@ -152,6 +200,9 @@ export function SearchPage({ onOpenPlaylist }: Props) {
     const v = (kw ?? input).trim()
     setInput(v)
     setKeyword(v)
+    /* 搜了就把联想收起来：面板还挂着会挡住第一屏结果 */
+    setSugDismissed(true)
+    setHi(-1)
   }, [input])
 
   /**
@@ -173,7 +224,9 @@ export function SearchPage({ onOpenPlaylist }: Props) {
   }, [p])
 
   const addSong = useCallback((row: Row, position: 'end' | 'next') => {
-    p.addToQueue(toLocalTrack(row.song), position)
+    const t = toLocalTrack(row.song)
+    queueToast([t], p.queueState.queue, position)
+    p.addToQueue(t, position)
   }, [p])
 
   const grouped = useMemo(() => (
@@ -200,10 +253,45 @@ export function SearchPage({ onOpenPlaylist }: Props) {
             <input
               value={input}
               placeholder="搜歌名、歌手、专辑"
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') submit() }}
+              onChange={e => {
+                setInput(e.target.value)
+                /* 改了字就把上次 Esc 关掉的状态解除：面板应该跟着重新出现 */
+                setSugDismissed(false)
+                setHi(-1)
+              }}
+              onFocus={() => setFocused(true)}
+              onBlur={() => { setFocused(false); setSugDismissed(false); setHi(-1) }}
+              onKeyDown={e => {
+                if (e.key === 'Escape') {
+                  if (!sugOpen) return
+                  e.preventDefault()
+                  setSugDismissed(true)
+                  setHi(-1)
+                  return
+                }
+                /*
+                 * 键盘选词：↑↓ 在「联想 + 最后那行『搜索』」之间绕圈，
+                 * 回车取当前高亮，没高亮就是「搜我打的这串」。
+                 */
+                if (sugOpen) {
+                  const n = sugList.length
+                  if (e.key === 'ArrowDown') { e.preventDefault(); setHi(i => (i + 1) % (n + 1)); return }
+                  if (e.key === 'ArrowUp') { e.preventDefault(); setHi(i => (i <= 0 ? n : i - 1)); return }
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    if (hi >= 0 && hi < n) submit(sugList[hi].text)
+                    else submit()
+                    return
+                  }
+                }
+                if (e.key === 'Enter') submit()
+              }}
               /* 手机键盘右下角显示「搜索」而不是「换行」 */
               enterKeyHint="search"
+              role="combobox"
+              aria-expanded={sugOpen}
+              aria-controls="sr-sug"
+              aria-autocomplete="list"
               spellCheck={false}
             />
             {input && (
@@ -214,6 +302,55 @@ export function SearchPage({ onOpenPlaylist }: Props) {
           </div>
           {/* 桌面按回车就行，手机上需要一颗看得见的按钮 */}
           <button className="primary-btn search-go" onClick={() => submit()}>搜索</button>
+
+          {/*
+           * 联想面板。
+           *
+           * 挂在 `.lib-actions` 上而不是输入框里：手机上输入框只占一行的一截，
+           * 面板要跟整行同宽才好点。`onMouseDown` 拦掉默认行为——点一下联想
+           * 不该先让输入框失焦（失焦会触发自动搜索，等于把人刚点的词换掉）。
+           */}
+          {sugOpen && (
+            <div className="sr-sug" id="sr-sug" role="listbox" aria-label="搜索联想"
+              onMouseDown={e => e.preventDefault()}>
+              {sugList.map((it, i) => (
+                <button
+                  key={it.key}
+                  className={'sr-sug-item' + (hi === i ? ' is-hi' : '')}
+                  role="option"
+                  aria-selected={hi === i}
+                  onMouseEnter={() => setHi(i)}
+                  onClick={() => submit(it.text)}
+                >
+                  <span className="sr-sug-ico" aria-hidden="true">
+                    {it.kind === 'song' ? <IconMusicNote width={13} height={13} />
+                      : it.kind === 'singer' ? <IconUser width={13} height={13} />
+                        : <IconSearch width={13} height={13} />}
+                  </span>
+                  <span className="sr-sug-t">{mark(it.text, input.trim())}</span>
+                  {it.kind === 'singer' && <span className="sr-sug-k">歌手</span>}
+                  {it.sub && <span className="sr-sug-sub">{it.sub}</span>}
+                  {it.source && (
+                    <span className="sr-badge sm" data-src={it.source}>{platformName(it.source)}</span>
+                  )}
+                </button>
+              ))}
+              {sug.loading && sugList.length === 0 && (
+                <div className="sr-sug-wait">正在找「{input.trim()}」…</div>
+              )}
+              <button
+                className={'sr-sug-item sr-sug-go' + (hi === sugList.length ? ' is-hi' : '')}
+                role="option"
+                aria-selected={hi === sugList.length}
+                onMouseEnter={() => setHi(sugList.length)}
+                onClick={() => submit()}
+              >
+                <span className="sr-sug-ico" aria-hidden="true"><IconSearch width={13} height={13} /></span>
+                <span className="sr-sug-t">搜索「{input.trim()}」</span>
+                <span className="sr-sug-k">Enter</span>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -235,12 +372,50 @@ export function SearchPage({ onOpenPlaylist }: Props) {
         </div>
       </div>
 
-      {!keyword && history.length > 0 && (
-        <div className="sr-history">
-          <span className="sr-history-label">最近搜索</span>
-          {history.map(h => (
-            <button key={h} className="sr-ghost" onClick={() => submit(h)}>{h}</button>
-          ))}
+      {!keyword && (history.length > 0 || hot.groups.length > 0 || hot.loading) && (
+        <div className="sr-empty">
+          {history.length > 0 && (
+            <div className="sr-history">
+              <span className="sr-history-label">最近搜索</span>
+              {history.map(h => (
+                <button key={h} className="sr-ghost" onClick={() => submit(h)}>{h}</button>
+              ))}
+            </div>
+          )}
+
+          {/*
+           * 各平台热搜：关键词为空时这块才是页面的主体，不然只剩一行「最近搜索」
+           * 和一大片空白。词来自各平台热歌榜前 10 首的歌名（见 `lib/hotSearch.ts`
+           * 里为什么不直接用「热搜词」），点一下就是拿它去搜。
+           *
+           * 只显示**当前勾选**的平台：没勾的那几家在这儿出现会让「搜不到」
+           * 变得莫名其妙（词看得见、点下去却没这个平台的活）。
+           */}
+          {hot.groups.length > 0 ? (
+            <section className="sr-hot">
+              <div className="sr-hot-head">
+                <span className="sr-hot-title">各平台热搜</span>
+                <span className="sr-hot-sub">点一个直接搜</span>
+              </div>
+              {hot.groups.map(g => (
+                <div className="sr-hot-row" key={g.source}>
+                  <span className="sr-badge sm" data-src={g.source}>{platformName(g.source)}</span>
+                  <div className="sr-hot-words">
+                    {g.words.map(w => (
+                      <button key={g.source + w} className="sr-hot-word" onClick={() => submit(w)}>{w}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </section>
+          ) : hot.loading ? (
+            /* 四家要各取一次榜单再取一次详情，冷启动 1~2 秒：先占住位置，
+               否则这块会在「什么都没有」和「突然铺满」之间跳一下 */
+            <div className="sr-hot sr-hot-wait">
+              <span className="sr-hot-title">各平台热搜</span>
+              <span className="sr-hot-sub">正在获取…</span>
+            </div>
+          ) : null}
         </div>
       )}
 

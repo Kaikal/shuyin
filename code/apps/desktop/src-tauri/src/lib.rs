@@ -402,6 +402,12 @@ struct NetRequest {
     headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     body: Option<String>,
+    /// 二进制请求体（base64）。云同步的文件上传是 multipart，只能走这个字段
+    #[serde(default, rename = "bodyB64")]
+    body_b64: Option<String>,
+    /// 要求回包带上原始字节（base64）。默认不编码，见 `net::collect`
+    #[serde(default, rename = "wantBytes")]
+    want_bytes: bool,
     #[serde(default)]
     timeout: Option<u64>,
 }
@@ -415,8 +421,19 @@ async fn net_request(req: NetRequest) -> Result<net::NetResponse, String> {
     let method = req.method.unwrap_or_else(|| "GET".to_string());
     let headers = req.headers.unwrap_or_default();
     let timeout = req.timeout.unwrap_or(10_000);
+    let body = req.body;
+    let body_b64 = req.body_b64;
+    let want_bytes = req.want_bytes;
     tauri::async_runtime::spawn_blocking(move || {
-        net::request(&method, &req.url, &headers, req.body.as_deref(), timeout)
+        net::request(
+            &method,
+            &req.url,
+            &headers,
+            body.as_deref(),
+            body_b64.as_deref(),
+            want_bytes,
+            timeout,
+        )
     })
     .await
     .map_err(|e| format!("网络线程异常：{e}"))?
@@ -477,7 +494,7 @@ async fn check_update(url: Option<String>) -> Result<UpdateInfo, String> {
         .unwrap_or_else(|| UPDATE_FEED.to_string());
     let body = tauri::async_runtime::spawn_blocking(move || {
         let headers = std::collections::HashMap::new();
-        net::request("GET", &target, &headers, None, 8_000).map(|r| r.body)
+        net::request("GET", &target, &headers, None, None, false, 8_000).map(|r| r.body)
     })
     .await
     .map_err(|e| format!("网络线程异常：{e}"))??;
@@ -544,6 +561,17 @@ async fn probe_audio_url(url: String) -> Result<net::ProbeAudio, String> {
 #[tauri::command]
 async fn local_audio_duration(path: String) -> Result<f64, String> {
     tauri::async_runtime::spawn_blocking(move || net::local_duration(&path))
+        .await
+        .map_err(|e| format!("读取线程异常：{e}"))?
+}
+
+/// 读本地音频文件自己写的标题/歌手（`[title, artist]`，读不到是空串）。
+///
+/// 和 `local_audio_duration` 是一对：时长差 2 秒挡不住的那类错歌
+/// （《孤勇者》256s vs 邓紫棋《唯一》253.7s），靠名字才认得出来。
+#[tauri::command]
+async fn local_audio_tags(path: String) -> Result<(String, String), String> {
+    tauri::async_runtime::spawn_blocking(move || net::local_tags(&path))
         .await
         .map_err(|e| format!("读取线程异常：{e}"))?
 }
@@ -1165,7 +1193,7 @@ async fn import_source_url(app: AppHandle, url: String, name: Option<String>) ->
     let code = tauri::async_runtime::spawn_blocking(move || {
         let mut headers = std::collections::HashMap::new();
         headers.insert("User-Agent".to_string(), "shuyin/0.2".to_string());
-        net::request("GET", &fetch_url, &headers, None, 20_000).map(|r| r.body)
+        net::request("GET", &fetch_url, &headers, None, None, false, 20_000).map(|r| r.body)
     })
     .await
     .map_err(|e| format!("下载线程异常：{e}"))??;
@@ -1237,11 +1265,16 @@ fn set_volume(player: State<'_, Player>, volume: f32) {
     player.set_volume(volume);
 }
 
-/// 音效：三段 EQ 增益（dB）+ 中频中心频率 + 前置增益（dB）。
+/// 音效：五段均衡增益（dB）+ 前置增益（dB）+ 声道平衡（-1..1）。
+/// 频点见 `player::FX_BANDS_HZ`，必须与前端 `FX_BANDS_HZ` 一致。
 /// 改完立刻生效，不需要重载当前曲目。
 #[tauri::command]
-fn set_fx(player: State<'_, Player>, low: f32, mid: f32, high: f32, mid_hz: f32, pre: f32) {
-    player.set_fx(low, mid, high, mid_hz, pre);
+fn set_fx(player: State<'_, Player>, bands: Vec<f32>, pre: f32, balance: f32, space: Option<u32>) {
+    let mut b = [0f32; 5];
+    for (i, v) in bands.iter().take(5).enumerate() {
+        b[i] = *v;
+    }
+    player.set_fx(b, pre, balance, space.unwrap_or(0));
 }
 
 /// 频谱快照：40 个频段，0..1（前端按帧轮询，暂停时返回全 0）
@@ -2727,6 +2760,7 @@ pub fn run() {
             smtc_update,
             probe_audio_url,
             local_audio_duration,
+            local_audio_tags,
             sources_default_dir,
             downloads_dir,
             download_track,

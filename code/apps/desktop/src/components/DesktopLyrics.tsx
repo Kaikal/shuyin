@@ -15,7 +15,7 @@
  *   - 滚轮调字号，悬停条上 A− / A+ 也能调
  *   - 悬停出控制条；锁定后鼠标穿透，解锁入口在托盘菜单的「锁定桌面歌词」
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { desktopLyrics, type LyricDocData, type LyricWindowData } from '../lib/desktopLyrics'
 import { LYRIC_COLORS, lyricColorName, type LyricsColorId } from '../lib/lyricsColor'
 import {
@@ -59,10 +59,26 @@ export function DesktopLyricsWindow() {
   const [layout, setLayout] = useLyricsLayout()
   const [resizing, setResizing] = useState(false)
   const [live, setLive] = useState<{ playing: boolean; position: number; duration: number } | null>(null)
+  /**
+   * 点过播放键之后的「意图锁」。
+   *
+   * 只在真值跟意图**对上**时才撤。Rust 的 250ms 广播很可能先把命令落地之前
+   * 那一帧旧状态送过来——一收到就撤锁的话，图标会被打回原样，
+   * 用户看到的就是「点了暂停，声音停了但图标不切换」。
+   * 反过来，命令真没生效（正在取链、播放器被回收）时 1.2 秒后自己松开，
+   * 不会长期停在一个假的态上。
+   */
+  const [playWant, setPlayWant] = useState<{ v: boolean; until: number } | null>(null)
   /** 本地换色后的即时颜色（主窗口 400ms 后会用存档值对齐） */
   const [hlLocal, setHlLocal] = useState<string | null>(null)
   const [, setTick] = useState(0)
+  const rootRef = useRef<HTMLDivElement>(null)
   const hideTimer = useRef(0)
+  const showTimer = useRef(0)
+  /** 展开延时是否已排上（pointermove 会一直触发，不能每次都重排） */
+  const showPending = useRef(false)
+  /** 指针是否在窗口里。`:hover` 在 WebView2 上会残留也会丢，只能当辅证 */
+  const inside = useRef(false)
   /** 按下位置：超过阈值才算拖动，避免「点一下窗口就跟着鼠标跑」 */
   const press = useRef<{ x: number; y: number; dragging: boolean } | null>(null)
   /** 右边缘改宽的起点（起始指针 + 起始宽度 + 上一次落定的宽度） */
@@ -81,6 +97,8 @@ export function DesktopLyricsWindow() {
     })
     const offState = desktopLyrics.onPlayerState(s => {
       setLive(s)
+      /* 真值跟意图一致 → 撤锁；相反就先留着（命令可能还在路上，见 playWant 注释） */
+      setPlayWant(w => (w && s.playing === w.v ? null : w))
       clock.current = { pos: s.position, at: performance.now(), playing: s.playing }
     })
     const offLock = desktopLyrics.onLock(l => { setLocked(l); if (l) flashHint() })
@@ -104,7 +122,16 @@ export function DesktopLyricsWindow() {
   }, [layout.width, layout.fontSize, resizing])
 
   /* 播放中才需要刷新逐字高亮：33ms 一格（≈30Hz），比 45ms 的过渡还密，看不出台阶 */
-  const playing = live?.playing ?? data?.playing ?? false
+  const playing = playWant?.v ?? live?.playing ?? data?.playing ?? false
+  /* 意图锁兜底：命令没生效时别让图标一直停在假的态上 */
+  useEffect(() => {
+    if (!playWant) return
+    const id = window.setTimeout(
+      () => setPlayWant(null),
+      Math.max(0, playWant.until - performance.now()),
+    )
+    return () => window.clearTimeout(id)
+  }, [playWant])
   useEffect(() => {
     if (!playing) return
     const id = window.setInterval(() => setTick(t => (t + 1) % 100000), 33)
@@ -151,18 +178,76 @@ export function DesktopLyricsWindow() {
     window.setTimeout(() => setHint(false), 2800)
   }
 
-  const showBar = () => {
-    setHover(true)
+  /* ---------- 悬停：按「最近一次交互」算显隐 ---------- */
+  /*
+   * 以前只有 mouseenter / mouseleave 一对事件 + 900ms 定时器，两个毛病：
+   *   · 控制条出现、改字号、窗口被系统挪一下，WebView2 都会补一个 mouseleave，
+   *     鼠标明明还压在字上，不到一秒背板就整块收掉——用户：「点了它还是隔几秒
+   *     消失，不等我停手」；
+   *   · 鼠标只是路过（桌面歌词常驻，拖别的窗口经常扫过）也整块亮一下，很吵。
+   * 现在：进来先等 HOVER_INTENT，真的停住才展开（路过不闪）；任何按下 / 移动 /
+   * 点击 / 滚轮都刷新时间戳，操作期间绝不收；到点前再看一眼指针还在不在
+   * （leave 事件漏了也能兜一次）。
+   */
+  const HOVER_INTENT = 110
+  const HIDE_AFTER = 2000
+
+  const scheduleHide = (retry = 0) => {
     window.clearTimeout(hideTimer.current)
-  }
-  const leaveBar = () => {
-    // 拉边缘改宽时鼠标经常暂时滑出窗口——这时绝不能收背景，一收就无法继续调整
-    if (edgeDrag.current) return
     hideTimer.current = window.setTimeout(() => {
+      /* 指针确实还在窗口里（多半马上要动手）：再给一轮，最多一轮。
+         桌面歌词是常驻窗，背板永远挂着会挡住底下的东西 */
+      if (retry < 1 && inside.current) { scheduleHide(retry + 1); return }
       setHover(false)
       setPaletteOpen(false)
-    }, 900)
+    }, HIDE_AFTER)
   }
+
+  /** 指针进来了（或窗口刚展开）：停住 HOVER_INTENT 才浮出背板 */
+  const armShow = () => {
+    /* 重复调用不重排：鼠标在窗口里慢慢挪的时候会一直触发 pointermove，
+       每次都重排的话永远等不到那 110ms，背板就再也出不来了 */
+    if (showPending.current) return
+    showPending.current = true
+    showTimer.current = window.setTimeout(() => {
+      showPending.current = false
+      if (inside.current) setHover(true)
+    }, HOVER_INTENT)
+  }
+  const cancelShow = () => {
+    showPending.current = false
+    window.clearTimeout(showTimer.current)
+  }
+
+  const enterBar = () => {
+    inside.current = true
+    if (!hover) armShow()
+    scheduleHide()
+  }
+
+  const leaveBar = () => {
+    inside.current = false
+    cancelShow()
+    /* 拉边缘改宽时鼠标经常暂时滑出窗口——这时绝不能收背板，一收就看不见在拉什么 */
+    if (edgeDrag.current) return
+    scheduleHide()
+  }
+
+  /**
+   * 任何一次交互都调一下：刷新「最后一次动手」的时间。
+   * 点按往往先于 enter 到达（窗口小、鼠标一抖就出去了），所以这里也负责补展开。
+   */
+  const bump = () => {
+    if (!hover) armShow()
+    scheduleHide()
+  }
+
+  /* 卸载时别把定时器留在外面跑 */
+  useEffect(() => () => {
+    window.clearTimeout(hideTimer.current)
+    window.clearTimeout(showTimer.current)
+  }, [])
+
   /** 背板 / 控制条 / 进度条的显示条件：悬停、改宽中、色板开着，任一就算「在场」 */
   const present = hover || resizing || paletteOpen
 
@@ -193,6 +278,7 @@ export function DesktopLyricsWindow() {
 
   /* 滚轮调字号；Shift + 滚轮调宽窄 */
   const onWheel = (e: React.WheelEvent) => {
+    bump()
     if (locked) return
     const step = e.deltaY < 0 ? 2 : -2
     if (e.shiftKey) bumpWidth(e.deltaY < 0 ? 40 : -40)
@@ -201,6 +287,7 @@ export function DesktopLyricsWindow() {
 
   /* ---------- 右边缘改宽 ---------- */
   const onPointerDown = (e: React.PointerEvent) => {
+    bump()
     if (locked || e.button !== 0) return
     const el = e.target as HTMLElement
     // 按钮/控制条自己处理，不要拖窗口
@@ -208,7 +295,10 @@ export function DesktopLyricsWindow() {
     if (window.innerWidth - e.clientX <= EDGE) {
       edgeDrag.current = { x: e.clientX, w: layoutRef.current.width, last: layoutRef.current.width }
       setResizing(true)
-      showBar() // 拉边全程保持背板在场，鼠标暂时滑出也不会「背景消失、改不了宽」
+      /* 拉边全程保持背板在场：鼠标暂时滑出窗口也不会「背景消失、改不了宽」 */
+      inside.current = true
+      cancelShow()
+      setHover(true)
       try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) } catch { /* 忽略 */ }
       return
     }
@@ -216,6 +306,7 @@ export function DesktopLyricsWindow() {
   }
 
   const onPointerMove = (e: React.PointerEvent) => {
+    bump()
     const rz = edgeDrag.current
     if (rz) {
       const w = clampWidth(rz.w + (e.clientX - rz.x))
@@ -247,6 +338,9 @@ export function DesktopLyricsWindow() {
       setLayout({ width: rz.last })
       void desktopLyrics.pushLayout({ width: rz.last, fontSize: layoutRef.current.fontSize, bg: layoutRef.current.bg })
     }
+    /* 拉宽的整个过程都强制「在场」，松手后按正常节拍收（指针要是还在窗口里，
+       scheduleHide 会自己再等一轮） */
+    scheduleHide()
   }
 
   /* ---------- 歌词行 + KTV 染色 ---------- */
@@ -349,8 +443,58 @@ export function DesktopLyricsWindow() {
    * 用户反馈「大小差太多，轮换着太抢眼，影响工作」。
    * 现在按主行的 0.68 起算、上限 0.78，长句仍然缩到放得下，但两排始终差不到三成。
    */
-  const subSize = Math.min(mainSize * 0.78, fillToWidth(sub, mainSize * 0.68, avail, { maxGrow: 1.15 }))
+  const subSize = Math.min(mainSize * 0.78, fillToWidth(sub, mainSize * 0.68, avail, { maxGrow: 1.15, minRatio: 0.32 }))
   const subTracking = trackToFill(sub, subSize, avail, 0.34)
+
+  /*
+   * 长句跑马灯（当前句）。
+   *
+   * 以前这里的策略是「缩字号硬塞」：`fillToWidth` 的 minRatio 是 0.6，缩到底还有
+   * 一句 30 多字放不下，就被 `.dl-line` 的 `overflow: hidden` 直接裁掉——用户原话
+   * 「超出去的歌词就看不见了」。桌面歌词是常驻看的，裁掉半句等于漏词。
+   *
+   * 现在和播放页同一套：字号不动，**唱到哪个字就横向推到哪个字**（位移量 `--dl-x`，
+   * 0 → -溢出量）。歌词窗口窄（默认 620），主行字号 32，一句 20 字就是 640px——
+   * 这属于常见情况，不是极端长句。
+   *
+   * 溢出量实测 DOM（`.dl-line` 在这套样式里是 `width: max-content`，量到的是自然宽度），
+   * 不按字数估：`visualWidth` 对拉丁字母偏小，估少了最后几个字永远滚不出来。
+   * 换句时字号有 180ms 的 `dl-grow` 动画（起点是本位的九成），立刻量会偏小，240ms 后补量一次。
+   */
+  const lineRef = useRef<HTMLDivElement>(null)
+  const [ov, setOv] = useState(0)
+  /**
+   * 量「这一句超出了多少」。
+   *
+   * 基准取**裁切层的宽度**，不是 `layout.width - AVAIL_INSET`：
+   * 后者只是按窗口尺寸估的，一旦窗口被系统缩放 / body 内边距变了，
+   * 估出来的可用宽度和真实排版对不上，溢出的判定就整个偏掉。
+   */
+  const measure = useCallback(() => {
+    const el = lineRef.current
+    const clip = el?.parentElement
+    if (!el || !clip) { setOv(0); return }
+    setOv(Math.max(0, Math.round(el.offsetWidth - clip.clientWidth)))
+  }, [])
+  useLayoutEffect(() => {
+    const el = lineRef.current
+    const clip = el?.parentElement
+    if (!el || !clip) { setOv(0); return }
+    measure()
+    /*
+     * 窗口宽度变化不会经过 React（Rust 侧直接 resize），只靠 `avail` 这个依赖
+     * 是接不住的——那头一改，这里量到的还是旧宽度，长句就永远不滚。
+     * 盯住裁切层自己的尺寸，谁改的都能收到。
+     */
+    const ro = new ResizeObserver(measure)
+    ro.observe(clip)
+    ro.observe(el)
+    /* 换句时字号有 180ms 的 grow 动画（起点是本位的九成），立刻量到的宽度偏小 */
+    const t = window.setTimeout(measure, 240)
+    return () => { ro.disconnect(); window.clearTimeout(t) }
+  }, [line, mainSize, tracking, measure])
+  /** 横移量：唱到 100% 时末尾刚好露出来 */
+  const wrapX = ov > 0 ? -ov * ratio : 0
   /*
    * 换句动画的起点字号。
    *
@@ -363,14 +507,15 @@ export function DesktopLyricsWindow() {
 
   return (
     <div
+      ref={rootRef}
       className="dl"
       data-locked={locked}
       data-resizing={resizing}
       data-hover={present}
       data-present={present}
       style={{ ['--dl-bg' as never]: layout.bg }}
-      onMouseEnter={showBar}
-      onMouseLeave={leaveBar}
+      onPointerEnter={enterBar}
+      onPointerLeave={leaveBar}
       onWheel={onWheel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -396,39 +541,50 @@ export function DesktopLyricsWindow() {
         {/* KTV 双行：当前句与下一句上下轮换（行序号奇偶决定谁在上），
             间奏时下排显示「开唱倒计时」。交错的对角排版保留。 */}
         <div className="dl-lines" data-flip={flip ? 'true' : 'false'}>
-          <div
-            className="dl-line"
-            key={'a' + line + (flip ? 'f' : '')}
-            style={{
-              fontSize: mainSize,
-              letterSpacing: tracking ? tracking + 'px' : undefined,
-              marginRight: tracking ? -tracking : undefined,
-              /* 唱到哪儿：0~1，CSS 用它切渐变（@property 注册过，可以平滑过渡） */
-              ['--q' as never]: Math.round(ratio * 1000) / 1000,
-              ['--dl-hl' as never]: hl,
-              /* 换句动画的起点：本位的九成（幅度小才不抢眼，见 growFrom 注释） */
-              ['--dl-from' as never]: growFrom.toFixed(1) + 'px',
-            }}
-          >
-            {line}
+          {/* 裁切层：文字块量到的是自然宽度（`width: max-content`），超出窗口的部分
+              由这一层裁掉，当前句再按演唱进度横移（`--dl-x`）。不包这层的话，
+              `overflow: hidden` 只能挂在 `.dl-line` 自己身上，而它一旦被压到
+              100% 宽就量不出「到底超了多少」。 */}
+          <div className="dl-clip" data-ov={ov > 0 ? 'true' : 'false'}>
+            <div
+              className="dl-line"
+              ref={lineRef}
+              key={'a' + line + (flip ? 'f' : '')}
+              style={{
+                fontSize: mainSize,
+                letterSpacing: tracking ? tracking + 'px' : undefined,
+                marginRight: tracking ? -tracking : undefined,
+                /* 唱到哪儿：0~1，CSS 用它切渐变（@property 注册过，可以平滑过渡） */
+                ['--q' as never]: Math.round(ratio * 1000) / 1000,
+                ['--dl-hl' as never]: hl,
+                /* 换句动画的起点：本位的九成（幅度小才不抢眼，见 growFrom 注释） */
+                ['--dl-from' as never]: growFrom.toFixed(1) + 'px',
+                /* 长句横移：唱完这一句正好把最后一个字推到窗口右边缘 */
+                ['--dl-x' as never]: wrapX.toFixed(1) + 'px',
+              }}
+            >
+              {line}
+            </div>
           </div>
-          <div
-            className={'dl-sub' + (countdown != null ? ' counting' : '')}
-            key={'b' + (countdown != null ? `d${dotCount}` : sub)}
-            style={{
-              fontSize: subSize,
-              letterSpacing: subTracking ? subTracking + 'px' : undefined,
-              marginRight: subTracking ? -subTracking : undefined,
-            }}
-          >
-            {countdown != null
-              ? (
-                /* 倒数点：不占文字位置，用固定尺寸的点排，避免跟着字号缩放变得巨大 */
-                <span className="dl-dots" role="timer" aria-label={`还有 ${Math.ceil(countdown)} 秒开唱`}>
-                  {Array.from({ length: dotCount }, (_, i) => <i key={i} />)}
-                </span>
-              )
-              : (sub || '\u00a0')}
+          <div className="dl-clip">
+            <div
+              className={'dl-sub' + (countdown != null ? ' counting' : '')}
+              key={'b' + (countdown != null ? `d${dotCount}` : sub)}
+              style={{
+                fontSize: subSize,
+                letterSpacing: subTracking ? subTracking + 'px' : undefined,
+                marginRight: subTracking ? -subTracking : undefined,
+              }}
+            >
+              {countdown != null
+                ? (
+                  /* 倒数点：不占文字位置，用固定尺寸的点排，避免跟着字号缩放变得巨大 */
+                  <span className="dl-dots" role="timer" aria-label={`还有 ${Math.ceil(countdown)} 秒开唱`}>
+                    {Array.from({ length: dotCount }, (_, i) => <i key={i} />)}
+                  </span>
+                )
+                : (sub || '\u00a0')}
+            </div>
           </div>
         </div>
       </div>
@@ -440,12 +596,17 @@ export function DesktopLyricsWindow() {
       {/* 右边缘：按住就能拉宽（窗口无边框，这是唯一的「拖边」入口） */}
       {!locked && <div className="dl-grip" aria-hidden="true" title="拖动调整宽度" />}
 
-      {/* 关闭放右上角独立一格：和播放控制混在一排里，想关的时候总点错 */}
-      {!locked && hover && (
+      {/* 关闭放右上角独立一格：和播放控制混在一排里，想关的时候总点错。
+          常驻渲染 + data-show 过渡，而不是 `hover && …` 硬切——原来鼠标一进来
+          这颗钮「啪」地出现，是「很生硬」的主要来源之一 */}
+      {!locked && (
         <button
           className="dl-x"
+          data-show={present}
           aria-label="关闭桌面歌词"
           title="关闭桌面歌词"
+          aria-hidden={!present}
+          tabIndex={present ? 0 : -1}
           onClick={() => void desktopLyrics.sendAction('close')}
         >
           <IconClose width={12} height={12} />
@@ -484,8 +645,23 @@ export function DesktopLyricsWindow() {
             <IconPrev width={16} height={16} />
           </button>
           <button className="dl-btn dl-play" aria-label={playing ? '暂停' : '播放'}
-            onClick={() => void desktopLyrics.sendAction('playpause')}>
-            {playing ? <IconPause width={18} height={18} /> : <IconPlay width={18} height={18} />}
+            onClick={() => {
+              /*
+               * 先就地翻面（意图锁），再发命令。
+               *
+               * 图标原来只认 Rust 推来的 250ms 快照。暂停后位置不动、歌词也不变，
+               * 加上命令往返的几十毫秒里有整整一帧还是旧值，按下去声音停了、
+               * 键还停在 ⏸（用户：「点击暂停，确实会暂停，但是图标不会切换」）。
+               * 这里先翻，真值跟上才撤锁，所以命令失败也只是 1.2 秒后自己弹回去。
+               */
+              setPlayWant({ v: !playing, until: performance.now() + 1200 })
+              void desktopLyrics.sendAction('playpause')
+            }}>
+            {/* key 换一个 → 图标重新挂载，走一次 200ms 的淡入缩小，
+                比原地硬换 SVG 柔和；两态之间不会闪空 */}
+            <span className="dl-ico" key={playing ? 'p' : 's'}>
+              {playing ? <IconPause width={18} height={18} /> : <IconPlay width={18} height={18} />}
+            </span>
           </button>
           <button className="dl-btn" aria-label="下一首" onClick={() => void desktopLyrics.sendAction('next')}>
             <IconNext width={16} height={16} />

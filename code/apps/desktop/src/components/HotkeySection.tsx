@@ -82,7 +82,7 @@ export function HotkeySection() {
   }, [recording, state, commit])
 
   return (
-    <section className="set-group">
+    <section className="set-group" data-pane="shell" data-sec="hotkeys">
       <h3>
         快捷键与控制
         <HelpTip

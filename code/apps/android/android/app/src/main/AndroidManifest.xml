@@ -5,17 +5,45 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 长按拿起歌单卡时轻震一下（排序的「拿起来了」反馈）。安装期权限，不弹授权框 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- 本地音乐库：Android 13 起按类型授权，13 之前走外部存储读 -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!--
+        下载落到公共「音乐」文件夹：Android 10 起走 MediaStore（无需权限），
+        只有 9 及以下需要这条写权限，所以用 maxSdkVersion 限住。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- 后台播放：前台服务 + 通知（13 起通知要单独授权） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 音乐锁屏：息屏时用「全屏意图通知」让系统自己拉起锁屏页（后台 startActivity 点不亮屏） -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- 把已经建好的锁屏页任务提到前台。普通权限，装上即有。
+         息屏那一刻应用多半在后台，`startActivity` 会被 Android 10+ 的
+         「后台不许启动 Activity」拦掉（真机日志 `Abort background activity starts`）；
+         而 `moveTaskToFront` 只是把已有任务的层级调上来，不走那道闸门 ——
+         但它自己要求 REORDER_TASKS，没有这个声明就是一条 Permission Denial。 -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+
+    <!-- 悬浮歌词：「显示在其他应用上层」。特殊权限，装上不生效，
+         首次开启时会跳系统设置页让用户手动允许（见 FloatingLyrics）。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- 频谱不再需要 RECORD_AUDIO。
+         以前靠 android.media.audiofx.Visualizer，那是「采集系统输出音频」，
+         系统只认录音权限；换成 ExoPlayer 之后，PCM 是在自己进程里解码出来、
+         送去扬声器之前旁路一份（见 TapAudioProcessor），一个权限都不用要。
+         这一条删掉之后，应用装到手机上连「麦克风」都不会出现在权限列表里。 -->
 
     <application
         android:allowBackup="false"
@@ -37,6 +65,33 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!--
+              「其他应用打开」送进来的音源脚本。
+
+              场景：别人在微信/QQ 里发来一个音源脚本（.js），点开 → 系统问用哪个应用打开 →
+              疏音要出现在这个列表里，进来之后由前端弹确认框问「要导入吗」。
+              原生只负责把文件摆到桌上，**不替用户决定导入**（见 MainActivity.handleIncoming）。
+            -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/javascript" />
+                <data android:mimeType="text/javascript" />
+                <data android:mimeType="application/x-javascript" />
+            </intent-filter>
+            <!--
+              国内 IM 发 .js 时常常上报成「未知类型」(application/octet-stream)，
+              不认这一条的话「其他应用打开」列表里根本没有疏音。
+              代价是别的未知类型文件也会把我们列进去——导入前的确认框兜住误触。
+            -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
         </activity>
 
         <!-- 平台登录：内嵌各家的官方登录页，从 CookieManager 取凭证。
@@ -48,9 +103,43 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- 锁屏播放页：showWhenLocked 让它压在系统锁屏之上（悬浮窗做不到），
+             息屏那一刻由 PlaybackService 的 ACTION_SCREEN_OFF 监听拉起。 -->
+        <activity
+            android:name=".LockScreenActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:theme="@style/LockTheme"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale" />
+
         <service
             android:name=".PlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!-- 「我是个媒体应用」的标准声明。系统（华为控制中心 / 车机 / Android Auto）
+             除了看 MediaSession，还会看应用有没有实现 MediaBrowserService——
+             真机上酷狗 / 酷我 / 网易云 / QQ 音乐四家全都实现了，我们原来没有，
+             所以控制中心一直画「未在播放」。见 MediaBrowserBridge。 -->
+        <service
+            android:name=".MediaBrowserBridge"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <!-- 媒体键落点：会话失活时系统把耳机/蓝牙按键发成这个广播。
+             必须 exported —— 发广播的是系统（蓝牙、SystemUI），不是我们自己。
+             见 MediaButtonReceiver 顶部的注释：华为控制中心也拿它当「这 App 是播放器」的凭证。 -->
+        <receiver
+            android:name=".MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

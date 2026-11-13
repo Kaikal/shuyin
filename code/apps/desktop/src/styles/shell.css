@@ -208,7 +208,30 @@ html[data-fs='true'] .rz-host { display: none; }
   transition: background var(--sy-dur-fast) var(--sy-ease-soft);
 }
 .pb-left:hover { background: color-mix(in srgb, var(--sy-text-1) 5%, transparent); }
-.pb-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* 播放条横滑切歌时只有这两行字跟手（见 Shell.tsx 的 barSetX）：
+   `.pb-meta` 只管裁切，真正被平移/做入场动画的是内层 `.pb-meta-in`——
+   换歌时 React 会重建 `.pb-name` 的子树，写在那上面的 transform 会跟着丢掉。 */
+/* `flex: 1` 是给预览层用的：不撑满的话 `.pb-meta` 只有歌名那么宽，
+   滑出来的「下一首」会被裁成一小条。桌面/手机都受益，歌名也有了完整的省略宽度。 */
+.pb-meta { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.pb-meta-in { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* 横滑时从边缘顶进来的下一首 / 上一首（位置由 Shell.tsx 的 barPeek 直接写 transform）。
+   平时停在 100%（被 .pb-meta 裁在屏幕外），手指一动才跟着进来。 */
+.pb-meta-peek {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  pointer-events: none;
+  will-change: transform;
+  transform: translateX(100%);
+}
+/* 它是「还在路上」的内容，压暗一点，别跟当前曲目抢注意力 */
+.pb-meta-peek .pb-name { opacity: 0.7; }
+.pb-meta-peek .pb-sub { opacity: 0.55; }
 .pb-name {
   font-size: 12.5px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -316,7 +339,7 @@ html[data-fs='true'] .rz-host { display: none; }
   transform-origin: center bottom;
   padding: 4px 9px;
   border-radius: 7px;
-  background: color-mix(in srgb, var(--sy-bg-2, #14161d) 88%, transparent);
+  background: var(--sy-chip-bg-hover);
   backdrop-filter: blur(12px) saturate(1.25);
   border: 1px solid color-mix(in srgb, var(--sy-text-1) 14%, transparent);
   font: 500 11.5px/1 var(--sy-font-num);
@@ -538,6 +561,19 @@ html[data-fs='true'] .rz-host { display: none; }
 }
 
 /* ---------- 右键菜单 ---------- */
+/*
+ * 遮罩：菜单打开期间盖住整屏，点击落在它身上（只关菜单），不会穿透到下面那一行。
+ * 必须比 `.ctx-menu` 低一层，但高过所有页面内容（200 是菜单）。
+ * 透明——视觉上不该多一块暗角，右键菜单没有「模态」的语义。
+ */
+.ctx-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 199;
+  background: transparent;
+  /* 触摸时不要触发浏览器自己的手势判断（缩放/双击） */
+  touch-action: none;
+}
 .ctx-menu {
   position: fixed;
   z-index: 200;
@@ -547,9 +583,19 @@ html[data-fs='true'] .rz-host { display: none; }
   background: color-mix(in srgb, var(--sy-bg-elevated) 97%, transparent);
   border: 1px solid var(--sy-surface-border);
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  animation: ctx-in 120ms var(--sy-ease-soft);
+  animation: ctx-in var(--sy-dur-pop, 150ms) var(--sy-ease-soft);
 }
 @keyframes ctx-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+/*
+ * 退场（110ms）：菜单是「小浮层」这一档，比弹窗还短。
+ * 关掉时整个元素会立刻被卸载，所以动画靠 `forwards` 停在终点，
+ * 由组件延时 120ms 再真正移除。
+ */
+.ctx-menu[data-closing='true'] {
+  animation: ctx-out 110ms var(--sy-ease-soft) forwards;
+  pointer-events: none;
+}
+@keyframes ctx-out { to { opacity: 0; transform: translateY(-3px) scale(0.985); } }
 .ctx-item {
   appearance: none;
   width: 100%;
@@ -617,7 +663,16 @@ html[data-fs='true'] .rz-host { display: none; }
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: min(520px, 78vw);
+  /*
+   * 宽度必须**显式给**，不能靠 shrink-to-fit。
+   *
+   * `fixed` + `left:50%` 时规范里的「可用宽度」只剩视口右半边
+   * （手机 388 宽 → 最多 194），而 flex 里那颗 `flex:1` 的文字会被压成
+   * 「「失恋」这首歌…」加两个按钮挤成一团。写成 width 再收口，内容
+   * 才有地方铺开（试过 `max-content`：WebView 114 上被算成了一块撑满屏
+   * 的白板，不能用）。
+   */
+  width: min(520px, 78vw);
   padding: 7px 10px 7px 11px;
   border-radius: 10px;
   background: color-mix(in srgb, var(--sy-bg-elevated) 96%, transparent);

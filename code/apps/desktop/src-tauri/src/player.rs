@@ -60,32 +60,34 @@ fn bits_of(v: f32) -> u32 {
 }
 
 /// 音效参数。
-/// 三段都是「相对原声的增益（dB）」而不是频率响应，前端预设就是三组数字，
-/// 用户拖滑块改的也是这三段——这样自定义和预设天然是同一种东西。
+/// 五段增益（dB）+ 前置增益 + 声道平衡 + 空间音效，和前端 `FX_BANDS_HZ` 一一对应。
+/// 预设就是这几组数字，用户拖推子改的也是这些——自定义与预设天然是同一种东西。
 pub struct FxParams {
-    /// 低频架（120Hz 以下）
-    pub low: AtomicU32,
-    /// 中频峰值（中心频率由 mid_hz 决定）
-    pub mid: AtomicU32,
-    /// 高频架（8kHz 以上）
-    pub high: AtomicU32,
-    /// 中频中心频率（Hz）
-    pub mid_hz: AtomicU32,
+    /// 五段增益（dB），频点见 `FX_BANDS_HZ`
+    pub bands: [AtomicU32; 5],
     /// 前置增益（dB）：抬整体音量，配合软限幅用来「显得更响」
     pub pre: AtomicU32,
+    /// 声道平衡：-1 全左 · 0 居中 · +1 全右
+    pub balance: AtomicU32,
+    /// 空间音效：0 关 · 1 3D 旋转 · 2 宽广 · 3 耳机增强 · 4 现场（与安卓一致）
+    pub space: AtomicU32,
 }
 
 impl Default for FxParams {
     fn default() -> Self {
         Self {
-            low: AtomicU32::new(bits_of(0.0)),
-            mid: AtomicU32::new(bits_of(0.0)),
-            high: AtomicU32::new(bits_of(0.0)),
-            mid_hz: AtomicU32::new(bits_of(1000.0)),
+            bands: std::array::from_fn(|_| AtomicU32::new(bits_of(0.0))),
             pre: AtomicU32::new(bits_of(0.0)),
+            balance: AtomicU32::new(bits_of(0.0)),
+            space: AtomicU32::new(0),
         }
     }
 }
+
+/// 五段的中心频率（Hz）。**必须与前端 `FX_BANDS_HZ` 一致**，否则同样的预设两端形状不同。
+pub const FX_BANDS_HZ: [f32; 5] = [60.0, 230.0, 910.0, 3600.0, 14000.0];
+/// 中间三段的 Q（首尾是架式滤波器，不用 Q）
+const FX_MID_Q: f32 = 1.0;
 
 /// 一个双二阶（Transposed Direct Form II）的单声道状态
 #[derive(Clone, Copy, Default)]
@@ -179,86 +181,169 @@ impl Biquad {
     }
 }
 
-/// 音效处理源：解码 → EQ → 频谱取样 → 声卡。
+/// 音效处理源：解码 → EQ → 空间音效 → 频谱取样 → 声卡。
 /// 系数每 512 个采样刷一次（参数是原子的，不能每个采样都读）。
 struct FxSource<S> {
     inner: S,
     params: Arc<FxParams>,
     sample_rate: u32,
     channels: u16,
-    /// 每声道的三段滤波状态
-    st: Vec<[BiquadState; 3]>,
-    low: Biquad,
-    mid: Biquad,
-    high: Biquad,
+    /// 每声道的五段滤波状态
+    st: Vec<[BiquadState; 5]>,
+    filters: [Biquad; 5],
     pre_gain: f32,
+    /// 声道平衡：左右各一个增益（往哪边偏就把另一侧压下去）
+    gain_l: f32,
+    gain_r: f32,
+    /// 增益平滑后的当前值（逐采样逼近目标，避免拖推子时的台阶声）
+    pre_cur: f32,
+    gl_cur: f32,
+    gr_cur: f32,
+    ramp_k: f32,
     /// 还没刷新系数的采样数
     countdown: u32,
     ch_idx: usize,
     flat: bool,
-    /// 上一次生效的参数（low, mid, high, mid_hz, pre）。
-    /// 只有它变了才允许清滤波状态——见 `refresh()` 里的说明。
-    last: [f32; 5],
+    /// 空间音效（0..4），以及它要用到的状态
+    space: u8,
+    prev_l: f32,
+    prev_r: f32,
+    ring_l: [f32; 192],
+    ring_r: [f32; 192],
+    ri: usize,
+    lfo: f32,
+    w_rot: f32,
+    itd_max: i32,
+    ear_d: i32,
+    lp_l: f32,
+    lp_r: f32,
+    lp_a: f32,
+    c_l: Vec<f32>,
+    c_r: Vec<f32>,
+    ci_l: usize,
+    ci_r: usize,
+    damp_l: f32,
+    damp_r: f32,
+    /// 每帧算一次的摆位（左右增益 + 双耳时差采样数）
+    pan_gl: f32,
+    pan_gr: f32,
+    pan_d: i32,
 }
 
 impl<S: Source> FxSource<S> {
     fn new(inner: S, params: Arc<FxParams>) -> Self {
         let sample_rate = inner.sample_rate().max(8000);
         let channels = inner.channels().max(1);
+        let fs = sample_rate as f32;
         Self {
             inner,
             params,
             sample_rate,
             channels,
-            st: vec![[BiquadState::default(); 3]; channels as usize],
-            low: Biquad::default(),
-            mid: Biquad::default(),
-            high: Biquad::default(),
+            st: vec![[BiquadState::default(); 5]; channels as usize],
+            filters: [Biquad::default(); 5],
             pre_gain: 1.0,
+            gain_l: 1.0,
+            gain_r: 1.0,
+            pre_cur: 1.0,
+            gl_cur: 1.0,
+            gr_cur: 1.0,
+            /* 12ms 到位：再快听得见「啪」，再慢推子拖尾 */
+            ramp_k: 1.0 - (-1.0 / (0.012 * fs)).exp(),
             countdown: 0,
             ch_idx: 0,
             flat: true,
-            last: [0.0; 5],
+            space: 0,
+            prev_l: 0.0,
+            prev_r: 0.0,
+            ring_l: [0.0; 192],
+            ring_r: [0.0; 192],
+            ri: 0,
+            lfo: 0.0,
+            /* 一圈约 12 秒，和安卓 `FxAudioProcessor` 同一个节奏 */
+            w_rot: (std::f64::consts::PI * 2.0 * 0.085 / sample_rate as f64) as f32,
+            itd_max: (fs * 0.0005).max(1.0) as i32,
+            ear_d: (fs * 0.00032).max(1.0) as i32,
+            lp_a: (1.0 - (-2.0 * std::f64::consts::PI * 700.0 / sample_rate as f64).exp()) as f32,
+            lp_l: 0.0,
+            lp_r: 0.0,
+            c_l: vec![0.0; (fs * 0.023) as usize + 8],
+            c_r: vec![0.0; (fs * 0.029) as usize + 8],
+            ci_l: 0,
+            ci_r: 0,
+            damp_l: 0.0,
+            damp_r: 0.0,
+            pan_gl: 1.0,
+            pan_gr: 1.0,
+            pan_d: 0,
         }
     }
 
     fn refresh(&mut self) {
         let p = &self.params;
-        let low_db = f32_of(p.low.load(Ordering::Relaxed));
-        let mid_db = f32_of(p.mid.load(Ordering::Relaxed));
-        let high_db = f32_of(p.high.load(Ordering::Relaxed));
-        let mid_hz = f32_of(p.mid_hz.load(Ordering::Relaxed)).clamp(200.0, 8000.0);
+        let bands: [f32; 5] = std::array::from_fn(|i| f32_of(p.bands[i].load(Ordering::Relaxed)));
         let pre_db = f32_of(p.pre.load(Ordering::Relaxed));
+        let bal = f32_of(p.balance.load(Ordering::Relaxed)).clamp(-1.0, 1.0);
+        let sp = p.space.load(Ordering::Relaxed).min(4) as u8;
 
-        self.flat = low_db.abs() < 0.01
-            && mid_db.abs() < 0.01
-            && high_db.abs() < 0.01
-            && pre_db.abs() < 0.01;
+        self.flat = bands.iter().all(|b| b.abs() < 0.01)
+            && pre_db.abs() < 0.01
+            && bal.abs() < 0.001
+            && sp == 0;
 
-        self.low = Biquad::low_shelf(120.0, low_db, self.sample_rate as f32);
-        self.mid = Biquad::peaking(mid_hz, mid_db, 0.9, self.sample_rate as f32);
-        self.high = Biquad::high_shelf(8000.0, high_db, self.sample_rate as f32);
+        let fs = self.sample_rate as f32;
+        for i in 0..5 {
+            self.filters[i] = match i {
+                0 => Biquad::low_shelf(FX_BANDS_HZ[0], bands[i], fs),
+                4 => Biquad::high_shelf(FX_BANDS_HZ[4], bands[i], fs),
+                _ => Biquad::peaking(FX_BANDS_HZ[i], bands[i], FX_MID_Q, fs),
+            };
+        }
         self.pre_gain = 10f32.powf(pre_db / 20.0);
+        /* 平衡：-1 全左（右声道归零）… +1 全右，居中时两侧都是 1 */
+        self.gain_l = if bal <= 0.0 { 1.0 } else { 1.0 - bal };
+        self.gain_r = if bal >= 0.0 { 1.0 } else { 1.0 + bal };
 
-        /* 关键：**只在参数真的变了**时才清滤波器状态。
-         *
-         * 这个函数每 512 个采样被调一次（刷新原子参数）。以前清状态写在函数末尾，
-         * 等于每 11.6ms（44.1kHz）就把 z1/z2 归零一次——滤波器输出在每个 512 采样边界
-         * 从稳态硬跳到瞬态，听感就是每秒 86 次的「滋滋」电流声，音量越大的预设越明显。
-         * 参数不变时公式算出来的是同一组系数，状态完全有效，清它只有害处。
-         */
-        let now = [low_db, mid_db, high_db, mid_hz, pre_db];
-        let changed = now
-            .iter()
-            .zip(self.last.iter())
-            .any(|(a, b)| (a - b).abs() > 0.001);
-        self.last = now;
-        if changed {
-            for s in self.st.iter_mut() {
-                *s = [BiquadState::default(); 3];
-            }
+        /* 切换空间音效时清一次状态：不切的话每个 512 采样都清等于把滤波器
+         * 瞬态重来一遍（每秒 86 次的「滋滋」声，老版本就踩过这个坑）。 */
+        if sp != self.space {
+            self.space = sp;
+            self.ring_l.fill(0.0);
+            self.ring_r.fill(0.0);
+            self.c_l.fill(0.0);
+            self.c_r.fill(0.0);
+            self.ri = 0;
+            self.ci_l = 0;
+            self.ci_r = 0;
+            self.damp_l = 0.0;
+            self.damp_r = 0.0;
+            self.lp_l = 0.0;
+            self.lp_r = 0.0;
+            self.lfo = 0.0;
         }
         self.countdown = 512;
+    }
+
+    /// 连续软限幅。
+    ///
+    /// 老版本写的是 `if x.abs() > 0.98 { x.tanh() }` —— tanh(0.98)≈0.753，
+    /// 于是刚过 0.98 的采样会直接掉到 0.75，波形上是一道垂直台阶，
+    /// 每次越过都多一批谐波，听感就是持续的「滋滋」电流声。
+    /// 现在拐点 0.85，且值与一阶导都连续。
+    #[inline]
+    fn soft_clip(x: f32) -> f32 {
+        const KNEE: f32 = 0.85;
+        let a = x.abs();
+        if a <= KNEE {
+            return x;
+        }
+        let head = 1.0 - KNEE;
+        let y = KNEE + head * ((a - KNEE) / head).tanh();
+        if x < 0.0 {
+            -y
+        } else {
+            y
+        }
     }
 }
 
@@ -269,26 +354,128 @@ impl<S: Source> Iterator for FxSource<S> {
         if self.countdown == 0 {
             self.refresh();
         }
-        self.countdown -= 1;
+        self.countdown = self.countdown.saturating_sub(1);
 
         // rodio 0.21 起解码器输出就是 f32（-1..1），EQ 直通处理，不用再过 i16 量化
         // 声道指针必须无条件推进：放在 flat 提前返回之后，从「原声」切到某个预设的
         // 那个采样上左右声道会错位一格（听不出来，但没必要留着）
         let ch = self.ch_idx.min(self.st.len().saturating_sub(1));
+        let last_ch = self.ch_idx + 1 >= self.channels.max(1) as usize;
         self.ch_idx = (self.ch_idx + 1) % self.channels.max(1) as usize;
         if self.flat {
             return Some(s);
         }
 
-        let mut x = s * self.pre_gain;
-        let st = &mut self.st[ch];
-        x = self.low.tick(x, &mut st[0]);
-        x = self.mid.tick(x, &mut st[1]);
-        x = self.high.tick(x, &mut st[2]);
+        /* 增益逐采样平滑：参数是每 512 采样刷一次的，直接乘上去就是一级一级的台阶，
+         * 拖推子时是「咔哒」声。12ms 逼近目标，听不出延迟也听不出台阶。 */
+        self.pre_cur += (self.pre_gain - self.pre_cur) * self.ramp_k;
+        self.gl_cur += (self.gain_l - self.gl_cur) * self.ramp_k;
+        self.gr_cur += (self.gain_r - self.gr_cur) * self.ramp_k;
 
-        // 软限幅：抬过前置增益后可能越过 ±1，tanh 比硬裁剪听感自然得多
-        let y = if x.abs() > 0.98 { x.tanh() } else { x };
-        Some(y.clamp(-1.0, 1.0))
+        let mut x = s * self.pre_cur;
+        /* 先拷出来：下面要可变借 self.st，同一轮里再去读 self.filters 会撞借用检查 */
+        let filters = self.filters;
+        let st = &mut self.st[ch];
+        for i in 0..5 {
+            x = filters[i].tick(x, &mut st[i]);
+        }
+
+        if self.space != 0 {
+            x = self.space_sample(x, ch, last_ch);
+        }
+
+        x *= if ch % 2 == 0 { self.gl_cur } else { self.gr_cur };
+        Some(Self::soft_clip(x))
+    }
+}
+
+impl<S: Source> FxSource<S> {
+    /// 空间音效：逐声道处理，但靠环缓冲拿到另一声道的历史。
+    ///
+    /// 迭代器一次只能交出一个采样（左、右、左、右…），拿不到「同一帧的两只耳朵」，
+    /// 所以真正的双耳处理只能靠环缓冲：左声道写进去、右声道读它 1 个采样前的值。
+    /// 22µs 的偏差在任何空间效果里都听不出来，换来的是不必把整条链路改成成帧处理。
+    fn space_sample(&mut self, x: f32, ch: usize, last_ch: bool) -> f32 {
+        let n = self.ring_l.len();
+        let right = ch % 2 == 1;
+        if right {
+            self.ring_r[self.ri] = x;
+        } else {
+            self.ring_l[self.ri] = x;
+        }
+
+        let out = match self.space {
+            /* 3D 旋转：等功率左右摆动 + 双耳时差 */
+            1 => {
+                if !right {
+                    self.lfo += self.w_rot;
+                    if self.lfo > std::f32::consts::TAU {
+                        self.lfo -= std::f32::consts::TAU;
+                    }
+                    let s = self.lfo.sin();
+                    let pan = 0.5 + 0.5 * s;
+                    self.pan_gl = (pan * std::f32::consts::FRAC_PI_2).cos();
+                    self.pan_gr = (pan * std::f32::consts::FRAC_PI_2).sin();
+                    self.pan_d = ((0.5 - 0.5 * s) * self.itd_max as f32) as i32;
+                    (0.45 + 0.55 * self.pan_gl) * x
+                } else {
+                    let d = (self.pan_d.max(1) as usize) % n;
+                    let rd = self.ring_r[(self.ri + n - d) % n];
+                    (0.45 + 0.55 * self.pan_gr) * rd
+                }
+            }
+            /* 宽广环绕：Mid/Side 把侧信号拉大 */
+            2 => {
+                let other = if right { self.prev_l } else { self.prev_r };
+                let m = (x + other) * 0.5;
+                let sd = (x - other) * 0.5 * 1.75;
+                if right {
+                    m - sd
+                } else {
+                    m + sd
+                }
+            }
+            /* 耳机增强：对侧串音 + 700Hz 低通 */
+            3 => {
+                let d = (self.ear_d.max(1) as usize) % n;
+                if right {
+                    let ld = self.ring_l[(self.ri + n - d) % n];
+                    self.lp_r += (ld - self.lp_r) * self.lp_a;
+                    0.92 * x + 0.30 * self.lp_r
+                } else {
+                    let rd = self.ring_r[(self.ri + n - d) % n];
+                    self.lp_l += (rd - self.lp_l) * self.lp_a;
+                    0.92 * x + 0.30 * self.lp_l
+                }
+            }
+            /* 现场：左右两条不同长度的短梳状，做早期反射 */
+            4 => {
+                if right {
+                    let y = self.c_r[self.ci_r];
+                    self.damp_r = y * 0.55 + self.damp_r * 0.45;
+                    self.c_r[self.ci_r] = x + self.damp_r * 0.52;
+                    self.ci_r = (self.ci_r + 1) % self.c_r.len();
+                    x + y * 0.32
+                } else {
+                    let y = self.c_l[self.ci_l];
+                    self.damp_l = y * 0.55 + self.damp_l * 0.45;
+                    self.c_l[self.ci_l] = x + self.damp_l * 0.52;
+                    self.ci_l = (self.ci_l + 1) % self.c_l.len();
+                    x + y * 0.32
+                }
+            }
+            _ => x,
+        };
+
+        if right {
+            self.prev_r = x;
+        } else {
+            self.prev_l = x;
+        }
+        if last_ch {
+            self.ri = (self.ri + 1) % n;
+        }
+        out
     }
 }
 
@@ -307,8 +494,21 @@ impl<S: Source> Source for FxSource<S> {
     }
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
         for s in self.st.iter_mut() {
-            *s = [BiquadState::default(); 3];
+            *s = [BiquadState::default(); 5];
         }
+        self.ring_l.fill(0.0);
+        self.ring_r.fill(0.0);
+        self.c_l.fill(0.0);
+        self.c_r.fill(0.0);
+        self.ri = 0;
+        self.ci_l = 0;
+        self.ci_r = 0;
+        self.damp_l = 0.0;
+        self.damp_r = 0.0;
+        self.lp_l = 0.0;
+        self.lp_r = 0.0;
+        self.prev_l = 0.0;
+        self.prev_r = 0.0;
         self.ch_idx = 0;
         self.inner.try_seek(pos)
     }
@@ -767,6 +967,16 @@ pub struct Shared {
     pub playing: AtomicBool,
     pub position_base: Mutex<f64>,
     pub started_at: Mutex<Option<Instant>>,
+    /// **真正送进声卡的播放位置**（秒）+ 采样时刻。
+    ///
+    /// 为什么还要这一份：`started_at.elapsed()` 只说明「墙钟过了多久」，
+    /// 而解码抖动、网络拉流、声卡缓冲都会让**听到的声音**落后于墙钟。
+    /// 位置按墙钟走，歌词就会越走越慢（用户反馈「Windows 上正在唱的歌词总是慢一些」，
+    /// 同一份前端代码在安卓上报的是播放器自己的渲染位置，所以没那么明显）。
+    ///
+    /// rodio 的 `Sink::get_pos()` 统计的是被输出回调**消费掉的样本数**，天然对齐声音。
+    /// 音频线程每 150ms 采一次写进这里，两次之间按墙钟外推（播放是 1x 速度）。
+    pub played: Mutex<(f64, Instant)>,
     pub duration: Mutex<f64>,
     pub volume: Mutex<f32>,
     pub track: Mutex<Option<String>>,
@@ -796,6 +1006,7 @@ impl Default for Shared {
             playing: AtomicBool::new(false),
             position_base: Mutex::new(0.0),
             started_at: Mutex::new(None),
+            played: Mutex::new((0.0, Instant::now())),
             duration: Mutex::new(0.0),
             volume: Mutex::new(0.8),
             track: Mutex::new(None),
@@ -865,6 +1076,10 @@ impl Player {
             let mixer = stream.mixer().clone();
             let mut sink: Option<Sink> = None;
             let mut last_tick = Instant::now();
+            /* 位置对齐诊断：SHUYIN_POS_LOG=1 时每 2s 记一行「声卡位置 vs 墙钟」，
+               用来判断歌词慢是「声卡真的落后」还是「前端渲染慢」。平时不开。 */
+            let pos_log = std::env::var("SHUYIN_POS_LOG").is_ok();
+            let mut pos_log_at = Instant::now();
 
             loop {
                 match rx.recv_timeout(Duration::from_millis(200)) {
@@ -915,6 +1130,8 @@ impl Player {
                                     }
                                 }
                                 *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = start;
+                                /* 换歌：把「声卡位置」也归到起点，否则新歌开头会先报上一首的位置 */
+                                *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (start, Instant::now());
                                 if autoplay {
                                     s.play();
                                     *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
@@ -952,6 +1169,7 @@ impl Player {
                         }
                         let pos = current_position(&sh);
                         *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = pos;
+                        *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (pos, Instant::now());
                         *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         sh.playing.store(false, Ordering::SeqCst);
                         sh.spectrum.clear();
@@ -968,6 +1186,7 @@ impl Player {
                             s.stop();
                         }
                         *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = 0.0;
+                        *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (0.0, Instant::now());
                         *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         *sh.duration.lock().unwrap_or_else(|e| e.into_inner()) = 0.0;
                         *sh.track.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1015,6 +1234,9 @@ impl Player {
                             }
                         }
                         *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = target;
+                        /* seek 之后 Sink 内部位置已经跳到 target，这里同步一份，
+                           免得两次采样之间的快照还报旧值 */
+                        *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (target, Instant::now());
                         if sh.playing.load(Ordering::SeqCst) {
                             *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                         }
@@ -1037,15 +1259,42 @@ impl Player {
                 }
 
                 // 曲终检测（~150ms 粒度）：声明在播但 sink 已放空
+                // 顺带采样「声卡位置」——歌词、进度条都以它为准（见 Shared::played）
                 if last_tick.elapsed() >= Duration::from_millis(150) {
                     last_tick = Instant::now();
                     let playing = sh.playing.load(Ordering::SeqCst);
+                    /* 墙钟位置：只在「声卡计数不可信」时兜底用 */
+                    let wall = {
+                        let b = *sh.position_base.lock().unwrap_or_else(|e| e.into_inner());
+                        match *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) {
+                            Some(t) => b + t.elapsed().as_secs_f64(),
+                            None => b,
+                        }
+                    };
+                    if playing {
+                        if let Some(s) = sink.as_ref() {
+                            let p = s.get_pos().as_secs_f64();
+                            /* 两道闸：
+                               · get_pos 在 stop/skip 后会归零；
+                               · seek 走「重开解码器」兜底时，新 sink 的计数从 0 起，
+                                 跟目标位置差着几秒甚至几分钟。
+                               和墙钟差超过 5s 就认为这个计数没跟上，退回墙钟（=旧行为）。 */
+                            let p = if p >= 0.0 && (p - wall).abs() <= 5.0 { p } else { wall };
+                            *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (p, Instant::now());
+                        }
+                    }
+                    if pos_log && pos_log_at.elapsed() >= Duration::from_millis(2000) {
+                        pos_log_at = Instant::now();
+                        let (p, _) = *sh.played.lock().unwrap_or_else(|e| e.into_inner());
+                        log_line(&format!("pos played={p:.3} wall={wall:.3} diff={:.3}", p - wall));
+                    }
                     let empty = sink.as_ref().map(|s| s.empty()).unwrap_or(true);
                     if playing && empty {
                         sh.playing.store(false, Ordering::SeqCst);
                         sh.spectrum.clear();
                         let dur = *sh.duration.lock().unwrap_or_else(|e| e.into_inner());
                         *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = dur;
+                        *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (dur, Instant::now());
                         *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         sh.ended.store(true, Ordering::SeqCst);
                     }
@@ -1111,13 +1360,15 @@ impl Player {
         let _ = self.tx.send(Cmd::Seek(secs));
     }
     /// 音效参数：直接写原子量，音频线程下一批采样就会用上（不用重载当前曲目）
-    pub fn set_fx(&self, low: f32, mid: f32, high: f32, mid_hz: f32, pre: f32) {
+    pub fn set_fx(&self, bands: [f32; 5], pre: f32, balance: f32, space: u32) {
         let p = &self.shared.fx;
-        p.low.store(low.clamp(-18.0, 18.0).to_bits(), Ordering::Relaxed);
-        p.mid.store(mid.clamp(-18.0, 18.0).to_bits(), Ordering::Relaxed);
-        p.high.store(high.clamp(-18.0, 18.0).to_bits(), Ordering::Relaxed);
-        p.mid_hz.store(mid_hz.clamp(200.0, 8000.0).to_bits(), Ordering::Relaxed);
-        p.pre.store(pre.clamp(-18.0, 18.0).to_bits(), Ordering::Relaxed);
+        for i in 0..5 {
+            p.bands[i].store(bands[i].clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
+        }
+        p.pre.store(pre.clamp(-12.0, 12.0).to_bits(), Ordering::Relaxed);
+        p.balance
+            .store(balance.clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed);
+        p.space.store(space.min(4), Ordering::Relaxed);
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -1173,8 +1424,16 @@ fn current_position(sh: &Shared) -> f64 {
     let base = *sh.position_base.lock().unwrap_or_else(|e| e.into_inner());
     let started = *sh.started_at.lock().unwrap_or_else(|e| e.into_inner());
     let dur = *sh.duration.lock().unwrap_or_else(|e| e.into_inner());
+    let (played, at) = *sh.played.lock().unwrap_or_else(|e| e.into_inner());
     let pos = match started {
-        Some(t) if sh.playing.load(Ordering::SeqCst) => base + t.elapsed().as_secs_f64(),
+        /*
+         * 播放中：以「声卡消费到哪儿」为准，两次采样之间按墙钟外推。
+         * 外推上限 0.4s 只是防呆——音频线程 150ms 就会重新采一次，
+         * 真卡住（网络断流）时不该让歌词继续往前跑。
+         */
+        Some(_) if sh.playing.load(Ordering::SeqCst) => {
+            played + at.elapsed().as_secs_f64().min(0.4)
+        }
         _ => base,
     };
     if dur > 0.0 { pos.min(dur) } else { pos }
@@ -1196,6 +1455,21 @@ fn attach<S>(mixer: &Mixer, decoder: S, sh: &Shared, duration: f64) -> Result<Si
 where
     S: Source + Send + 'static,
 {
+    /*
+     * 平台给的 hint 只能当兜底：没版权 / VIP 的歌，平台只回一段 30 秒试听，
+     * hint 却照旧报 4:03 —— 界面按 4 分钟画进度条，播到 30 秒就「莫名其妙结束」。
+     * 解码器自己报的长度才是这条音频的真身，明显短于 hint 时采信它，
+     * 前端据此发现「只拿到试听」并换平台（2026-11-01 用户反馈）。
+     *
+     * 只在差得离谱时才覆盖：正常歌平台标 3:58、实际 4:01 这种小出入仍用 hint，
+     * 免得进度条总长跟着解码器的估算跳。
+     */
+    let real = decoder.total_duration().map(|d| d.as_secs_f64()).filter(|d| *d > 1.0);
+    let duration = match real {
+        Some(d) if duration <= 0.0 || (d < duration * 0.7 && duration - d > 20.0) => d,
+        _ => duration,
+    };
+
     let sink = Sink::connect_new(mixer);
     sink.set_volume(*sh.volume.lock().unwrap_or_else(|e| e.into_inner()));
     // 链路：解码（后台线程预取）→ 音效 EQ → 频谱取样 → 声卡。

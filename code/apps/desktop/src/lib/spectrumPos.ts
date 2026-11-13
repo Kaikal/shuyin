@@ -71,3 +71,72 @@ export function useSpectrumPos(): [SpectrumPos, (p: SpectrumPos) => void] {
   }, [])
   return [p, setSpectrumPos]
 }
+
+/* ------------------------------------------------------------------ */
+/* 手机：播放页里的摆放位置                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 手机只有一块竖屏，桌面那五个「贴窗口四边」的位置照搬过来没意义
+ * （贴边光带在小屏上挡手，而且和唱片外圈那圈重复）。
+ * 这里给三个**播放页内**的位置，都能一眼看出差别：
+ *
+ *   art     封面 / 唱片外圈（默认，也是原来唯一的一种）
+ *   bottom  底部通栏，控制区上方；六种样式在这条上才真的看得出区别
+ *   top     顶部通栏，歌名上方
+ */
+export type MobileSpecPos = 'art' | 'bottom' | 'top'
+
+export const MOBILE_SPEC_POSITIONS: Array<{ id: MobileSpecPos; name: string; desc: string }> = [
+  { id: 'art', name: '封面外圈', desc: '唱片 / 封面周围一圈（默认）' },
+  { id: 'bottom', name: '页面底部', desc: '控制区上方一条，六种样式都看得见' },
+  { id: 'top', name: '页面顶部', desc: '歌名上方一条' },
+]
+
+const isMPos = (v: unknown): v is MobileSpecPos =>
+  typeof v === 'string' && MOBILE_SPEC_POSITIONS.some(p => p.id === v)
+
+let mCurrent: MobileSpecPos = 'art'
+let mTouched = false
+let mBooting: Promise<void> | null = null
+const mSubs = new Set<(p: MobileSpecPos) => void>()
+
+function mEmit(p: MobileSpecPos) {
+  mSubs.forEach(fn => fn(p))
+}
+
+function mBoot() {
+  if (!mBooting) {
+    mBooting = settings.get<MobileSpecPos>(KEYS.spectrumPosMobile).then(v => {
+      if (!mTouched && isMPos(v) && v !== mCurrent) {
+        mCurrent = v
+        mEmit(v)
+      }
+    }).catch(() => { /* 读不到就用默认 */ })
+  }
+  return mBooting
+}
+
+export function mobileSpecPosName(p: MobileSpecPos): string {
+  return MOBILE_SPEC_POSITIONS.find(x => x.id === p)?.name ?? '封面外圈'
+}
+
+export function setMobileSpecPos(p: MobileSpecPos) {
+  if (!isMPos(p)) return
+  mTouched = true
+  mCurrent = p
+  mEmit(p)
+  void settings.set(KEYS.spectrumPosMobile, p)
+}
+
+export function useMobileSpecPos(): [MobileSpecPos, (p: MobileSpecPos) => void] {
+  const [p, setP] = useState<MobileSpecPos>(mCurrent)
+  useEffect(() => {
+    const fn = (v: MobileSpecPos) => setP(v)
+    mSubs.add(fn)
+    setP(mCurrent)
+    void mBoot()
+    return () => { mSubs.delete(fn) }
+  }, [])
+  return [p, setMobileSpecPos]
+}

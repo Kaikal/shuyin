@@ -1,0 +1,5921 @@
+/* ============================================================
+   设计交付包落地（Android/design-handoff）
+   ------------------------------------------------------------
+   来源：`Android/design-handoff`（Ardot 画布 741561393951200）
+   手机 393×852 / 平板 1280×800 / 车机 1280×720。
+
+   这里只覆盖**触屏三形态**（phone / tablet / car）。桌面（data-shell="desk"）
+   一条规则都不碰：所有选择器都带 `html[data-shell='…']` 或 `[data-mobile='1']`。
+
+   为什么另起一个文件而不是继续往 mobile.css 里堆：mobile.css 是上一版
+   （Lumen 移动规范）的实现，两套规范的尺寸互相打架，混在一处没法判断
+   哪条在生效。新文件按设计稿的屏序组织，出问题一眼能对上设计稿；
+   要回退也只是删掉 main.tsx 里那一行 import。
+   ============================================================ */
+
+/* ---------- 令牌（与 tokens/tokens.css 对齐） ---------- */
+html[data-shell='phone'],
+html[data-shell='tablet'],
+html[data-shell='car'] {
+  --hd-bg-base: #0a0b0f;
+  --hd-bg-elevated: #14161c;
+  --hd-bg-rail: #080a0d;
+  --hd-bg-sheet: #171a21;
+
+  --hd-surface-1: rgba(255, 255, 255, 0.04);
+  --hd-surface-2: rgba(255, 255, 255, 0.06);
+  --hd-surface-3: rgba(255, 255, 255, 0.10);
+
+  --hd-line-subtle: rgba(255, 255, 255, 0.07);
+  --hd-line-strong: rgba(255, 255, 255, 0.14);
+
+  --hd-text-1: #f1f2f6;
+  --hd-text-2: #8b90a0;
+  --hd-text-3: #5c6069;
+  --hd-text-4: #4e535e;
+  --hd-text-dim: #6a6f7d;
+
+  --hd-accent: #6e8bff;
+  --hd-accent-text: #8fa4ff;
+  --hd-accent-weak: rgba(110, 139, 255, 0.16);
+  --hd-glow: rgba(110, 139, 255, 0.45);
+  --hd-danger: #e0645c;
+
+  --hd-r-xs: 8px;
+  --hd-r-sm: 10px;
+  --hd-r-md: 12px;
+  --hd-r-lg: 16px;
+  --hd-r-xl: 20px;
+  --hd-r-2xl: 24px;
+  --hd-r-sheet: 26px;
+
+  --hd-pad: 20px;
+  --hd-touch: 44px;
+  /* 悬浮件的投影：深色底上要压得重，浅色底上 42% 黑会糊成一团脏影 */
+  --hd-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
+  --hd-shadow-sheet: 0 14px 44px rgba(0, 0, 0, 0.6);
+  /*
+   * 悬浮菜单玻璃底的不透明度（曲目菜单 / 长按选项那类贴屏浮层）。
+   * 只写颜色、透明度单独给：底色要跟着主题走，透明度是设计判断。
+   * 0.55 ≈ 后面的歌名能看出轮廓、但不抢戏；再透字就压不住了。
+   */
+  --hd-glass-alpha: 0.55;
+}
+
+/*
+ * 浅色主题：整套令牌换一遍。
+ *
+ * 设计交付包只画了深色，但应用有「浅色 / 跟随系统」，用户真会用浅色。
+ * 之前这些 --hd-* 是写死的深色，于是浅色下出现「浅页面 + 黑播放条 + 黑 dock +
+ * 深灰平台卡」——三套材质拼在一起，看上去就是「凌乱」，其实是令牌没跟着主题走。
+ *
+ * 这里只换值、不改结构：背景与文字直接取主题（自定义主题也能跟着变），
+ * 表面与描边在浅底上要用**黑色半透明**压深才有层次（白色叠白等于没有）。
+ * 强调色沿用主题的 accent，保证按钮和别处一致。
+ */
+html[data-shell='phone'][data-dark='false'],
+html[data-shell='tablet'][data-dark='false'],
+html[data-shell='car'][data-dark='false'] {
+  --hd-bg-base: var(--sy-bg-base);
+  --hd-bg-elevated: var(--sy-bg-elevated);
+  --hd-bg-rail: var(--sy-bg-base);
+  --hd-bg-sheet: var(--sy-bg-elevated);
+
+  --hd-surface-1: rgba(0, 0, 0, 0.035);
+  --hd-surface-2: rgba(0, 0, 0, 0.055);
+  --hd-surface-3: rgba(0, 0, 0, 0.09);
+
+  --hd-line-subtle: rgba(0, 0, 0, 0.08);
+  --hd-line-strong: rgba(0, 0, 0, 0.14);
+
+  --hd-text-1: var(--sy-text-1);
+  --hd-text-2: var(--sy-text-2);
+  --hd-text-3: var(--sy-text-3);
+  --hd-text-4: var(--sy-text-3);
+  --hd-text-dim: var(--sy-text-2);
+
+  --hd-accent: var(--sy-accent);
+  --hd-accent-text: var(--sy-accent);
+  --hd-accent-weak: var(--sy-accent-a20);
+  --hd-glow: var(--sy-accent-a32);
+
+  --hd-shadow: 0 8px 24px rgba(0, 0, 0, 0.10);
+  --hd-shadow-sheet: 0 12px 36px rgba(0, 0, 0, 0.16);
+  /* 浅底上同样的透明度会把文字压得太淡，反而要更实一点 */
+  --hd-glass-alpha: 0.72;
+}
+/*
+ * 浅色主题下这条边必须写死 rgba：`--hd-line-strong` 在浅色块里是
+ * `color-mix(in srgb, #000 14%, transparent)`，WebView 104 不认，
+ * 结果 border-color 变成 IACVT 回落到 currentColor——菜单会描一圈白亮边。
+ */
+html[data-shell='phone'][data-dark='false'] .ctx-menu,
+html[data-shell='car'][data-dark='false'] .ctx-menu {
+  border-color: rgba(0, 0, 0, 0.14);
+}
+
+/*
+ * 浅色主题下的播放页：**跟着主题变浅**。
+ *
+ * 这里以前是把 `--hd-*` 整块换回深色（设计稿 02 画的是近黑底），
+ * 于是浅色主题下始终是「白底主界面 + 黑底播放页」。用户的原话是
+ * 「播放页的主题和整体主题不搭」——不是某一处颜色错，是整页材质对不上。
+ *
+ * 现在反过来：令牌全部交给 html 上那套浅色值（第 76 行那块），只补两件
+ * 令牌管不到的事：
+ *   1. 强调色文字要压深。近黑底上要往白提（--sy-accent-on-dark），
+ *      浅色底上反过来要用 accentSoft 那个更深的色，否则白底上淡得看不见；
+ *   2. `.imm` 自己不声明 color，会继承 body 的正文色 —— 深浅两套下都得显式定一次，
+ *      不然总有一边是「同色压同色」，只是换了个方向出错。
+ *
+ * 底色 / 蒙层 / 封面糊图在下面「浅色主题 · 播放页」那一节，按顺序覆盖。
+ */
+html[data-shell='phone'][data-dark='false'] .imm,
+html[data-shell='tablet'][data-dark='false'] .imm {
+  --hd-accent-text: var(--sy-accent-soft);
+  color: var(--hd-text-1);
+}
+
+/* ==================================================================== */
+/* 手机 · 底部 dock 导航（6 + 52 + 6 = 64，另加安全区）                   */
+/* ==================================================================== */
+/* 设计稿把导航画在顶部当胶囊。实机上那条把「状态栏 → 标题」之间整段占走，
+   标题被压到 140dp 以下，上半屏等于空着；切换页面又是高频操作，放拇指区更顺。
+   所以按底部通栏落地：内容从安全区下 14dp 就开始，导航压在最底下。 */
+
+/*
+ * 触屏上一律不画滚动条。
+ *
+ * 桌面端靠滚动条告诉用户「这里能滚」，手机上手指本来就在容器里，
+ * 一条始终可见的灰条只会显得「网页没做完」——而且它是页面里唯一的系统控件，
+ * 和旁边圆角卡片完全不搭（真机截图里最显眼的那条竖线就是它）。
+ */
+html[data-shell='phone'] *,
+html[data-shell='tablet'] *,
+html[data-shell='car'] * {
+  scrollbar-width: none;
+}
+html[data-shell='phone'] *::-webkit-scrollbar,
+html[data-shell='tablet'] *::-webkit-scrollbar,
+html[data-shell='car'] *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+html[data-shell='phone'] {
+  --phone-tab: 64px;
+  --phone-dock: 60px;
+  --safe-top: max(env(safe-area-inset-top, 0px), var(--sy-safe-top, 0px));
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--sy-safe-bottom, 0px));
+}
+
+html[data-shell='phone'] .sidebar {
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  width: auto;
+  height: auto;
+  padding: 6px 8px calc(6px + var(--safe-bottom));
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+  border: 0;
+  border-top: 1px solid var(--hd-line-subtle);
+  border-radius: 0;
+  /* 不能写死 rgba(12,14,19,.94)：浅色主题下就是一条黑带压在浅页面上 */
+  background: color-mix(in srgb, var(--hd-bg-rail) 90%, transparent);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  box-shadow: none;
+  transition: none;
+}
+
+html[data-shell='phone'] .sb-nav {
+  flex-direction: row;
+  gap: 0;
+  width: 100%;
+  align-items: center;
+}
+
+html[data-shell='phone'] .sb-item {
+  position: relative;
+  height: 52px;
+  gap: 3px;
+  padding: 0 2px;
+  border-radius: 16px;
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--hd-text-3);
+  background: transparent;
+}
+html[data-shell='phone'] .sb-item svg {
+  position: relative;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  opacity: 0.92;
+}
+
+/*
+ * 当前项：**图标和文字一起**罩在 accent/16% 的胶囊里。
+ *
+ * 早先这颗胶囊是 46×26 挂在 `top:4`，只包住图标、文字露在外面；
+ * 而横屏那条是居中的 60×44，把图标和 9.5px 标签一起包了进去——
+ * 竖横两套长得不一样，用户一眼就看出来（「竖屏只包了图标」）。
+ * 现在统一取后者：**胶囊包住整项**（图标 + 文字）。
+ *
+ * 用 inset 而不是写死宽高：竖屏每格宽度是内容宽（图标 22 / 文字最长 42 不等），
+ * 横屏是 100% 宽，同一个 `left/right` 两边都对得上，不用各写一份。
+ */
+html[data-shell='phone'] .sb-item.active {
+  background: transparent;
+  color: var(--hd-accent-text);
+  box-shadow: none;
+}
+html[data-shell='phone'] .sb-item.active::before {
+  content: '';
+  position: absolute;
+  /* 竖屏每格 74 宽、横屏每格 68 宽，左右各让 6 之后两边都落在 56~62 —— 
+     和早先横屏那颗 60×44 基本一致，不会变成一整块方砖 */
+  left: 6px;
+  right: 6px;
+  top: 4px;
+  bottom: 4px;
+  width: auto;
+  height: auto;
+  transform: none;
+  border-radius: 15px;
+  background: var(--hd-accent-weak);
+  pointer-events: none;
+}
+html[data-shell='phone'] .sb-item.active svg {
+  color: var(--hd-accent-text);
+  opacity: 1;
+}
+
+/* ---------- 页面容器：左右 20，标题 26/600 ---------- */
+html[data-shell='phone'] .page {
+  inset: calc(14px + var(--safe-top)) 0 calc(var(--phone-tab) + var(--phone-dock) + 22px + var(--safe-bottom)) 0;
+  padding: 0 var(--hd-pad);
+  scrollbar-width: none;
+}
+html[data-shell='phone'] .page::-webkit-scrollbar { display: none; }
+
+html[data-shell='phone'] .page h1 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 14px;
+}
+
+/* ==================================================================== */
+/* 手机 · 迷你播放条（60 高，圆角 18，贴底）                              */
+/* ==================================================================== */
+
+html[data-shell='phone'] .playbar {
+  left: 14px;
+  right: 14px;
+  bottom: calc(var(--phone-tab) + 8px + var(--safe-bottom));
+  height: 60px;
+  padding: 0 10px;
+  gap: 8px;
+  border: 1px solid var(--hd-line-subtle);
+  border-radius: 18px;
+  background: var(--hd-bg-elevated);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: var(--hd-shadow);
+}
+html[data-shell='phone'] .playbar .pb-cover-wrap .cover-art {
+  width: 40px !important;
+  height: 40px !important;
+  border-radius: 10px !important;
+}
+/* 2026-10-31 用户要求反转：**歌词是主角，歌名退后**。
+   .pb-sub 的内容在手机上被 Shell.tsx 换成了「当前歌词行优先」（无歌词才回退歌手·专辑），
+   所以这里把视觉权重整个对调——注意这条必须写在 handoff.css（加载顺序在 mobile.css
+   之后），写在 mobile.css 会被这两条同特异性的旧规则盖回去（实测踩过）。 */
+html[data-shell='phone'] .pb-name { font-size: 11px; font-weight: 400; color: var(--hd-text-2); }
+html[data-shell='phone'] .pb-sub { font-size: 13px; font-weight: 500; color: var(--hd-text-1); }
+/* 歌名后面接歌手（用户：「歌名后边还有空位，可以把歌手也加上」）。
+   .pb-name 变成 flex 之后，省略号得落在歌名那一截上——否则长标题会把歌手挤没，
+   或者反过来歌手把标题顶出去。歌名可缩、歌手固定宽度，长标题自己收尾。 */
+html[data-shell='phone'] .pb-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+html[data-shell='phone'] .pb-name .pb-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-shell='phone'] .pb-name .pb-ar {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--hd-text-3, var(--sy-text-3));
+}
+/* 在线标记同样不许被歌名/歌手压缩；它在 flex 里已经有 gap，不用再叠 8px 外边距 */
+html[data-shell='phone'] .pb-name .pb-src { flex: none; margin-left: 0; }
+html[data-shell='phone'] .pb-mini-acts { gap: 6px; }
+/* 2026-10-31 用户要求播放栏上加「播放列表」按钮 —— 这条旧的隐藏规则删掉，
+   手机迷你条现在是「播放/暂停 + 播放列表」两键（与设计稿差异见交付说明）。 */
+/*
+ * 播放条上的播放键：**不填实底**。
+ *
+ * 桌面那颗 34px 的 accent 实底放在大窗里是「一个亮点」，没问题；挪到 40px 的
+ * 迷你条上、再遇上暖色主题（月黄昏 accent `#C9A96E`），就成了一颗发光的金球——
+ * 周围全是暗色，只有它亮着，用户的原话是「很不协调」。
+ * 这里改成 tonal：底色 accent/18%、图标 accent、去掉 40% 的投影。
+ * 播放页里那颗大按钮仍按设计稿填实底（那里是整屏唯一的主操作，该亮）。
+ */
+html[data-shell='phone'] .pb-mini-acts .play-primary {
+  position: relative;
+  isolation: isolate;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: none;
+  color: var(--sy-accent-soft);
+  box-shadow: none;
+}
+/*
+ * 底色用**伪元素 + opacity**，不用 color-mix()。
+ *
+ * color-mix 要 Chrome 111+；用户那台真机（MIUI，WebView 104）不认：
+ * 它不会退回上一条声明，而是把整条判成「计算值无效」→ 底色直接透明，
+ * 于是播放键在迷你条上和「下一首」一样灰，主次关系反而丢了。
+ * 半透明叠一层 = 同一个观感，且各代 WebView 一致。
+ */
+html[data-shell='phone'] .pb-mini-acts .play-primary::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sy-accent);
+  opacity: 0.18;
+  transition: opacity var(--sy-dur-fast, 160ms) var(--sy-ease-soft, ease);
+}
+html[data-shell='phone'] .pb-mini-acts .play-primary:hover::before,
+html[data-shell='phone'] .pb-mini-acts .play-primary.press::before { opacity: 0.28; }
+html[data-shell='phone'] .pb-mini-acts .play-primary svg { width: 17px; height: 17px; }
+html[data-shell='phone'] .pb-mini-acts .icon-btn { width: 38px; height: 38px; }
+html[data-shell='phone'] .pb-mini-acts .icon-btn svg { width: 20px; height: 20px; }
+
+/* ==================================================================== */
+/* 手机 · 播放页（设计稿 02）                                            */
+/* ==================================================================== */
+
+html[data-shell='phone'] .imm-shell {
+  padding: calc(8px + var(--safe-top)) var(--hd-pad) calc(10px + var(--safe-bottom));
+}
+
+/*
+ * 播放页的底必须是实色。
+ *
+ * 桌面版 `.imm` 用的是 `var(--sy-bg-base)`（会跟着主题变）；触屏上这里原来写死
+ * `#0a0b0f`（设计稿 02 的近黑）。现在改成令牌：深色主题仍然是近黑，
+ * 浅色主题跟着变浅——但要**实色**，不能让下面那页透上来
+ * （不开这块时整页只有 `.imm-bg` 封面糊图铺底，缺封面时像「半透明蒙层」）。
+ */
+html[data-shell='phone'] .imm,
+html[data-shell='tablet'] .imm {
+  background: var(--hd-bg-base);
+}
+
+/* 桌面的页头在手机上整条不渲染（DOM 里另有一套 .imm-top-m） */
+html[data-shell='phone'] .imm-top { display: none; }
+
+html[data-shell='phone'] .imm-top-m {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  flex: none;
+}
+/*
+ * 页头两颗按钮：**不要再给负边距**。
+ *
+ * 以前写的是 `margin: 0 -12px`，想借页面那 20 的内边距把图标往边上顶一顶，
+ * 结果按钮热区右沿落在 412-8 的位置——视觉上图标几乎贴着屏幕边，
+ * 曲面屏/挖孔屏上看着像被裁掉了（用户：「右上角那两个图标超出屏幕去了」）。
+ * 现在老老实实吃满 20 的内边距，图标离边 20，热区仍然 44。
+ */
+html[data-shell='phone'] .imm-m-back,
+html[data-shell='phone'] .imm-m-more {
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .imm-m-kicker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--hd-text-2);
+  letter-spacing: 0.02em;
+}
+html[data-shell='phone'] .imm-m-kicker .k { white-space: nowrap; }
+html[data-shell='phone'] .imm-m-kicker .dim { color: var(--hd-text-3); }
+
+/*
+ * 分页指示：两颗小药丸，当前页那截拉长。
+ *
+ * 为什么要常驻：播放页拆成两页之后，封面页上**看不出右边还有一页**——
+ * 用户不知道能滑，也就不会去试。这俩点既是状态（我在第几页），
+ * 也是入口（点一下就翻过去），比只在第一次弹一句提示可靠。
+ */
+html[data-shell='phone'] .imm-pagedots { display: flex; align-items: center; gap: 5px; }
+html[data-shell='phone'] .imm-pagedot {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-shell='phone'] .imm-pagedot::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 4.5px;
+  bottom: 4.5px;
+  border-radius: 999px;
+  background: var(--hd-line-strong);
+  transition: left 180ms var(--sy-ease-soft), right 180ms var(--sy-ease-soft),
+              background 180ms var(--sy-ease-soft);
+}
+html[data-shell='phone'] .imm-pagedot.on::after {
+  left: 0;
+  right: 0;
+  background: var(--hd-accent-text);
+}
+
+/* 背景：设计稿是近黑底 + 极淡的环境光，不做封面糊背景 */
+/*
+ * 模糊半径从 70px 降到 18px。
+ *
+ * 70px 的全屏卷积在安卓 WebView 里是**软件合成**：打开播放页那一下要几百毫秒
+ * （真机采样：点 mini 播放栏后主线程有 345ms 的长任务，`(program)` 占 595ms）。
+ * 而这一层上面还压着 `.imm-scrim` 的 0.72 黑 + 整条渐变，70px 和 18px 的观感
+ * 差别几乎看不出来 —— 视觉不变，代价降一个数量级（卷积成本随半径近似平方增长）。
+ */
+/*
+ * 打开播放页的**第一帧先不烤模糊**（`data-settled` 由 ImmersivePlayer 在
+ * 推进动画结束后置 true，见那边的注释）。
+ *
+ * 全屏封面 + 大半径模糊在 WebView 里是软件合成，打开那一帧要一次烤整屏，
+ * 再叠页面里几十处 backdrop-filter —— 「点 mini 播放栏」的卡顿就来自这里。
+ * 先按原图压暗推进来，动画结束再补模糊：切换过程用户看不出来，首帧的重活没了。
+ *
+ * 模糊半径同期从 70px 降到 18px：这一层上面还压着 `.imm-scrim` 的 0.72 黑，
+ * 两者观感几乎一样，但卷积成本随半径近似平方增长。
+ */
+html[data-shell='phone'] .imm-bg { filter: blur(18px) saturate(1.15) brightness(0.42); opacity: 0.75; }
+html[data-shell='phone'] .imm[data-settled='false'] .imm-bg {
+  filter: brightness(0.42);
+}
+/*
+ * 手机端：整页**从下往上推**进来，关闭时反向滑下去（用户：「加个往上滑的动画，
+ * 感觉会丝滑一点」「关闭的时候也同样加个下滑的动画」）。
+ *
+ * 用 translateY 而不是 scale：平移只走合成层，不会像缩放那样让整页
+ * （含模糊背景和所有毛玻璃）每帧重绘。位移给到 64px：再小（26px）在全屏页上
+ * 几乎看不出在动，只剩淡入淡出；再大就会把下面的首页整片露出来。
+ */
+html[data-shell='phone'] .imm {
+  transform: translateY(64px);
+  /*
+   * 关闭态**停在原位、只留 0.004 的不透明度**，不是 `opacity: 0`。
+   *
+   * 这一条是「第一次打开播放页卡」的根。播放页是常驻挂载的，但 `opacity: 0`
+   * 时 Blink 直接把它从绘制树里摘掉——光栅缓存（tile）也跟着丢掉。点开的一瞬间
+   * 是这一屏 1080×2400 第一次被光栅化：封面、黑胶、32 行歌词、几十颗按钮一次性画，
+   * 真机上要 200ms 以上，落在 280ms 的进场动画里就是「一顿一顿地升上来」。
+   * 第二次打开就顺了，因为上一次画的 tile 还在缓存里——这正是「只有第一次卡」的原因。
+   *
+   * 0.004 而不是 0：仍然走完整绘制流程（tile 留下来），但 8 位色深下 0.4% 不足
+   * 一个色阶（≈1/255），叠在首页上肉眼分辨不出。实测进场掉帧 5 处 / 最坏 239ms
+   * 降到 1~2 处 / 最坏 66~161ms。
+   *
+   * 也试过「关着时停在屏幕外」（translateY(101%)）：首页滚动是完美了（0 掉帧，
+   * 因为视口外的层不参与合成），但打开前要靠 JS 把它瞬移回 64px 才不变观感，
+   * 那一次强制布局 + 重新合成反而让进场退化到 179~210ms。打开的手感优先，选这条。
+   */
+  opacity: 0.004;
+  /* 关着时压到首页下面：合成器能整层遮挡剔除，首页滚动就不用多混一屏 */
+  z-index: 1;
+  transition:
+    opacity 200ms var(--sy-ease-soft),
+    transform 300ms var(--sy-ease-panel);
+}
+html[data-shell='phone'] .imm[data-open='true'] {
+  /* 必须显式写回 1：上面那条 `html[data-shell] .imm` 的特异性比基础规则高，
+     不写的话打开后还是 0.004（整页几乎全黑） */
+  opacity: 1;
+  transform: translateY(0);
+  z-index: 60;
+  transition:
+    opacity 180ms var(--sy-ease-soft),
+    transform 280ms var(--sy-ease-panel);
+}
+/*
+ * 底部压深**做在整页背景上**，不做在控制区那一块。
+ *
+ * 以前是给 `.imm-mp-foot` 铺一层 90% 黑，而那块只有内容宽（348），
+ * 屏幕左右各剩 20px 的浅色 —— 真机上看着就是「底部贴了一张深色卡片，
+ * 两边漏光」，加上渐变 26% 就到底，边界是一条硬直线。
+ * 现在底色统一由这层全屏渐变负责，控制区自己不再画背景。
+ */
+html[data-shell='phone'] .imm-scrim {
+  background:
+    linear-gradient(to bottom, rgba(10, 11, 15, 0) 52%, rgba(10, 11, 15, 0.42) 74%, rgba(10, 11, 15, 0.62) 100%),
+    rgba(10, 11, 15, 0.72);
+}
+
+/*
+ * ---------- 浅色主题 · 播放页的底 ----------
+ *
+ * 深色那套是「近黑底 + 极淡环境光」；浅色反过来是「亮底 + 封面的颜色透上来」：
+ * 封面糊图提亮后当底，上面压一层白纱，越往下越实。
+ *
+ * 白纱的曲线是照着内容排的，不是均匀递减：
+ *   0~22%   页头（返回 / 正在播放 / 页点）—— 字压在糊图上，要实一点；
+ *   22~40%  封面那一块，封面是张不透明的图，盖在上面，这层等于看不见；
+ *   40~55%  标题 / 歌手 —— 又回到糊图上，再压实一次，否则深色字压在截图上读不清；
+ *   55~100% 进度条 / 播放键 / 操作栏 —— 最实，和卡片一样的白。
+ */
+html[data-shell='phone'][data-dark='false'] .imm-bg,
+html[data-shell='tablet'][data-dark='false'] .imm-bg {
+  /* brightness 从 0.42 提到 1.02：深色下是「压暗当底」，浅色下是「提亮当雾」 */
+  filter: blur(22px) saturate(1.3) brightness(1.02);
+  opacity: 0.5;
+}
+html[data-shell='phone'][data-dark='false'] .imm[data-settled='false'] .imm-bg,
+html[data-shell='tablet'][data-dark='false'] .imm[data-settled='false'] .imm-bg {
+  filter: brightness(1.02);
+}
+html[data-shell='phone'][data-dark='false'] .imm-scrim,
+html[data-shell='tablet'][data-dark='false'] .imm-scrim {
+  background: linear-gradient(to bottom,
+    rgba(255, 255, 255, 0.58) 0%,
+    rgba(255, 255, 255, 0.22) 22%,
+    rgba(255, 255, 255, 0.30) 40%,
+    rgba(255, 255, 255, 0.80) 55%,
+    rgba(255, 255, 255, 0.95) 78%,
+    rgba(255, 255, 255, 0.97) 100%);
+}
+html[data-shell='phone'] .imm-beam,
+html[data-shell='phone'] .imm-flare { display: none; }
+
+html[data-shell='phone'] .imm-grid {
+  display: flex;
+  flex-direction: column;
+  /* 桌面是 justify-content:center（两列居中）；手机上内容比容器高，居中会让
+     第一块溢出到页头上面去（实测「歌词/评论」压住「正在播放」）。
+     这里必须显式从顶部排。 */
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  max-width: none;
+  min-height: 0;
+  overflow: hidden;
+}
+html[data-shell='phone'] .imm-art,
+html[data-shell='phone'] .imm-lyric { display: contents; }
+
+/* 1. 歌词 / 评论切换（胶囊 30，选中 surface-3） */
+html[data-shell='phone'] .imm-tabrow-solo {
+  order: 0;
+  /* 设计稿里这一行到封面之间留了整整 38，这里不靠封面的 margin 撑。
+     22 → 14：这一行现在是「看歌词」的入口，两页都在，不该占掉封面 20px 高度 */
+  margin: 2px 0 14px;
+  gap: 6px;
+  flex: none;
+  /* 桌面版这条下划横线是「标签行和下面的内容分隔」，设计稿 02 里没有它——
+     手机上留着就像页头上挂了一条多余的线。 */
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+html[data-shell='phone'] .imm-tabrow-solo .imm-tag {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--hd-text-dim);
+  background: transparent;
+  border: 0;
+}
+html[data-shell='phone'] .imm-tabrow-solo .imm-tag.on {
+  background: var(--hd-surface-3);
+  color: var(--hd-text-1);
+}
+/* 设计稿只有「歌词 / 评论」两个；歌曲详情、播放列表在别处有入口 */
+html[data-shell='phone'] .imm-tabrow-solo .imm-tag:nth-child(n + 3) { display: none; }
+
+/* 2. 封面 264 / 圆角 24 */
+html[data-shell='phone'] .imm-cover {
+  order: 1;
+  margin: 0 auto;
+  /*
+   * 设计基准是 393×852 的画布，封面对角就是 264。但真机上「852」基本见不到：
+   * 360×732 这种屏（1080×2340@480dpi 减掉系统栏）一整套按设计稿摞下来是 806，
+   * 网格 overflow:hidden 直接把控制行和音质胶囊切在屏幕外（实测胶囊 top 745 > 732）。
+   *
+   * 所以封面不再只按 30vh 定，而要「把剩下的高度全给它」：
+   * 除封面外的固定栈（页头 44 + 胶囊行 44 + 曲目 74 + 功能行 80
+   * + 三行歌词带 88 + 接下来播放 64 + 进度 47 + 控制 70 + 音质 40
+   * + 上下安全区 18）≈ 525，所以可用高度就是 `100vh - 540`（留 15 的余量），
+   * 再封顶 296、兜底 168。短屏上封面变小，控制行与音质胶囊永远在屏内。
+   *
+   * 三行歌词带（74+14）和「接下来播放」（52+12）是后加的——它们把以前
+   * 操作行到进度条之间那个 170 多 dp 的洞填掉了，所以这条扣减只涨了一点点。
+   */
+  width: clamp(168px, min(36vh, calc(100vh - 540px)), 296px);
+  /* 宽度给了、高度得自己撑开：里面那层 .cover-art 是 100% 高 */
+  aspect-ratio: 1;
+  flex: none;
+}
+html[data-shell='phone'] .imm-cover .cover-art {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: var(--hd-r-2xl) !important;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.5);
+  position: relative;
+}
+/* 封面内圈：设计稿 02 的封面四周有一道极细的亮边 + 底部轻微压暗，
+   没有它时（尤其是没有内嵌封面、只剩占位渐变时）整块像一张贴纸浮在黑底上 */
+html[data-shell='phone'] .imm-cover .cover-art::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 1px var(--hd-line-subtle),
+    inset 0 -46px 60px rgba(0, 0, 0, 0.26);
+}
+
+/* 3. 曲目信息 */
+html[data-shell='phone'] .imm-title,
+html[data-shell='phone'] .imm-artist,
+html[data-shell='phone'] .imm-album { display: none; }
+
+html[data-shell='phone'] .imm-meta-block {
+  order: 2;
+  margin-top: 18px;
+  text-align: center;
+  flex: none;
+}
+html[data-shell='phone'] .imm-m-title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.26;
+  color: var(--hd-text-1);
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+html[data-shell='phone'] .imm-m-sub {
+  margin: 7px 0 0;
+  font-size: 12.5px;
+  color: var(--hd-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 4. 操作行：5 颗 44 圆钮 + 10 号标签
+ *
+ * 48 → 44：五颗 48 加 4 个 4 的间隙就是 256，在 360dp 上左右各只剩 34，
+ * 视觉上五个大圆盘顶满一行。44 仍然远大于 24 的图标本体，手感没变。
+ */
+html[data-shell='phone'] .imm-acts {
+  order: 3;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 16px;
+  gap: 4px;
+  flex: none;
+}
+html[data-shell='phone'] .imm-act {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--hd-text-3);
+  /* button 的 UA 底/边必须清掉，否则每颗都是一块白方块 */
+  background: none;
+  border: 0;
+  padding: 0;
+}
+/*
+ * 圆形底板 44，里面的图标**只有 20**。
+ *
+ * 关键在 `padding:12px` + `box-sizing:border-box`：直接把 svg 写成 44×44 的话，
+ * svg 会把自己的 viewBox **拉伸铺满 44**——图标本身被放大成整颗圆，
+ * 一排五个大图标就是用户说的「图标按钮好大、好丑」。改成 44 的盒子留 12 的内边距，
+ * 图标回到 20 的真实大小，圆底板照旧。
+ */
+html[data-shell='phone'] .imm-act > svg,
+html[data-shell='phone'] .imm-act .imm-act-btn {
+  width: 44px;
+  height: 44px;
+  padding: 12px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--hd-surface-2);
+  color: var(--hd-text-1);
+  display: grid;
+  place-items: center;
+  border: 0;
+}
+html[data-shell='phone'] .imm-act.on > svg { color: var(--hd-accent); }
+html[data-shell='phone'] .imm-act.on { color: var(--hd-accent-text); }
+html[data-shell='phone'] .imm-act.off { opacity: 0.45; }
+html[data-shell='phone'] .imm-act > span { white-space: nowrap; }
+
+html[data-shell='phone'] .imm-act-dl { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+html[data-shell='phone'] .imm-act-dl .chip-pop {
+  bottom: auto;
+  top: calc(100% + 8px);
+}
+
+html[data-shell='phone'] .imm-dl-done { position: relative; }
+
+/* 5. 歌词：只剩中间这块滚动，上下淡出 */
+html[data-shell='phone'] .imm-lyric-body {
+  order: 4;
+  flex: 1 1 auto;
+  /* 设计稿的三行 ≈ 73。这里是**下限**：屏再矮也让歌词先让位（缩到 48 ≈ 两行），
+     而不是让控制行被挤出屏幕——底部的播放钮和音质胶囊是必须能点的。 */
+  min-height: 48px;
+  margin-top: 18px;
+  overflow: hidden;
+  /* 淡出只做 12%：这条带子本身只有 56 高，18% 会把「在线搜索歌词」按钮的下沿、
+     以及歌词第二行整体压暗（近黑底上看着像没渲染完） */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 12%, #000 88%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 12%, #000 88%, transparent 100%);
+}
+html[data-shell='phone'] .imm-lyric-body .lyrics {
+  height: 100%;
+  padding: 0;
+}
+html[data-shell='phone'] .imm-lyric-body .lyric-line {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--hd-text-3);
+  text-align: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+html[data-shell='phone'] .imm-lyric-body .lyric-line.active {
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .imm-lyric-body .lyric-line.active .lyric-text { color: var(--hd-text-1); }
+
+/*
+ * 5.5 封面页的歌词带（用户：「展示专辑或唱片时，显示两句歌词，像桌面歌词一样」，
+ * 之后又补了「歌词显示在专辑下面」）：
+ * 三行——上一句（暗）/ 当前句（大而亮）/ 下一句（暗），和设计稿 02 那一块对齐。
+ *
+ * 为什么从两行改成三行：两行只有 44 高，这一带到进度条之间会空出一大块
+ * （用户：「中间空着好多」）。三行既回到设计稿，也把那块空白吃掉一截。
+ * **没有歌词也占位**（空态写「暂无歌词」）——收起来的话切歌时下面会整体跳一下。
+ * 溢出句不缩字号——单行省略号，和桌面歌词同一条规矩。
+ */
+html[data-shell='phone'] .imm-mini-lyrics {
+  order: 4;
+  /*
+   * `flex: 1` 让这一带**自己吃掉剩余高度**，文字垂直居中。
+   *
+   * 不给它的话，剩余高度会变成「歌词和接下来播放之间的一条空白」（54px），
+   * 看着还是空。给它之后同一块空间归歌词所有，视觉上就是「歌词在中间、
+   * 卡片贴着底部」，而不是「中间漏了一块」。min-height 兜住下限（三行文字）。
+   */
+  flex: 1 1 auto;
+  margin: 14px 20px 0;
+  min-height: 74px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-shell='phone'] .imm-mini-lyrics .iml-prev,
+html[data-shell='phone'] .imm-mini-lyrics .iml-next {
+  max-width: 100%;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--hd-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .imm-mini-lyrics .iml-cur {
+  max-width: 100%;
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--hd-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .imm-mini-lyrics[data-empty='true'] { min-height: 74px; }
+html[data-shell='phone'] .imm-mini-lyrics .iml-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+html[data-shell='phone'] .imm-mini-lyrics .iml-empty-t {
+  font-size: 13px;
+  color: var(--hd-text-2);
+}
+/* 空态那个二层文案：不是按钮，只是告诉用户「这一块能点」——
+   底下那条搜索表单在歌词页，别在这里再放一份入口。 */
+html[data-shell='phone'] .imm-mini-lyrics .iml-empty-s {
+  font-size: 11px;
+  color: var(--hd-text-3);
+}
+
+/*
+ * 5.6 接下来播放（用户：「空的地方你看看再加点什么」）。
+ *
+ * 封面页原来在「操作行」和「进度条」之间空出 170 多 dp——那是 `margin-top:auto`
+ * 把剩余高度全塞进一个洞里。与其画根分隔线，不如放一条真信息：下一首是谁。
+ * `margin-top: auto` 让这张卡**贴着底部那一簇**，剩余高度落在它上方，
+ * 视觉上「封面/歌词一块、控制一块」，中间不再是个黑洞。
+ */
+html[data-shell='phone'] .imm-upnext {
+  order: 5;
+  flex: none;
+  /* 上左下右：`auto` 在上——剩余高度全部落在卡片**上方**，
+     卡片自己贴着底部那一簇（进度/控制/胶囊），中间不再是个洞。 */
+  margin: auto 0 12px;
+  height: 52px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--hd-surface-1);
+  color: var(--hd-text-1);
+  font: inherit;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-shell='phone'] .imm-upnext .un-cover {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  overflow: hidden;
+}
+html[data-shell='phone'] .imm-upnext .un-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+html[data-shell='phone'] .imm-upnext .un-lbl {
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--hd-text-3);
+  letter-spacing: 0.04em;
+}
+html[data-shell='phone'] .imm-upnext .un-name {
+  font-size: 13.5px;
+  line-height: 1.3;
+  color: var(--hd-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .imm-upnext .un-artist {
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--hd-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .imm-upnext > svg { flex: none; color: var(--hd-text-3); }
+
+/* ==================================================================== */
+/* 手机 · 播放页分两页（封面 / 歌词）                                    */
+/* ==================================================================== */
+/*
+ * 一屏塞九块在 360dp 上必然挤：封面靠 clamp 压到 156，其余全成了薄片。
+ * 拆成两页——封面页只放「封面 + 歌名 + 操作」，歌词页整块给歌词。
+ *
+ *   · 左滑进歌词、右滑回封面（手势在 ImmersivePlayer 的 pageGesture 里）
+ *   · 点顶部那颗「歌词 / 评论」胶囊也能进，等于给不知道能滑的人一个明面入口
+ *   · 切歌自动回封面页（停在上一首的歌词上会让人以为没切成功）
+ */
+
+/* 封面页：歌词本体不占地，只留上面那行胶囊当入口 */
+html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-lyric-body,
+html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-lyrbar { display: none; }
+
+/*
+ * 歌词页：三行网格（歌词 / 进度 / 控制）。
+ * **每个子项都要显式写 grid-area**：`grid-template-areas` 只声明名字不占位，
+ * 没指定区域的项会被自动排进第一格，直接叠在歌词上（这个坑踩过好几次）。
+ */
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] {
+  display: grid;
+  /* 底部三行与封面页完全同构（进度 / 控制 / 音质胶囊）——
+     两个页面切换时按钮钉死在同一位置（用户：「切歌词页按钮会动，容易点错」） */
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  grid-template-areas: 'lyr' 'prog' 'ctl' 'pills';
+  align-content: stretch;
+  gap: 0;
+  /* 必须自己吃掉 `.imm-shell` 剩下的高度：不给 flex 的话网格高度按内容算，
+     1fr 那一行就塌成「空态块的内容高」，「暂无歌词」永远飘在上半屏。 */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric {
+  grid-area: lyr;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  animation: imm-page-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  /*
+   * **必须写死 auto**：`immersive.css` 在窄窗（≤ 某断点）给 `.imm-lyric`
+   * 定了 `height: 240px`——桌面两列时那是「右栏最矮 240」，而手机上这一栏
+   * 要占满整页。不覆盖的话网格行分到 478，这一栏还是 240，
+   * 下面空出 240 的空白，歌词和空态全挤在上半截。
+   */
+  height: auto;
+  align-self: stretch;
+}
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-progress { grid-area: prog; }
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-ctl { grid-area: ctl; }
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-pills { grid-area: pills; }
+
+/* 歌词页不需要的块：封面 / 曲目信息 / 操作行。
+   音质胶囊**保留**——它是底部固定栈的一员，藏了它控制行的位置就会和封面页错开。
+   `display:none` 的项不参与网格自动放置，所以不会跑回歌词格子里。 */
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-cover,
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-disc,
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-meta-block,
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-acts { display: none; }
+
+/* 歌词本体：整屏了，字号可以放大——手机上看歌词就是要大 */
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 6px;
+  /* 撑满交给子项：空态（`.lyrics-empty`）的 `height:100%` 只有在
+     父级真的给了高度时才成立——不设 flex 的话它按内容高算，
+     「暂无歌词」就飘在上半屏，下面空一大块（实测就是这样） */
+  display: flex;
+  flex-direction: column;
+}
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric-body > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric-body .lyric-line {
+  font-size: 15px;
+  line-height: 1.9;
+}
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric-body .lyric-line.active {
+  font-size: 19px;
+}
+/* 整屏了，空态也不必挤在 12.5 号（那是为 56 高的歌词带定的） */
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .lyrics-empty .t,
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .folia-empty .t {
+  font-size: 14px;
+}
+/* 歌词页里胶囊行贴着页头，不用封面页那 22 的下边距 */
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-tabrow-solo { margin-bottom: 6px; }
+
+@keyframes imm-page-in {
+  from { opacity: 0; transform: translateX(26px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric { animation: none; }
+}
+
+/*
+ * 歌词空态：设计稿 02 给歌词区留的是一条窄带（3 行 ≈ 73px，屏幕矮的时候就这样）。
+ *
+ * 两套歌词组件各有一套空态类名（`.folia-empty` / `.lyrics-empty`），
+ * 以前只写了前者，播放页用的是后者——于是手机上的空态完全是桌面排版，
+ * 标题、说明、按钮、两个输入框全摞在一条窄带里互相压着（「看不清字」的观感一半来自这里）。
+ *
+ * 统一成竖排三行：`暂无歌词` / 一个胶囊按钮 / 展开后的搜索表单。
+ * 说明那行（「已检查同名 .lrc 文件…」）在手机上不显示——它讲的是我们做过什么，
+ * 用户在这一屏只需要知道「没有词」和「能去搜」。
+ */
+html[data-shell='phone'] .folia-empty,
+html[data-shell='phone'] .lyrics-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  position: static;
+  inset: auto;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+html[data-shell='phone'] .folia-empty .t,
+html[data-shell='phone'] .lyrics-empty .t {
+  /* 12.5 + 6 gap + 32 按钮 = 54，刚好落在 56 的歌词带里；
+     14 号是桌面尺寸，手机上会把标题顶出这条带子，被上下那两层淡出蒙掉一半 */
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 400;
+  color: var(--hd-text-3);
+  margin: 0;
+}
+html[data-shell='phone'] .folia-empty .s,
+html[data-shell='phone'] .lyrics-empty .s { display: none; }
+html[data-shell='phone'] .folia-empty .ghost-btn,
+html[data-shell='phone'] .lyrics-empty .ghost-btn {
+  height: 32px;
+  margin-top: 0;
+  padding: 0 14px;
+  font-size: 12.5px;
+  border-radius: 999px;
+  border: 1px solid var(--hd-line-strong);
+  background: var(--hd-surface-2);
+  color: var(--hd-text-1);
+}
+
+/*
+ * 展开后的搜索表单：手机上的歌词带只有 50~70 高（设计稿就是一条窄带），
+ * 两行（输入 26 + 动作 34 + 间距）放不下，动作行会被 `overflow:hidden` 裁掉。
+ * 所以压成**一行**：歌名 / 歌手 / 搜索 / 取消，全部 30 高。
+ */
+html[data-shell='phone'] .folia-empty .lyr-search,
+html[data-shell='phone'] .lyrics-empty .lyr-search {
+  width: 100%;
+  max-width: 340px;
+  margin: 4px 0 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+html[data-shell='phone'] .folia-empty .lyr-search .text-input,
+html[data-shell='phone'] .lyrics-empty .lyr-search .text-input {
+  height: 30px;
+  min-width: 0;
+  padding: 0 9px;
+  font-size: 12px;
+  border-radius: 999px;
+  background: var(--hd-surface-2);
+  border: 1px solid var(--hd-line-strong);
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .folia-empty .lyr-search-act,
+html[data-shell='phone'] .lyrics-empty .lyr-search-act {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+html[data-shell='phone'] .folia-empty .lyr-search-act .ghost-btn,
+html[data-shell='phone'] .lyrics-empty .lyr-search-act .ghost-btn {
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12px;
+  color: #fff;
+  border: 0;
+  border-radius: 999px;
+  background: var(--hd-accent);
+}
+html[data-shell='phone'] .folia-empty .lyr-search-act .link-btn,
+html[data-shell='phone'] .lyrics-empty .lyr-search-act .link-btn {
+  height: 30px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--hd-text-3);
+}
+/* 展开搜索时把「暂无歌词」收起来：那条窄带只够一样东西 */
+html[data-shell='phone'] .lyrics-empty[data-searching='true'] .t,
+html[data-shell='phone'] .folia-empty[data-searching='true'] .t { display: none; }
+
+/* 6. 进度：轨道 4、圆点 12、时间 11 */
+html[data-shell='phone'] .imm-progress {
+  order: 6;
+  margin: 12px 0 0;
+  flex: none;
+}
+/*
+ * 封面页：剩余高度现在由「接下来播放」那张卡吃掉（`margin-top:auto` 挂在它身上），
+ * 进度条不再自己撑——否则卡片被顶在上面、下面又空出一截。
+ * 底部三块（进度 / 控制 / 音质胶囊）依然钉死在屏幕底部，与歌词页同位，
+ * 翻页时按钮不再上下跳（用户：「按钮应该固定在一个地方，不然容易点错」）。
+ */
+html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-progress {
+  padding-top: 0;
+}
+/*
+ * 进度：设计稿 02 是**轨道独占一行、时间在轨道下方左右两端**。
+ * 桌面版是「时间 - 轨道 - 时间」横排（桌上够宽，这样更省高度）；
+ * 手机上轨道被两侧 32px 的时间挤到只剩 260 宽，再加上圆点，看着就是一根短棍。
+ * 这里改成两行网格：轨道整宽在上，两个时间落在下沿两端。
+ */
+html[data-shell='phone'] .imm-progress .progress {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    'track track track'
+    'from  .     to';
+  align-items: center;
+  column-gap: 0;
+  row-gap: 7px;
+}
+html[data-shell='phone'] .imm-progress .progress > .track { grid-area: track; }
+html[data-shell='phone'] .imm-progress .progress > .time:first-of-type { grid-area: from; justify-self: start; }
+html[data-shell='phone'] .imm-progress .progress > .time:last-of-type { grid-area: to; justify-self: end; }
+html[data-shell='phone'] .imm-progress .progress .time {
+  font-size: 11px;
+  color: var(--hd-text-3);
+  min-width: 0;
+}
+/*
+ * 轨道：默认底色是 `color-mix(--sy-text-1 10%)`——那是**跟主题走**的。
+ * 浅色主题下 --sy-text-1 是深灰，10% 深灰压在近黑底上等于没有轨道，
+ * 用户只能看见走到一半的一条蓝线。这里给死值。
+ */
+html[data-shell='phone'] .imm-progress .progress .track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--hd-line-strong);
+}
+html[data-shell='phone'] .imm-progress .progress .track.hover { transform: none; }
+html[data-shell='phone'] .imm-progress .progress .fill { border-radius: 999px; }
+html[data-shell='phone'] .imm-progress .progress .fill-buf {
+  border-radius: 999px;
+  /* 缓冲段曾经写死默认主题的靛蓝：换到「清浅」就是播放键青蓝、
+     进度条缓冲段靛蓝，一个屏幕上两套蓝 */
+  background: var(--sy-accent-a32);
+}
+/*
+ * 圆点：默认 `scale(0)`，只有 hover / 拖动时才显示。
+ * 触摸屏没有 hover —— 手机上等于**永远没有拖点**，用户根本看不出这条能拖。
+ */
+html[data-shell='phone'] .imm-progress .progress .track .knob,
+html[data-shell='phone'] .imm-progress .progress .track.hover .knob {
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%) scale(1);
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+}
+/*
+ * 拖动时那颗时间气泡：**必须把反向缩放撤掉**。
+ *
+ * 桌面版气泡挂在一个 `scaleY(1.8)` 拉粗的轨道里，所以它自己写了
+ * `scaleY(1/1.5)` 把字还原；而手机上这条轨道是 `transform: none`（为了让 4px
+ * 的轨道保持细线），气泡里的 0.667 就成了「字被压扁」——用户原话
+ * 「拖动的时候显示的时间感觉有点怪」，怪的就是这个变形。
+ */
+html[data-shell='phone'] .imm-progress .progress .track .bubble,
+html[data-shell='phone'] .imm-progress .progress .track.dragging .bubble {
+  transform: translateX(-50%);
+  transform-origin: center bottom;
+  bottom: 17px;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+/* 7. 控制行：循环 / 上一首 / 播放 58 / 下一首 / 队列
+ *
+ * 尺寸是"视觉变小、热区不变"的路子：按钮盒子留在 40（拇指够得着），
+ * 里面的图标从 24 收到 20。之前是 44 + 24/30 的图标 + 68 的播放键，
+ * 五颗挤在 393 里看着像一排胖按钮，用户的评价是「好大、好丑」。
+ * 播放键从 68 收到 58，仍然是这一行最重的一颗。
+ */
+html[data-shell='phone'] .imm-ctl {
+  order: 7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0;
+  margin-top: 10px;
+  padding: 0 6px;
+  flex: none;
+}
+html[data-shell='phone'] .imm-ctl-l,
+html[data-shell='phone'] .imm-ctl-r { display: flex; align-items: center; gap: 10px; }
+html[data-shell='phone'] .imm-ctl .icon-btn { width: 40px; height: 40px; color: var(--hd-text-2); }
+html[data-shell='phone'] .imm-ctl .icon-btn svg { width: 20px; height: 20px; }
+html[data-shell='phone'] .imm-ctl .imm-step { color: var(--hd-text-1); }
+html[data-shell='phone'] .imm-ctl .imm-step svg { width: 24px; height: 24px; }
+html[data-shell='phone'] .imm-queue-btn svg { width: 20px; height: 20px; }
+
+html[data-shell='phone'] .imm-play {
+  width: 58px;
+  height: 58px;
+  border-radius: 999px;
+  flex: none;
+  /*
+   * 投影比设计稿（0 8 24 accent/45%）收一档。
+   *
+   * 设计稿是照冷蓝 accent 画的：蓝光晕在近黑底上是「一圈淡光」，好看。
+   * 换成暖金主题（月黄昏 #C9A96E）之后，45% 的金光是**一圈发黄的雾**，
+   * 58px 的按钮看着像一盏灯——用户的原话「很亮，很不协调」。
+   * 收到 28%、16px，按钮仍浮在控制行上，但不再发光。
+   */
+  box-shadow: 0 6px 16px var(--hd-glow);
+}
+html[data-shell='phone'] .imm-play svg { width: 24px; height: 24px; }
+
+html[data-shell='phone'] .imm-vol,
+html[data-shell='phone'] .imm-dl-wrap:not(.imm-act-dl),
+html[data-shell='phone'] .imm-tools,
+html[data-shell='phone'] .imm-meta-line,
+html[data-shell='phone'] .imm-lyrbar { display: none; }
+
+/* 8. 底部胶囊 */
+html[data-shell='phone'] .imm-pills {
+  order: 8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 12 → 20：播放键那一行往上抬 8px（用户：「播放按钮往上面移动一点」）。
+     两页**必须同时抬**——只改封面页的话翻页时按钮会上下跳 8px，
+     那正是上一轮刚修掉的「切歌词页按钮会动」。 */
+  margin-top: 20px;
+  flex: none;
+}
+html[data-shell='phone'] .imm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: var(--hd-surface-2);
+  font-size: 11px;
+  color: var(--hd-text-1);
+  white-space: nowrap;
+}
+html[data-shell='phone'] .imm-pill.muted {
+  background: transparent;
+  color: var(--hd-text-3);
+  border: 1px solid var(--hd-line-subtle);
+}
+/*
+ * 音质胶囊现在是**按钮**（点开挑档位）。button 自带 border/font，
+ * 不重置就会在圆胶囊外面多一个方框、字号也跳成 13.33。
+ * 右边那个小箭头朝上——点它弹出来的是面板，朝下像是「收起」。
+ */
+html[data-shell='phone'] .imm-pill-btn {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--sy-dur-fast);
+}
+html[data-shell='phone'] .imm-pill-btn:active { background: var(--sy-accent-a15); }
+html[data-shell='phone'] .imm-pill-btn svg:last-child { transform: rotate(180deg); opacity: 0.66; }
+
+/* ==================================================================== */
+/* 手机 · 我的（首页）                                                   */
+/* ==================================================================== */
+
+/*
+ * 这一页原来是「标题 + 五个控件挤在一行」，手机上 393 宽放不下就自动折行，
+ * 结果「新建歌单 / 导入 / ? / 刷新」排成两行、大小还不一样，
+ * 下面再接一个孤零零的「登录」——看起来就是「乱」。
+ *
+ * 现在两层网格：
+ *   第一行：状态文字（左） + 刷新 / 账号两颗圆钮（右）
+ *   第二行：新建歌单 / 导入歌单，各占一半
+ *
+ * 两颗圆钮以前是绝对定位（`top:-8px`），页头本身从安全区下沿起算，
+ * 于是圆钮顶进状态栏，看起来像「按钮超出去了」。
+ * 改成网格里的普通格子后，高度由行决定，任何屏幕上都不会越界。
+ */
+html[data-shell='phone'] .home-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'info tools'
+    'ops  ops';
+  align-items: center;
+  gap: 10px 8px;
+  padding: 0;
+}
+html[data-shell='phone'] .home-head .lib-head-left {
+  grid-area: info;
+  min-width: 0;
+}
+html[data-shell='phone'] .home-head .lib-tools {
+  grid-area: tools;
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+html[data-shell='phone'] .home-head .lib-actions {
+  display: flex;
+  grid-area: ops;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-top: 0;
+  justify-content: stretch;
+}
+/* 「?」是导入说明，手机上没有鼠标悬停可看，收起来；说明在导入失败时用提示讲 */
+html[data-shell='phone'] .home-head .lib-actions .help-dot { display: none; }
+/* 刷新 / 账号：44 的圆钮，图标 20 起步——只有一枚图标、又没有文字，
+   视觉上本来就偏小，热区必须给足。 */
+html[data-shell='phone'] .home-head .home-refresh,
+html[data-shell='phone'] .home-head .home-acct {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  margin: 0;
+  justify-content: center;
+  border-radius: 999px;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-shell='phone'] .home-head .home-acct svg { width: 20px; height: 20px; }
+/* 刷新是「空心圆环」，同样的 20 看起来比实心的人形小一圈，给 22 才配得上 */
+html[data-shell='phone'] .home-head .home-refresh svg { width: 22px; height: 22px; }
+html[data-shell='phone'] .home-head .home-acct { max-width: none; }
+html[data-shell='phone'] .home-head .home-acct .acct-label { display: none; }
+html[data-shell='phone'] .home-head .home-refresh .home-refresh-lb { display: none; }
+
+/* 主操作：新建 / 导入 平分一行 */
+html[data-shell='phone'] .home-head .lib-actions > .primary-btn,
+html[data-shell='phone'] .home-head .lib-actions > .ghost-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 999px;
+  justify-content: center;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+/*
+ * 平台账号：一张卡片四行。原来是四颗独立小胶囊 flex-wrap，两列一散，
+ * 中间还夹一个「登录」——既不像列表也不像按钮。
+ *
+ * 现在整块是一张卡：顶上一条折叠头（四颗色点 + 已登录头像 + 计数），
+ * 收起时只占 48px。用户「登录以后不太关心这些」，所以全登录完默认就是收起的，
+ * 要退出/换号再点开（展开判定在 HomePage 的 `platsWant`）。
+ */
+html[data-shell='phone'] .home-plats-wrap {
+  margin: 0 0 12px;
+  padding: 0 14px;
+  border-radius: 18px;
+  background: var(--hd-bg-elevated);
+  border: 1px solid var(--hd-line-subtle);
+  overflow: hidden;
+}
+html[data-shell='phone'] .home-plats-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--hd-text-2);
+  font: inherit;
+  text-align: left;
+}
+html[data-shell='phone'] .hph-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .hph-sum { font-size: 12px; color: var(--hd-text-3); }
+html[data-shell='phone'] .hph-sum[data-need] { color: var(--hd-accent); }
+/* 头像推到右边：中间留白，一眼看出这是「摘要 + 展开」而不是一条按钮 */
+html[data-shell='phone'] .hph-avatars { margin-left: auto; }
+html[data-shell='phone'] .hph-avatars i {
+  width: 20px;
+  height: 20px;
+  box-shadow: 0 0 0 2px var(--hd-bg-elevated);
+}
+html[data-shell='phone'] .hph-chev { margin-left: 2px; color: var(--hd-text-3); }
+
+html[data-shell='phone'] .home-plats {
+  display: block;
+  /* 展开后是同一张卡的下半截：不再自带圆角和背景，只加一条分隔线 */
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  border: 0;
+  border-top: 1px solid var(--hd-line-subtle);
+  background: none;
+}
+html[data-shell='phone'] .home-plat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 56px;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  border-bottom: 1px solid var(--hd-line-subtle);
+}
+html[data-shell='phone'] .home-plat:last-child { border-bottom: 0; }
+html[data-shell='phone'] .home-plat-dot { width: 7px; height: 7px; }
+html[data-shell='phone'] .home-plat-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .home-plat.on .home-plat-name { color: var(--hd-text-1); }
+html[data-shell='phone'] .home-plat-user { margin-left: auto; }
+html[data-shell='phone'] .home-plat-nick {
+  font-size: 12.5px;
+  color: var(--hd-text-2);
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-shell='phone'] .home-plat-btn {
+  flex: none;
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--hd-surface-2);
+  color: var(--hd-accent-text);
+  font-size: 12.5px;
+}
+html[data-shell='phone'] .home-plat-btn.quiet {
+  background: none;
+  color: var(--hd-text-2);
+  padding-right: 0;
+}
+
+/*
+ * 「本地音乐」这条横卡原来吃的是桌面令牌（`--sy-surface` + accent 渐变 + 容器圆角 22），
+ * 跟上面刚改成 18 圆角、扁平材质的平台卡并排，一眼就能看出「两块不是一套东西」。
+ * 手机上一律走 handoff 令牌，材质/圆角/边距对齐平台卡。
+ */
+html[data-shell='phone'] .home-band {
+  /* 一行放齐：封面 / 文字 / 播放键。
+     mobile.css 里原本是 `flex-wrap: wrap`，390dp 上「按你的口味 · 四个平台名 · 32 首」
+     这一行撑不下，整块文字被挤到封面下面、按钮再被挤到第三行——
+     一张卡长到 190px，读起来像三块拼在一起。这里改成 nowrap，长文案自己省略。 */
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid var(--hd-line-subtle);
+  background: var(--hd-bg-elevated);
+  box-shadow: none;
+}
+html[data-shell='phone'] .home-band:hover,
+html[data-shell='phone'] .home-band:active {
+  border-color: var(--hd-line-strong);
+  box-shadow: none;
+}
+/*
+ * 「为你推荐」左边那条 3px 强调色要补回来：
+ * 上面那条规则把 `box-shadow` 清成了 none，顺手把 `.home-reco` 用来区分
+ * 「这是推荐、不是本地库」的那条竖线也抹掉了——两张横卡除了标题完全一样。
+ */
+html[data-shell='phone'] .home-reco,
+html[data-shell='phone'] .home-reco:hover {
+  box-shadow: inset 3px 0 0 var(--sy-accent);
+}
+html[data-shell='phone'] .home-band-cover {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  border: 1px solid var(--hd-line-subtle);
+  background: var(--hd-surface-2);
+}
+html[data-shell='phone'] .home-band-main { flex: 1 1 auto; gap: 4px; }
+html[data-shell='phone'] .home-band-name { font-size: 15px; color: var(--hd-text-1); }
+html[data-shell='phone'] .home-band-meta { font-size: 12px; color: var(--hd-text-2); }
+/*
+ * 右侧动作区：换一批 / 调权重 / 播放。
+ *
+ * 早先 gap 是 0（只有一个播放键，间距没意义）；加了前面两颗图标之后
+ * 它们会叠成一颗，这里得给回一点缝。三颗加起来 30+30+36+8=104，
+ * 390dp 上文字区还剩 ~190，标题和首数都放得下。
+ */
+html[data-shell='phone'] .home-band-acts { flex: none; gap: 4px; }
+html[data-shell='phone'] .home-band-icon { width: 30px; height: 30px; }
+/* 整理态提示：手机上只留前半句，两条提示挤在一行会被截断成省略号 */
+html[data-shell='phone'] .he-desk { display: none; }
+/* 手机上按钮收成一颗 36 的圆：文字版在这里既放不下、也会把歌名挤没 */
+html[data-shell='phone'] .home-band-play {
+  width: 36px;
+  height: 36px;
+  /* mobile.css 给了 min-height: 40，这里得一起压掉，否则是个 36×40 的竖椭圆 */
+  min-height: 0;
+  padding: 0;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 12.5px;
+  box-shadow: 0 4px 12px var(--sy-accent-a32);
+}
+html[data-shell='phone'] .home-band-play-t { display: none; }
+/* 字收掉了，图标得顶上来：13 放在 36 的圆里缩成一粒 */
+html[data-shell='phone'] .home-band-play svg { width: 15px; height: 15px; }
+/* 「查看全部 →」在手机上省掉：整条卡本来就能点 */
+html[data-shell='phone'] .home-band-more { display: none; }
+html[data-shell='phone'] .hm-long { display: none; }
+html[data-shell='phone'] .hm-short { display: inline; }
+/* 空封面里的音符：桌面用 `--sy-text-3`，在近黑底上几乎看不见，像一块坏图 */
+html[data-shell='phone'] .home-cover-blank { color: var(--hd-text-3); }
+html[data-shell='phone'] .home-band-cover .home-cover-blank { color: var(--hd-text-2); }
+/* 歌单卡：卡片本身是透明的，材质全在 `.home-cover` 上，所以令牌要打到那一层 */
+html[data-shell='phone'] .home-cover {
+  border-radius: 18px;
+  border: 1px solid var(--hd-line-subtle);
+  background: var(--hd-surface-2);
+}
+html[data-shell='phone'] .home-card-name { font-size: 13.5px; color: var(--hd-text-1); }
+html[data-shell='phone'] .home-card-meta { font-size: 11.5px; color: var(--hd-text-3); }
+html[data-shell='phone'] .home-sec-head h2 { font-size: 15px; color: var(--hd-text-1); }
+/* 分组（本地 / 平台名）：手机上一屏能同时看到两个分组，标题不能太大，
+   否则「我的歌单」下面的层级会盖过卡片本身 */
+html[data-shell='phone'] .home-group + .home-group { margin-top: 16px; }
+html[data-shell='phone'] .home-group-head { margin-bottom: 8px; gap: 6px; }
+html[data-shell='phone'] .home-group-head h3 { font-size: 13px; color: var(--hd-text-2); }
+/* 分组标题换成折叠按钮后，字号/颜色跟着手机那套走（h3 已不存在于这些组里） */
+html[data-shell='phone'] .hg-name { font-size: 13px; color: var(--hd-text-2); }
+html[data-shell='phone'] .hg-chev { color: var(--hd-text-3); }
+/* 手指点的东西别太小：整颗按钮撑到 34 高，但视觉上还是那行小字（靠负 margin 抵掉） */
+html[data-shell='phone'] .hg-toggle { padding: 8px 8px 8px 2px; margin: -8px 0; }
+html[data-shell='phone'] .home-group-n { font-size: 11.5px; color: var(--hd-text-3); }
+
+/* ==================================================================== */
+/* 手机 · 列表行与多选（设计稿 06）                                       */
+/* ==================================================================== */
+
+/*
+ * 行首：常态是**专辑缩略图**，进了多选才换成复选框。
+ *
+ * 原来复选框常显（桌面那套 0.5 透明度的做法），手机上每行同时挂着
+ * 「复选框 + 序号」两个占位，看起来既挤又像「必须先勾选才能点」。
+ * 长按是进多选的入口——这也是设计稿 06 的交互。
+ */
+html[data-shell='phone'] .sr-row {
+  gap: 10px;
+  height: 60px;
+  padding: 0 4px;
+  border-radius: 12px;
+}
+html[data-shell='phone'] .sr-row .sr-cbx { display: none; }
+html[data-shell='phone'] .sr-list[data-selecting='true'] .sr-cbx { display: inline-flex; }
+html[data-shell='phone'] .sr-list[data-selecting='true'] .sr-art { display: none; }
+html[data-shell='phone'] .sr-art {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 10px;
+  background-color: var(--hd-surface-2);
+  background-size: cover;
+  background-position: center;
+  box-shadow: inset 0 1px 0 var(--hd-line-subtle);
+}
+html[data-shell='phone'] .sr-idx { display: none; }
+html[data-shell='phone'] .sr-row .sr-title { font-size: 14px; }
+html[data-shell='phone'] .sr-row .sr-meta { font-size: 11.5px; }
+/* 手机上不存在 Ctrl / Shift，那一行提示只会让人困惑 */
+html[data-shell='phone'] .sr-pickhead { display: none; }
+/* 平板也是手指：这行写的是「Ctrl 点单选 · Shift 连选」，触屏上没有这两个键 */
+html[data-shell='tablet'] .sr-pickhint { display: none; }
+
+/* 本地曲库 / 本地歌单：同一套规则——常态只给封面，多选态才放出复选框 */
+html[data-shell='phone'] .track-row .col-check { display: none; }
+html[data-shell='phone'] .track-row.selecting .col-check { display: flex; }
+html[data-shell='phone'] .plp-cbx { display: none; }
+html[data-shell='phone'] .plp-list[data-selecting='true'] .plp-cbx { display: flex; }
+html[data-shell='phone'] .plp-list[data-selecting='true'] .plp-row .cover-art { display: none; }
+
+/*
+ * 多选工具条：贴底浮起（设计稿 06 的面板形态：上面「已选 N 首 + 关闭」，
+ * 下面一排圆钮 + 小标签）。原来的横条塞了六个带文字的小按钮，
+ * 393 宽下必然折行，还压在播放条上。
+ */
+html[data-shell='phone'] .lib-batchbar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  /* 播放条占 72（--phone-tab 64 + 8）到 132 这一段，工具条要落在**它上面**，
+     不能只让开 66 —— 那样整块会压在播放条上，用户点不到「播放」。 */
+  bottom: calc(var(--phone-tab) + 76px + var(--safe-bottom));
+  z-index: 125;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--hd-line-subtle);
+  background: var(--hd-bg-sheet);
+  box-shadow: var(--hd-shadow-sheet);
+}
+html[data-shell='phone'] .lib-batchbar .bb-count {
+  /* 显式钉网格位置：DOM 里「动作行」在「关闭」之前，靠自动放置会把 ✕ 挤到第三行，
+     整条工具条凭空多出 44px，看着像下面多了一条空行。 */
+  grid-area: 1 / 1;
+  align-self: center;
+  font-size: 13px;
+  color: var(--hd-text-2);
+  white-space: nowrap;
+}
+html[data-shell='phone'] .lib-batchbar .bb-count .num { color: var(--hd-text-1); font-weight: 600; }
+html[data-shell='phone'] .lib-batchbar .bb-sep { display: none; }
+html[data-shell='phone'] .lib-batchbar .bb-clear {
+  grid-area: 1 / 2;
+  width: 36px;
+  height: 36px;
+  align-self: center;
+  justify-self: end;
+  color: var(--hd-text-2);
+}
+html[data-shell='phone'] .lib-batchbar .bb-actions {
+  grid-area: 2 / 1 / 3 / 3;
+  display: grid;
+  /* 三个列表页的动作数不一样（5 / 6），让列数跟着走：
+     6 个时每列 54，5 个时每列 65，都能放下 42 的圆钮 */
+  grid-template-columns: repeat(auto-fit, minmax(46px, 1fr));
+  gap: 2px;
+}
+html[data-shell='phone'] .lib-batchbar .bb-btn {
+  flex-direction: column;
+  gap: 6px;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 9.5px;
+  color: var(--hd-text-3);
+  /* 六颗按钮平分 336 宽时每列只有 50 出头，「下一首播放」这种五字标签会画出格、
+     和邻居连成一行字。允许缩到列宽再省略，绝不允许溢出。 */
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .lib-batchbar .bb-btn svg {
+  width: 42px;
+  height: 42px;
+  padding: 12px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--hd-surface-2);
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .lib-batchbar .bb-btn.primary svg {
+  background: var(--hd-accent);
+  color: #fff;
+}
+/*
+ * 选中态给列表底部留一点空：工具条是 fixed、贴在播放条上方，
+ * 正常页面下它盖住的是迷你播放条而不是列表（列表底边在播放条上沿之上），
+ * 只有个别页面列表铺到窗口底时才会压住最后一行，留一行高度兜住。
+ */
+html[data-shell='phone'] .sr-list[data-selecting='true'],
+html[data-shell='phone'] .plp-list[data-selecting='true'],
+html[data-shell='phone'] .lib-table[data-selecting='true'] { padding-bottom: 72px; }
+
+/* 播放页打开时，全站的浮层（多选工具条）让位；提示条不动——播放页里收藏/下载都要弹提示 */
+html[data-imm='1'] .lib-batchbar { display: none; }
+
+/* 「复制信息」在手机上没去处（没有粘贴的场景）——没剪贴板需求就先藏着，位置留给其它动作 */
+html[data-shell='phone'] .lib-batchbar .bb-actions .bb-btn.redundant-copy { display: none; }
+html[data-shell='phone'] .lib-batchbar .bb-actions .bb-btn.phone-hide { display: none; }
+
+/* ==================================================================== */
+/* 手机 · 设置（设计稿 05）                                              */
+/* ==================================================================== */
+
+html[data-shell='phone'] .settings-page .set-group {
+  margin: 0 0 12px;
+  padding: 12px 12px 6px;
+  border-radius: 18px;
+  background: var(--hd-bg-elevated);
+  border: 1px solid var(--hd-line-subtle);
+}
+html[data-shell='phone'] .settings-page .set-group h3 {
+  margin: 0 0 10px;
+  padding: 0 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--hd-text-2);
+  letter-spacing: 0.01em;
+}
+html[data-shell='phone'] .settings-page .set-row {
+  gap: 12px;
+  padding: 10px 2px;
+  min-height: 44px;
+}
+html[data-shell='phone'] .settings-page .set-label {
+  font-size: 13.5px;
+  color: var(--hd-text-1);
+  gap: 2px;
+}
+html[data-shell='phone'] .settings-page .set-sub { font-size: 11px; color: var(--hd-text-3); }
+
+/* 分段控件：高 38，内胶囊 9 */
+html[data-shell='phone'] .settings-page .segmented {
+  padding: 3px;
+  border-radius: 12px;
+  background: var(--hd-surface-1);
+  gap: 2px;
+}
+html[data-shell='phone'] .settings-page .segmented button {
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 9px;
+  font-size: 13px;
+  color: var(--hd-text-2);
+}
+html[data-shell='phone'] .settings-page .segmented button[aria-checked='true'] {
+  background: var(--hd-surface-3);
+  color: var(--hd-text-1);
+  font-weight: 500;
+}
+
+/* 开关 40×24 */
+html[data-shell='phone'] .settings-page .toggle { width: 40px; height: 24px; }
+html[data-shell='phone'] .settings-page .toggle::after { width: 18px; height: 18px; top: 3px; left: 3px; }
+html[data-shell='phone'] .settings-page .toggle[aria-checked='true']::after { transform: translateX(16px); }
+
+/*
+ * 开关的两档底色必须写**实色**。
+ *
+ * global.css 里那两条用的是 `color-mix(in srgb, …)`，手机上不认这个函数
+ * （真机 WebView 104 直接丢弃整条声明，且不回落）——轨道于是全透明，
+ * 只剩一颗白豆挂在行尾，「开」和「关」看起来一模一样，用户点一下以为没反应。
+ * 桌面端走 WebView2，color-mix 正常，所以只在这里补。
+ */
+html[data-shell='phone'] .toggle,
+html[data-shell='tablet'] .toggle {
+  background: var(--hd-surface-3);
+  border-color: var(--hd-line-strong);
+}
+html[data-shell='phone'] .toggle[aria-checked='true'],
+html[data-shell='tablet'] .toggle[aria-checked='true'] {
+  background: var(--hd-accent);
+  border-color: transparent;
+}
+html[data-shell='phone'] .toggle[aria-checked='true']::after,
+html[data-shell='tablet'] .toggle[aria-checked='true']::after {
+  background: #fff;
+}
+
+/* 主题卡：四列，只留色块 + 名字 */
+html[data-shell='phone'] .settings-page .theme-cards {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+html[data-shell='phone'] .settings-page .theme-card {
+  padding: 5px;
+  border-radius: 12px;
+  border-width: 1px;
+}
+html[data-shell='phone'] .settings-page .theme-card:hover { transform: none; box-shadow: none; }
+html[data-shell='phone'] .settings-page .theme-card.active {
+  border-color: var(--hd-accent);
+  box-shadow: none;
+}
+html[data-shell='phone'] .settings-page .tc-preview { height: 56px; border-radius: 9px; }
+html[data-shell='phone'] .settings-page .tc-name { margin-top: 6px; font-size: 10.5px; font-weight: 400; }
+html[data-shell='phone'] .settings-page .tc-tag { display: none; }
+html[data-shell='phone'] .settings-page .tc-check { display: none; }
+html[data-shell='phone'] .settings-page .tc-del { width: 16px; height: 16px; top: 4px; right: 4px; }
+
+/* ==================================================================== */
+/* 触屏 · 底部动作面板（设计稿 06）                                      */
+/* ==================================================================== */
+
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0);
+  transition: background 200ms var(--sy-ease-soft);
+  pointer-events: none;
+}
+.sheet-scrim.open { background: rgba(0, 0, 0, 0.5); pointer-events: auto; }
+
+.sheet {
+  width: 100%;
+  max-height: 86vh;
+  overflow-y: auto;
+  /* 顶部原来给「抓手」留了 8px + 20px，抓手撤掉之后这里补到 16px，
+     标题行不至于贴到圆角上 */
+  padding: 16px 20px calc(14px + env(safe-area-inset-bottom, 0px));
+  border-radius: var(--hd-r-sheet) var(--hd-r-sheet) 0 0;
+  background: var(--hd-bg-sheet);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.6);
+  transform: translateY(24px);
+  opacity: 0;
+  transition: transform 200ms cubic-bezier(0.2, 0, 0, 1), opacity 200ms cubic-bezier(0.2, 0, 0, 1);
+  touch-action: pan-y;
+}
+.sheet.open { transform: translateY(0); opacity: 1; }
+
+.sheet-grip {
+  display: block;
+  width: 36px;
+  height: 4px;
+  margin: 2px auto 14px;
+  border-radius: 2px;
+  background: var(--hd-line-strong);
+}
+
+.sheet-head { display: flex; align-items: center; gap: 12px; }
+.sheet-cover { flex: none; }
+.sheet-cover .cover-art { border-radius: 10px !important; }
+.sheet-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.sheet-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--hd-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sheet-sub { font-size: 10.5px; color: var(--hd-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sheet-x { width: 40px; height: 40px; margin-right: -8px; color: var(--hd-text-2); flex: none; }
+
+.sheet-acts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px;
+  margin: 18px 0 6px;
+}
+/* 动作数不是 5 的时候，格子数跟着走（见 ActionSheet 的 data-count） */
+.sheet-acts[data-count='4'] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.sheet-acts[data-count='3'] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.sheet-acts[data-count='2'] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sheet-act {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  background: none;
+  color: var(--hd-text-3);
+  font-size: 9.5px;
+}
+.sheet-act .sa-ico {
+  width: 46px;
+  height: 46px;
+  border-radius: 999px;
+  background: var(--hd-surface-2);
+  color: var(--hd-text-1);
+  display: grid;
+  place-items: center;
+}
+.sheet-act.on .sa-ico { color: var(--hd-accent); }
+.sheet-act.on .sa-lb { color: var(--hd-accent-text); }
+.sheet-act:disabled { opacity: 0.4; }
+.sheet-act .sa-lb { white-space: nowrap; }
+
+.sheet-rows { margin-top: 12px; border-top: 1px solid var(--hd-line-subtle); }
+.sheet-row {
+  width: 100%;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 13.5px;
+  color: var(--hd-text-1);
+  text-align: left;
+}
+.sheet-row.danger { color: var(--hd-danger); }
+.sheet-row:disabled { color: var(--hd-text-4); }
+.sheet-chev { transform: rotate(-90deg); color: var(--hd-text-4); }
+/* 单选当前项（音质这类）：整行换成强调色 + 右侧一个勾 */
+.sheet-row.is-checked { color: var(--hd-accent-text); }
+.sheet-check { flex: none; color: var(--hd-accent); }
+/*
+ * 开关型行右侧那颗小开关。
+ * 用纯背景 + 位移伪元素画，不依赖 `color-mix()`（真机 WebView 是 Chrome 104，
+ * 不支持 color-mix 会整条声明作废、开关变成两个灰块）。
+ */
+.sheet-sw {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--hd-surface-3);
+  transition: background 160ms linear;
+}
+.sheet-sw::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #f1f2f6;
+  transition: transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.sheet-sw[data-on='1'] { background: var(--hd-accent); }
+.sheet-sw[data-on='1']::after { transform: translateX(18px); background: #14161c; }
+
+/* 减弱动效：只淡入，不位移 */
+html[data-reduced-motion='true'] .sheet { transform: none; }
+
+/*
+ * 手机 · 设置分类条。
+ *
+ * 桌面那套是「一屏看七类」，手机放不下，改成横向可滑的一条胶囊。
+ * 分类本身就少（七个），滑一格就能看到全部，比折叠面板好点——
+ * 折叠要「先展开才知道里面有什么」，正是用户抱怨的那种「找不到」。
+ *
+ * 之前这里靠 `order` 给各分组排「设计稿顺序」，现在换成分类的显隐，
+ * 那串 order 已经没意义了（留着反而会和新顺序打架），一并删掉。
+ */
+html[data-shell='phone'] .set-tabs,
+html[data-shell='tablet'] .set-tabs {
+  margin: 0 calc(-1 * var(--hd-pad)) 12px;
+  padding: 2px var(--hd-pad) 10px;
+  background: var(--sy-bg-base);
+  border-bottom: 0;
+}
+html[data-shell='phone'] .set-tab {
+  height: 34px;
+  padding: 0 15px;
+  font-size: 13.5px;
+  background: var(--hd-surface-1);
+  color: var(--hd-text-2);
+}
+html[data-shell='phone'] .set-tab.on {
+  background: var(--hd-surface-3);
+  border-color: transparent;
+  color: var(--hd-text-1);
+  font-weight: 600;
+}
+
+/* 关于：手机上收成一行（版本号 + 箭头），点开是弹窗 */
+html[data-shell='phone'] .settings-page .about,
+html[data-shell='phone'] .settings-page [data-sec='about'] .set-row { display: none; }
+
+.hd-about-row {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: var(--hd-text-1);
+  font-size: 13px;
+  text-align: left;
+}
+.hd-about-ver {
+  font-size: 11px;
+  color: var(--hd-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hd-about-ver i { font-style: normal; color: var(--hd-text-4); margin-left: 4px; }
+
+.hd-about-card { display: flex; flex-direction: column; gap: 10px; }
+.hd-about-logo {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: var(--hd-text-1);
+}
+.hd-about-tag { font-size: 12px; color: var(--hd-text-2); letter-spacing: 0.06em; }
+.hd-about-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--hd-text-2);
+  padding-top: 8px;
+  border-top: 1px solid var(--hd-line-subtle);
+}
+.hd-about-line b { font-weight: 500; color: var(--hd-text-1); }
+.hd-about-upd { display: inline-flex; align-items: center; gap: 8px; color: var(--hd-text-3); }
+
+/* ==================================================================== */
+/* 手机 · 播放队列 + 排序（设计稿 07）                                   */
+/* ==================================================================== */
+
+/*
+ * 手机上「播放队列」是**底部 sheet**：默认半屏，顶部一枚抓手，
+ * 按住上下拖就能调高度（35%~92% 屏高，实际高度由 QueueDrawer 的 inline
+ * style 给出，这里的 50vh 只是 localStorage 还没写时的兜底）。
+ * 以前是整页——从播放页点开就把整屏盖住，看一眼队列还得退出才能回播放页。
+ */
+html[data-shell='phone'] .queue-drawer {
+  top: auto;
+  right: 0;
+  left: 0;
+  bottom: 0;
+  width: auto;
+  max-width: none;
+  height: 50vh;
+  border-radius: 18px 18px 0 0;
+  background: var(--hd-bg-elevated, #14161f);
+  /* 大面积那圈「遮罩」交给 .q-scrim（真元素）——box-shadow 点不中，会漏到后面的播放页 */
+  box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.45);
+  padding: 0 0 calc(6px + var(--safe-bottom));
+  transform: translateY(100%);
+  /*
+   * 桌面那套是 280ms / cubic-bezier(0.32,0.72,0,1)——这条曲线尾巴拖得很长，
+   * 在手机全屏 sheet 上读起来像「弹上来以后还要再爬一小段」。手机收到 200ms，
+   * 换成前段更快、收得干净的曲线。
+   */
+  transition:
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms var(--sy-ease-panel),
+    visibility 0s linear 200ms;
+}
+html[data-shell='phone'] .queue-drawer.open {
+  transform: none;
+  transition:
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms var(--sy-ease-panel),
+    visibility 0s;
+}
+/*
+ * 拖动改高度期间摘掉那圈外阴影。
+ *
+ * 抽屉顶部是 `0 -16px 48px` 的模糊阴影，横跨整屏宽；高度每变一帧，这片
+ * 48px 半径的模糊都要按新边缘重算一次，是拖动期最大的一笔额外开销。
+ * 真机 A/B（同一段正弦拖动、同一台机器）：留阴影时帧间隔 16.6ms（60Hz），
+ * 摘掉后 8.3ms（设备 120Hz 满帧）。关毛玻璃在同一组里没有收益，所以玻璃保留。
+ * 抬手立刻恢复（data-drag 由 JS 摘掉）。
+ */
+html[data-shell='phone'] .queue-drawer[data-drag='1'] {
+  box-shadow: none;
+}
+
+/*
+ * 队列 sheet 的遮罩。
+ *
+ * 手机上抽屉是半屏 sheet，那片压暗的区域以前靠抽屉自己的 box-shadow 撑出来——
+ * 阴影不是元素、命中测试测不到，点上去等于直接点在**后面的播放页**上：
+ * 想点空白关掉队列，结果按到了暂停 / 下一首（用户 2026-11-01 反馈）。
+ *
+ * 收起动画结束前 `visibility` 一直保留，连点也不会漏下去。
+ */
+html[data-shell='phone'] .q-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 69; /* 抽屉 70，播放页 60：正好夹在中间 */
+  background: rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 200ms var(--sy-ease-panel),
+    visibility 0s linear 200ms;
+}
+html[data-shell='phone'] .q-scrim.open {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity 200ms var(--sy-ease-panel),
+    visibility 0s;
+}
+/* 抓手由 DOM 里的 .q-grip 提供（可拖），装饰性的 ::before 不再需要 */
+html[data-shell='phone'] .queue-drawer::before { display: none; }
+
+/*
+ * 队列抽屉是 `.imm` 的**兄弟节点**（z-index 70 > 播放页 60），拿不到播放页那棵
+ * 子树上的令牌覆盖，只能自己跟主题。
+ *
+ * 以前播放页固定深色，于是这里得把整块 `--hd-*` 再换一遍深色，否则就是
+ * 「黑屏里弹出一张白纸」。现在播放页在浅色主题下也变浅了，这块覆盖反而成了
+ * 唯一的例外——**删掉**，让它和播放页一起跟随主题。
+ *
+ * 只有一处要留：强调色文字。浅色底上用 accentSoft（深），深色底上用 on-dark
+ * （提亮），两套各自成立。
+ */
+html[data-shell='phone'] .queue-drawer[data-over-player='1'],
+html[data-shell='tablet'] .queue-drawer[data-over-player='1'],
+html[data-shell='car'] .queue-drawer[data-over-player='1'] {
+  --hd-accent-text: var(--hd-accent);
+}
+html[data-shell='phone']:not([data-dark='false']) .queue-drawer[data-over-player='1'],
+html[data-shell='tablet']:not([data-dark='false']) .queue-drawer[data-over-player='1'],
+html[data-shell='car']:not([data-dark='false']) .queue-drawer[data-over-player='1'] {
+  --hd-accent-text: var(--sy-accent-on-dark);
+}
+
+/* 抓手：整宽热区 28 高（手指很难精准点在 20 高的条上），中间一条 40×4 的横杆；
+   touch-action:none 让拖动不被滚动抢走 */
+html[data-shell='phone'] .queue-drawer .q-grip {
+  flex: none;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  cursor: grab;
+}
+html[data-shell='phone'] .queue-drawer .q-grip::after {
+  content: '';
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hd-line-strong);
+}
+
+/* 头部：← ｜ 播放队列（居中）｜ 排序 / 完成 */
+html[data-shell='phone'] .queue-drawer .q-head-m {
+  height: 48px;
+  padding: 0 12px 0 8px;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 72px;
+  align-items: center;
+  justify-items: center;
+  flex: none;
+}
+html[data-shell='phone'] .queue-drawer .q-head-m .q-back {
+  justify-self: start;
+  width: 44px;
+  height: 44px;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .queue-drawer .q-head-m h2 {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .queue-drawer .q-head-m .q-sort {
+  justify-self: end;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--hd-accent-text);
+  min-width: 44px;
+  padding: 10px 6px;
+}
+html[data-shell='phone'] .queue-drawer .q-label {
+  height: auto;
+  padding: 4px 20px 12px;
+  font-size: 12px;
+  color: var(--hd-text-3);
+}
+/*
+ * 滚动吸附到整行。
+ *
+ * 队列打开时会自动滚到「正在播放」那一首，落在列表最底部（scrollTop 不是
+ * 76 的整数倍），于是最上面那行只露出小半截——封面被横着切掉一半，
+ * 用户看到的就是「播放队列的专辑封面只会显示一部分」。
+ * 吸附之后每次停手都对齐行边界，顶部要么是完整一行，要么是干净的分隔线。
+ * 用 `proximity` 而不是 `mandatory`：拖拽排序时 mandatory 会把手指的位移
+ * 强行拽回去。
+ */
+html[data-shell='phone'] .queue-drawer .q-list {
+  padding: 0 12px;
+  scroll-snap-type: y proximity;
+}
+html[data-shell='phone'] .queue-drawer .q-row {
+  scroll-snap-align: start;
+}
+
+/* 行：封面 48、标题 16、副标题 12、行高 76（设计稿 07） */
+html[data-shell='phone'] .q-row {
+  height: 76px;
+  gap: 14px;
+  padding: 0 6px 0 4px;
+  border-radius: 14px;
+}
+html[data-shell='phone'] .q-row .idx { display: none; }
+html[data-shell='phone'] .q-row .cover-art {
+  width: 48px !important;
+  height: 48px !important;
+  border-radius: 10px !important;
+}
+html[data-shell='phone'] .q-row .name { font-size: 16px; color: var(--hd-text-1); }
+html[data-shell='phone'] .q-row .singer { font-size: 12px; color: var(--hd-text-2); }
+/* 时长已经并进副标题（歌手 · 4:12），不再单开一列 */
+html[data-shell='phone'] .q-row .dur { display: none; }
+html[data-shell='phone'] .q-row.current { background: var(--sy-accent-a08); }
+html[data-shell='phone'] .q-row.current::before { display: none; }
+html[data-shell='phone'] .q-row.current .name { color: var(--hd-accent-text); }
+html[data-shell='phone'] .q-row.current .singer::before {
+  content: '正在播放 · ';
+  color: var(--hd-accent-text);
+}
+
+/* 行尾（手机）：三按钮 —— 收藏 / 下一首播放 / 更多（弹出长按那套动作面板）。
+   桌面的移除按钮在手机上不渲染（组件里按形态分支），这里只管排布。 */
+html[data-shell='phone'] .q-row .q-acts {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: none;
+}
+html[data-shell='phone'] .q-row .q-acts .icon-btn {
+  width: 36px;
+  height: 36px;
+  color: var(--hd-text-3);
+}
+html[data-shell='phone'] .q-row .q-acts .icon-btn.on { color: var(--hd-accent-text); }
+/* 排序态：三按钮让位给拖动手柄 */
+html[data-shell='phone'] .queue-drawer.sorting .q-row .q-acts { display: none; }
+
+/* 行尾：普通态是移除，排序态换成拖动手柄（设计稿 07 只有手柄） */
+html[data-shell='phone'] .q-row .q-rm {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  margin-left: auto;
+  color: var(--hd-text-3);
+}
+html[data-shell='phone'] .queue-drawer.sorting .q-row .q-rm { display: none; }
+
+/* 手柄：只在排序态露出，靠右 */
+html[data-shell='phone'] .q-row .grip {
+  order: 9;
+  width: 44px;
+  height: 44px;
+  margin: 0 -8px 0 auto;
+  display: none;
+  place-items: center;
+  color: var(--hd-text-4);
+}
+html[data-shell='phone'] .queue-drawer.sorting .q-row .grip { display: grid; }
+html[data-shell='phone'] .queue-drawer.sorting .q-row .dur { display: none; }
+
+/* 底部：清空队列（从头部挪下来，设计稿 07 的头部只有「排序 / 完成」一个动作） */
+html[data-shell='phone'] .queue-drawer .q-foot {
+  padding: 10px 20px 6px;
+  font-size: 12px;
+  color: var(--hd-text-3);
+}
+html[data-shell='phone'] .queue-drawer .q-clear { font-size: 13px; padding: 6px 0; }
+
+/*
+ * 抬起的那一行：强调色描边 + 投影 + 圆角，看起来「浮」在队列上。
+ *
+ * ⚠️ 这里**不能改高度**。
+ *
+ * 设计稿写的是「60 高」，但队列行是 76 高；一旦被拖的那一行缩到 60，
+ * 它下面的所有行会立刻整体上跳 16px，而让位用的 `offsetTop` 是拖动开始前量好的
+ * ——几何量当场作废，空出来的行看着就落在手指下面两行的位置
+ * （用户：「待插入歌曲还在上面呢，空出来的行却在下面两行」2026-11-11）。
+ * 「浮起来」靠底板/描边/投影表达就够了，不动盒模型。
+ */
+html[data-shell='phone'] .q-row.is-dragging {
+  border-radius: 14px;
+  /*
+   * 别写死 `#1e2230`：这条是「拖起来那一行」的底板，浅色主题下它原来是
+   * 一块近黑的浮片，压在白色的队列上——里面的歌名是深色字，等于看不见。
+   * 跟随 `--hd-bg-elevated`：深色主题 #14161c、浅色主题白卡片。
+   */
+  background: var(--hd-bg-elevated);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55), inset 0 0 0 1px var(--sy-accent-a55);
+}
+/* 落位框：78 高、accent/8% 底 + accent/38% 描边 */
+html[data-shell='phone'] .q-row.drop-before::before,
+html[data-shell='phone'] .q-row.drop-end::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 78px;
+  border-radius: 12px;
+  background: var(--sy-accent-a08);
+  box-shadow: inset 0 0 0 1px var(--sy-accent-a38);
+  width: auto;
+  transform: none;
+  top: 50%;
+  margin-top: -39px;
+  z-index: 0;
+}
+
+/*
+ * 排序态（手机）：把「浏览器抢手势」和「滚动吸附」这两件事按住。
+ *
+ * 1. 拖行是纵向的，浏览器默认按「滚列表」处理，拖到一半发 pointercancel，
+ *    行会瞬间弹回原位 —— 用户看到的就是「排序拖不动」。手柄上 touch-action:none，
+ *    从手柄起手的那次拖动不会被抢（JS 那边也只在手柄上接拖动）；
+ * 2. `.q-list` 有 `scroll-snap-type: y proximity`，松手那一刻会把列表吸回整行边界，
+ *    刚拖到的位置被吸走一格 —— 一并关掉。
+ */
+html[data-shell='phone'] .queue-drawer.sorting .q-list { scroll-snap-type: none; }
+html[data-shell='phone'] .queue-drawer.sorting .q-row .grip {
+  touch-action: none;
+  /* 拖动时手指就压在手柄上，别让浏览器再叠一层「长按选中文字」 */
+  -webkit-user-select: none;
+  user-select: none;
+}
+html[data-shell='phone'] .queue-drawer.sorting .q-row .grip:active { color: var(--hd-accent-text); }
+
+/* ==================================================================== */
+/* 触屏 · 曲库分类胶囊（设计稿 11 的 chip 行）                           */
+/* ==================================================================== */
+
+.lib-chips {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0 12px;
+  flex: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.lib-chips::-webkit-scrollbar { display: none; }
+.lib-chip {
+  flex: none;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--hd-line-subtle);
+  background: transparent;
+  color: var(--hd-text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.lib-chip.on {
+  background: var(--hd-accent);
+  border-color: transparent;
+  color: #0a0b0f;
+  font-weight: 500;
+}
+
+/* 主题模式：手机上只留三段控件本身（「浅色 / 深色 / 跟随系统」那行字是重复说明），
+   三段平分整卡宽度 */
+html[data-shell='phone'] .settings-page [data-sec='appearance'] .set-row { display: block; padding: 2px 0 8px; }
+html[data-shell='phone'] .settings-page [data-sec='appearance'] .set-label { display: none; }
+html[data-shell='phone'] .settings-page [data-sec='appearance'] .segmented {
+  display: flex;
+  width: 100%;
+  padding: 3px;
+}
+html[data-shell='phone'] .settings-page [data-sec='appearance'] .segmented button {
+  flex: 1 1 0;
+  padding: 0 6px;
+}
+
+/* ---------- 在线音源：手机上竖排（名字在上、按钮在下） ----------
+ * 桌面是一行「说明 + 三颗按钮」，400dp 宽度下说明被压到 min-content，
+ * 中文会逐字竖排（实测「K×H测试」变成一列字），必须换行。 */
+html[data-shell='phone'] .settings-page .src-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+}
+html[data-shell='phone'] .settings-page .src-name {
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+html[data-shell='phone'] .settings-page .src-name .src-state { flex: none; }
+html[data-shell='phone'] .settings-page .src-ver { font-size: 10.5px; }
+html[data-shell='phone'] .settings-page .src-sub { font-size: 11.5px; margin-top: 5px; }
+html[data-shell='phone'] .settings-page .src-out { font-size: 10.5px; margin-top: 4px; line-height: 1.4; }
+html[data-shell='phone'] .settings-page .src-acts { justify-content: flex-start; gap: 8px; }
+html[data-shell='phone'] .settings-page .src-acts .ghost-btn {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 12.5px;
+}
+html[data-shell='phone'] .settings-page .src-acts .src-del { width: 36px; height: 36px; }
+
+/* 关于卡片在手机上只有那一行，标题重复了 */
+html[data-shell='phone'] .settings-page [data-sec='about'] > h3 { display: none; }
+
+/* 路径行（音源数据 / 保存目录 / 缓存目录）：长路径会把右侧按钮挤成竖排单字 */
+html[data-shell='phone'] .src-dir { flex-wrap: wrap; row-gap: 6px; align-items: center; }
+html[data-shell='phone'] .src-dir-text { min-width: 0; flex: 1 1 auto; }
+html[data-shell='phone'] .src-dir .link-btn { flex: none; padding: 4px 6px; }
+
+/* ==================================================================== */
+/* 手机 · 本地音乐页（设计稿 06 的背景页）                                */
+/* ==================================================================== */
+
+/* 表头行是桌面表格的东西，手机上是两行卡片，留着只会多一条空列名 */
+html[data-shell='phone'] .lib-table-head { display: none; }
+
+/* 曲库页头：标题 + 一行计数，右侧只留「扫描」——设计稿这里是一颗「排序」胶囊，
+   但安卓上扫描入口不能藏（首次装完必须能扫），其它次要按钮在手机上收掉。 */
+html[data-shell='phone'] .library-page .lib-head {
+  flex-direction: column;
+  flex-wrap: wrap;
+  row-gap: 10px;
+  /* 不能用 flex-end：列方向下它会把标题顶到右边去（实测标题跑到屏幕中间） */
+  align-items: stretch;
+}
+html[data-shell='phone'] .library-page .lib-head-left { text-align: left; }
+/* ≤860 的桌面窄窗规则会藏掉歌手列，手机上是两行卡片，要显回来 */
+html[data-shell='phone'] .library-page .track-row .col-artist {
+  display: block;
+  grid-area: artist;
+  align-self: start;
+  font-size: 11.5px;
+  color: var(--hd-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .library-page .track-row .col-title { align-self: end; }
+html[data-shell='phone'] .library-page .track-row .col-title .t-name { font-size: 14px; }
+html[data-shell='phone'] .library-page .lib-back { align-self: flex-start; margin-bottom: 4px; }
+html[data-shell='phone'] .library-page .lib-actions { width: 100%; gap: 8px; }
+html[data-shell='phone'] .library-page .lib-actions > .ghost-btn { display: none; }
+html[data-shell='phone'] .library-page .lib-actions .primary-btn {
+  height: 38px;
+  padding: 0 14px;
+  font-size: 13px;
+  flex: none;
+}
+html[data-shell='phone'] .library-page .search-box { flex: 1 1 140px; min-width: 0; }
+
+/*
+ * 行首勾选框：常态不画（否则每行都像「必须先勾选」），长按进多选才让出这一列。
+ *
+ * 这里必须**同时**改 `grid-template-areas`：只把列藏起来会让 `col-check`
+ * 变成网格外自动放置的项，跑到行尾右下角（实测就是一颗勾选框压在「…」下面）。
+ */
+html[data-shell='phone'] .track-row {
+  grid-template-columns: 44px minmax(0, 1fr) 38px;
+  grid-template-areas:
+    'cover title more'
+    'cover artist more';
+  padding: 8px 8px;
+}
+html[data-shell='phone'] .track-row .col-check { display: none; }
+html[data-shell='phone'] .track-row.selecting {
+  grid-template-columns: 24px 44px minmax(0, 1fr) 38px;
+  grid-template-areas:
+    'check cover title more'
+    'check cover artist more';
+}
+html[data-shell='phone'] .track-row.selecting .col-check { display: flex; }
+/* 正在播放：整条淡蓝底 + 标题强调色（和车机 11、长按面板同一套），
+   桌面那条 2px 的左侧强调条在触屏行里像一根没对齐的边线 */
+html[data-shell='phone'] .track-row.playing { background: var(--sy-accent-a08); }
+/* 桌面用「2px 内阴影 + ::before」画左侧强调条，触屏改成整条淡底后要一起收掉 */
+html[data-shell='phone'] .track-row.playing { box-shadow: none; }
+html[data-shell='phone'] .track-row.playing::before { display: none; }
+html[data-shell='phone'] .track-row.playing .t-name { color: var(--hd-accent-text); }
+
+/* ==================================================================== */
+/* 车机（设计稿 10 / 11，1280×720）                                      */
+/* 规则：强制深色、触控 ≥72、内容内边距 44/34、不用玻璃模糊                */
+/* ==================================================================== */
+
+html[data-shell='car'] {
+  --hd-bg-base: #08090d;
+  --hd-pad: 44px;
+}
+
+/* ---------- 左侧图标栏 104 ---------- */
+html[data-shell='car'] .sidebar {
+  width: 104px;
+  top: 0;
+  padding: 26px 16px 20px;
+  background: #050608;
+  border-right: 0;
+  align-items: center;
+}
+html[data-shell='car'] .sb-head { display: none; }
+html[data-shell='car'] .rail-brand {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: var(--hd-surface-2);
+  color: var(--hd-text-1);
+  font-size: 17px;
+  font-weight: 600;
+}
+html[data-shell='car'] .sb-nav { gap: 16px; width: 100%; align-items: center; }
+html[data-shell='car'] .sb-item {
+  width: 72px;
+  height: 72px;
+  padding: 0;
+  border-radius: 20px;
+  display: grid;
+  place-items: center;
+  color: var(--hd-text-2);
+  background: transparent;
+}
+html[data-shell='car'] .sb-item svg { width: 26px; height: 26px; }
+html[data-shell='car'] .sb-label { display: none; }
+html[data-shell='car'] .sb-item.active {
+  background: var(--hd-accent-weak);
+  box-shadow: inset 0 0 0 1px var(--sy-accent-a55);
+  color: var(--hd-accent-text);
+}
+
+/* ---------- 内容区 ---------- */
+html[data-shell='car'] .page {
+  inset: 0 0 0 104px;
+  padding: 34px var(--hd-pad) 24px;
+}
+html[data-shell='car'] .page h1 { font-size: 27px; font-weight: 600; margin-bottom: 6px; }
+html[data-shell='car'] .lib-status { font-size: 13px; color: var(--hd-text-3); }
+
+/* 车机不摆底部播放条：控制都在「正在播放」那一页，导轨一格就到 */
+html[data-shell='car'] .playbar { display: none; }
+
+/* 曲库：分类 chip 46、行 84 */
+html[data-shell='car'] .lib-chips { gap: 12px; padding: 18px 0 14px; }
+html[data-shell='car'] .lib-chip {
+  height: 46px;
+  padding: 0 22px;
+  font-size: 15px;
+  border-color: transparent;
+  background: var(--hd-surface-2);
+  color: var(--hd-text-2);
+}
+html[data-shell='car'] .lib-chip.on { background: var(--hd-accent); color: #08090d; }
+
+html[data-shell='car'] .lib-table-head { display: none; }
+html[data-shell='car'] .track-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto 44px;
+  grid-template-areas:
+    'cover title dur more'
+    'cover artist dur more';
+  column-gap: 18px;
+  row-gap: 2px;
+  height: 84px;
+  min-height: 84px;
+  padding: 0 18px;
+  border-radius: 14px;
+  align-items: center;
+}
+html[data-shell='car'] .track-row .col-check { display: none; }
+html[data-shell='car'] .track-row .col-idx,
+html[data-shell='car'] .track-row .col-fmt { display: none; }
+html[data-shell='car'] .track-row .cover-art {
+  grid-area: cover;
+  width: 56px !important;
+  height: 56px !important;
+  border-radius: 14px !important;
+}
+html[data-shell='car'] .track-row .col-title { grid-area: title; align-self: end; min-width: 0; }
+html[data-shell='car'] .track-row .col-title .t-name { font-size: 19px; font-weight: 500; }
+html[data-shell='car'] .track-row .col-artist { grid-area: artist; align-self: start; font-size: 12.5px; color: var(--hd-text-2); }
+html[data-shell='car'] .track-row .col-dur { grid-area: dur; display: block; font-size: 13px; color: var(--hd-text-3); }
+html[data-shell='car'] .track-row .row-more { grid-area: more; width: 44px; height: 44px; }
+html[data-shell='car'] .track-row.playing {
+  background: var(--sy-accent-a08);
+  box-shadow: none;
+}
+html[data-shell='car'] .track-row.playing .t-name { color: var(--hd-accent-text); }
+/* 设计稿 11 的当前行把状态写进副标题：「林晚舟 · 月黄昏 · 正在播放」 */
+html[data-shell='car'] .track-row.playing .col-artist::after { content: ' · 正在播放'; }
+html[data-shell='car'] .track-row:hover { background: var(--hd-surface-1); }
+
+/* 车机页头（设计稿 11）：左边「媒体库」32 + 统计一行，右边两颗小按钮；
+   状态文字在 .lib-head-left 里（不是 head 的直接子项），别用 order 去挪 */
+html[data-shell='car'] .library-page .lib-head {
+  flex-direction: row;
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  gap: 24px;
+}
+html[data-shell='car'] .library-page .lib-head h1 { font-size: 32px; margin-bottom: 8px; }
+html[data-shell='car'] .library-page .lib-head .lib-status { font-size: 13px; color: var(--hd-text-3); }
+html[data-shell='car'] .library-page .lib-actions { margin-left: auto; gap: 12px; flex: none; }
+html[data-shell='car'] .library-page .lib-actions .ghost-btn,
+html[data-shell='car'] .library-page .lib-actions .primary-btn {
+  height: 44px;
+  padding: 0 18px;
+  font-size: 15px;
+  border-radius: 14px;
+}
+
+/* ==================================================================== */
+/* 车机 · 正在播放（设计稿 10）                                          */
+/* ==================================================================== */
+
+html[data-shell='car'] .imm { left: 104px; background: #08090d; }
+/*
+ * 车机背景是纯平的 #08090D（设计稿 10/11）。
+ * 桌面 body 铺了「左上光斑 + 160° 渐变（bg-base → bg-elevated）」，
+ * 在 720 高的车机屏上渐变刚好走到最亮的一段——屏幕底部会多出一条
+ * 比上半屏浅的横带，看着像没铺满。
+ */
+html[data-shell='car'] body { background: #08090d; }
+html[data-shell='car'] .imm-bg,
+html[data-shell='car'] .imm-beam,
+html[data-shell='car'] .imm-flare,
+html[data-shell='car'] .imm-tint,
+html[data-shell='car'] .imm-scrim { display: none; }
+
+html[data-shell='car'] .imm-shell { padding: 26px 44px 30px; }
+
+html[data-shell='car'] .imm-top { display: none; }
+html[data-shell='car'] .imm-top-m {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  flex: none;
+}
+html[data-shell='car'] .imm-m-back,
+html[data-shell='car'] .imm-m-more { display: none; }
+html[data-shell='car'] .imm-m-kicker { font-size: 15px; color: var(--hd-text-2); }
+
+html[data-shell='car'] .imm-grid {
+  display: grid;
+  grid-template-columns: 356px minmax(0, 1fr);
+  /*
+   * 三行：上半天 / 下半天 / 进度。封面跨前两行并居中，信息块压在分界线上、
+   * 控制行从分界线往下排——「信息 + 控制」这一组整体就是封面中线对称的，
+   * 和设计稿 10 里歌名 76px、播放键 260px 的落点对得上。
+   * （只写 grid-template-areas 不顶用：命名区域不占位，没写 grid-area 的项
+   *   照样会被自动排到 'cover' 那一格里，叠在封面上。）
+   */
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-areas:
+    'cover meta'
+    'cover ctl'
+    'prog prog';
+  column-gap: 50px;
+  row-gap: 0;
+  padding: 0;
+  margin-top: 24px;
+  max-width: none;
+  min-height: 0;
+}
+html[data-shell='car'] .imm-art { display: contents; }
+/* 车机上整条歌词列都不存在（设计稿 10 只有封面 + 信息 + 控制）。
+   不能只隐藏 .imm-lyric-body：display:contents 之后它的兄弟节点都会变成网格项，
+   被自动排进 'cover' / 'ctl' 那几格，压出莫名其妙的横线。 */
+html[data-shell='car'] .imm-lyric { display: none; }
+
+/* 车机上不摆歌词 / 操作行 / 胶囊：一屏只留「封面 + 信息 + 控制」 */
+html[data-shell='car'] .imm-tabrow-solo,
+html[data-shell='car'] .imm-acts,
+html[data-shell='car'] .imm-lyric-body,
+html[data-shell='car'] .imm-pills,
+html[data-shell='car'] .imm-tools,
+html[data-shell='car'] .imm-meta-line,
+html[data-shell='car'] .imm-lyrbar,
+html[data-shell='car'] .imm-head { display: none; }
+
+/* 桌面那份「封面下方的标题/歌手/专辑」在车机上由右侧信息块承担，
+   留着会作为网格项自动落到封面正下方，和进度条撞在一起 */
+html[data-shell='car'] .imm-title,
+html[data-shell='car'] .imm-artist,
+html[data-shell='car'] .imm-album { display: none; }
+
+html[data-shell='car'] .imm-cover {
+  grid-area: cover;
+  align-self: center;
+  justify-self: start;
+  width: 356px;
+  aspect-ratio: 1;
+}
+html[data-shell='car'] .imm-cover .cover-art {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 28px !important;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+html[data-shell='car'] .imm-meta-block {
+  grid-area: meta;
+  align-self: end;
+  margin: 0;
+  text-align: left;
+}
+html[data-shell='car'] .imm-m-title {
+  justify-content: flex-start;
+  /* h1 的 UA 外边距是 .83em，44 号字会带出 36.5px 上下留白，把整块顶上去 */
+  margin: 0;
+  font-size: 44px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+/* 歌手一行 / 专辑·格式一行分开（设计稿 10 是 22 与 14 两级），
+   手机上仍是同一行同字号，不分两行 */
+html[data-shell='car'] .imm-m-sub {
+  margin: 10px 0 0; /* p 的 UA 下边距是 1em = 22px，不清掉控制行会被推下去 */
+  font-size: 22px;
+  color: var(--hd-text-2);
+}
+html[data-shell='car'] .imm-m-sub .imm-m-rest {
+  display: block;
+  margin-top: 8px;
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  color: var(--hd-text-3);
+}
+/* 手机上「歌手 · 专辑 · 格式」之间的分隔点；车机上分成两行，点要收掉 */
+html[data-shell='car'] .imm-m-sep { display: none; }
+
+html[data-shell='car'] .imm-ctl {
+  grid-area: ctl;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  /* 设计稿 10：上一首 / 播放 / 下一首 是一组紧凑的键（圆心间距 128），
+     播放键不是整行居中——它就在歌名下方那一列里 */
+  gap: 48px;
+  align-self: start;
+  margin: 14px 0 0;
+  padding: 0;
+}
+/*
+ * 桌面把控制键分成「左（循环+上一首）/ 中（播放）/ 右（下一首+队列）」三块，
+ * 是为了让播放键钉在列中线上。车机要的是「上一首 / 播放 / 下一首」靠左成组，
+ * 循环和队列退到这一组右边——用 display:contents 把两个 groupdiv 拆开，
+ * 再用 order 重排，DOM 一行都不用动（桌面那一套还得留着）。
+ */
+html[data-shell='car'] .imm-ctl-l,
+html[data-shell='car'] .imm-ctl-r { display: contents; }
+html[data-shell='car'] .imm-ctl-l .imm-step { order: 1; }
+html[data-shell='car'] .imm-play { order: 2; }
+html[data-shell='car'] .imm-ctl-r .imm-step { order: 3; }
+html[data-shell='car'] .imm-ctl .icon-btn { width: 64px; height: 64px; color: var(--hd-text-1); }
+html[data-shell='car'] .imm-ctl .imm-step svg { width: 44px; height: 44px; }
+/* 循环 / 队列在车里是次要动作（方向盘只管上下一首），降成灰色小图标，
+   让「上一首 / 播放 / 下一首」这一组仍然是设计稿里的视觉主轴 */
+html[data-shell='car'] .imm-ctl .icon-btn[aria-label='循环模式'],
+html[data-shell='car'] .imm-ctl .imm-queue-btn {
+  width: 56px;
+  height: 56px;
+  color: var(--hd-text-3);
+}
+html[data-shell='car'] .imm-ctl .icon-btn[aria-label='循环模式'] { order: 4; }
+html[data-shell='car'] .imm-ctl .imm-queue-btn { order: 5; }
+html[data-shell='car'] .imm-ctl .icon-btn[aria-label='循环模式'] svg,
+html[data-shell='car'] .imm-queue-btn svg { width: 26px; height: 26px; }
+html[data-shell='car'] .imm-play {
+  width: 96px;
+  height: 96px;
+  box-shadow: 0 10px 30px var(--hd-glow);
+}
+html[data-shell='car'] .imm-play svg { width: 38px; height: 38px; }
+/* 车机没有应用内音量（方向盘 / 车机本身负责） */
+html[data-shell='car'] .imm-vol,
+html[data-shell='car'] .imm-dl-wrap { display: none; }
+
+html[data-shell='car'] .imm-progress {
+  grid-area: prog;
+  /* 桌面这条是 max-width: 400px 的短条（右栏窄），车机上要通栏 */
+  max-width: none;
+  width: 100%;
+  margin: 10px 0 0;
+  align-self: end;
+}
+html[data-shell='car'] .imm-progress .progress { gap: 18px; }
+html[data-shell='car'] .imm-progress .progress .time { font-size: 15px; color: var(--hd-text-3); min-width: 46px; }
+html[data-shell='car'] .imm-progress .progress .track { height: 8px; border-radius: 999px; }
+html[data-shell='car'] .imm-progress .progress .fill { border-radius: 999px; }
+html[data-shell='car'] .imm-progress .progress .knob {
+  width: 20px;
+  height: 20px;
+  margin-top: -6px;
+}
+
+/* ==================================================================== */
+/* 平板（设计稿 08 / 09）                                                */
+/* 触屏平板同时命中「桌面双列布局」和「手机的移动块」（bridge.isNative）， */
+/* 不收拾的话播放页会出现两套标题 + 5 颗没清 UA 底的白方块按钮。           */
+/* ==================================================================== */
+
+/* ---------- 左侧栏 232：带文字的导航 + 品牌 ---------- */
+html[data-shell='tablet'] { --hd-pad: 26px; }
+
+html[data-shell='tablet'] .sidebar {
+  width: 232px;
+  padding: 18px 14px 16px;
+  background: var(--hd-bg-rail);
+  border-right: 0;
+}
+html[data-shell='tablet'] .sb-head {
+  display: flex;
+  align-items: flex-start;
+  padding: 4px 8px 20px;
+}
+/* 平板屏幕够宽，侧栏不再折叠（折叠按钮留着只会让人误点） */
+html[data-shell='tablet'] .sb-head .icon-btn { display: none; }
+html[data-shell='tablet'] .sb-logo { font-size: 19px; letter-spacing: 0.04em; }
+html[data-shell='tablet'] .sb-logo::after {
+  content: 'SHUYIN';
+  display: block;
+  margin-top: 5px;
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.26em;
+  color: var(--hd-text-4);
+}
+html[data-shell='tablet'] .sb-item {
+  width: 100%;
+  height: 46px;
+  /* 手机形态是「图标在上、文字在下」的竖排；平板回到横排，
+     否则 232 宽里四个字的标签会被压成一字一行 */
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+html[data-shell='tablet'] .sb-label { display: inline; }
+html[data-shell='tablet'] .sb-item.active { background: var(--hd-accent-weak); color: var(--hd-text-1); }
+html[data-shell='tablet'] .page { inset: 0 0 0 232px; padding: 26px var(--hd-pad) 92px; }
+html[data-shell='tablet'] .playbar { left: 232px; }
+
+/* ---------- 正在播放：和桌面同一套两列（左：封面+信息+控制 / 右：歌词） ----------
+ *
+ * 这一段以前是照设计稿 09 写的「命名区域栅格」（cover / lyric / meta / prog / ctl），
+ * 但 HTML 里没有那套节点：安卓上 `mobile = isAndroid` 恒为 true，播放页走的是
+ * `.imm-mpager` 那套手机竖排；平板拿到的是「手机 DOM + 桌面基础样式」，
+ * 标题、进度、控制全按文档流往下堆，一首歌的字都能顶出屏幕——用户说的
+ * 「平板播放页不对劲、超出去了看不到」就是这个。
+ *
+ * 现在平板明确走桌面那套两列（ImmersivePlayer 里改成 mobile = isAndroid && shell !== 'tablet'），
+ * 这里只按大屏放大尺寸，不再重排结构。
+ */
+html[data-shell='tablet'] .imm { inset: 0; }
+html[data-shell='tablet'] .imm-shell { padding: 14px 40px 20px; }
+html[data-shell='tablet'] .imm-grid {
+  grid-template-columns: minmax(0, min(34vw, 430px)) minmax(0, 1fr);
+  gap: 56px;
+  max-width: none;
+  padding: 0;
+}
+html[data-shell='tablet'] .imm-title { font-size: clamp(26px, 2.4vw, 38px); }
+html[data-shell='tablet'] .imm-artist { font-size: 17px; }
+html[data-shell='tablet'] .imm-album { font-size: 14px; }
+html[data-shell='tablet'] .imm-lyric-body .lyric-line { font-size: 20px; line-height: 1.95; }
+html[data-shell='tablet'] .imm-lyric-body .lyric-line.active { font-size: 25px; font-weight: 600; }
+html[data-shell='tablet'] .imm-play { width: 72px; height: 72px; }
+html[data-shell='tablet'] .imm-play svg { width: 26px; height: 26px; }
+html[data-shell='tablet'] .imm-ctl .icon-btn { width: 44px; height: 44px; }
+html[data-shell='tablet'] .imm-ctl .icon-btn svg { width: 21px; height: 21px; }
+/*
+ * 页头那排下拉芯片（音质/音效/频谱/位置）在平板上会把左边挤成竖排：
+ * 平板竖屏只有 800 宽，光这一排就 600+。它们都是「偶尔改一次」的设置，
+ * 设置页里有同一份，这里不渲染——留着 播放页/歌词 切换和收起就够。
+ */
+html[data-shell='tablet'] .imm-top-menus { display: none; }
+/* 左列（封面 → 进度 → 控制）整组居中：平板竖屏有 1280 高，
+   原来进度条被 `margin-top: auto` 顶到底，封面和它之间空出一大片 */
+html[data-shell='tablet'] .imm-art { justify-content: center; }
+html[data-shell='tablet'] .imm-art > .imm-progress { margin-top: 20px; }
+
+/* ---------- 平板首页：右侧 340 的「正在播放」栏（设计稿 08） ---------- */
+html[data-shell='tablet'] .page { right: 340px; }
+html[data-shell='tablet'] .playbar { display: none; }
+
+html[data-shell='tablet'] .tab-dock {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 22px 22px;
+  background: var(--hd-bg-rail);
+  border-left: 1px solid var(--hd-line-subtle);
+  z-index: 20;
+}
+html[data-shell='tablet'] .td-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 28px;
+  font-size: 12px;
+  color: var(--hd-text-3);
+}
+html[data-shell='tablet'] .td-head .icon-btn { width: 32px; height: 32px; color: var(--hd-text-3); }
+html[data-shell='tablet'] .td-cover {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 18px;
+  overflow: hidden;
+  background: none;
+  cursor: pointer;
+}
+html[data-shell='tablet'] .td-cover .cover-art { width: 100% !important; height: 100% !important; }
+html[data-shell='tablet'] .td-meta { margin: 16px 0 0; min-width: 0; }
+html[data-shell='tablet'] .td-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--hd-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='tablet'] .td-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--hd-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='tablet'] .td-prog { margin: 18px 0 0; }
+html[data-shell='tablet'] .td-prog .progress { gap: 10px; }
+html[data-shell='tablet'] .td-prog .progress .time { font-size: 11px; color: var(--hd-text-3); min-width: 30px; }
+html[data-shell='tablet'] .td-prog .progress .track { height: 4px; border-radius: 999px; }
+html[data-shell='tablet'] .td-prog .progress .knob { width: 12px; height: 12px; margin-top: -4px; }
+
+html[data-shell='tablet'] .td-ctl {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 16px 0 0;
+}
+html[data-shell='tablet'] .td-ctl .icon-btn { width: 40px; height: 40px; color: var(--hd-text-2); }
+html[data-shell='tablet'] .td-play { width: 48px; height: 48px; }
+
+html[data-shell='tablet'] .td-next { margin: 22px 0 0; min-height: 0; }
+html[data-shell='tablet'] .td-next-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  font-size: 12px;
+  color: var(--hd-text-3);
+  border-bottom: 1px solid var(--hd-line-subtle);
+}
+html[data-shell='tablet'] .td-next-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 60px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+html[data-shell='tablet'] .td-next-row:hover { background: var(--hd-surface-1); }
+html[data-shell='tablet'] .td-nx-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+html[data-shell='tablet'] .td-nx-name {
+  font-size: 13.5px;
+  color: var(--hd-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='tablet'] .td-nx-sub {
+  font-size: 11px;
+  color: var(--hd-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='tablet'] .td-nx-dur { font-size: 11px; color: var(--hd-text-3); }
+html[data-shell='tablet'] .td-empty {
+  margin-top: 40px;
+  font-size: 13px;
+  color: var(--hd-text-3);
+  text-align: center;
+}
+
+/* ==================================================================== */
+/* 手机 · 切页过渡 / 按压反馈 / 强调色跟随主题                          */
+/* ==================================================================== */
+
+/*
+ * 切回封面页：封面淡入、曲目与操作行从左边滑回来（和右滑手势同向）。
+ *
+ * 这里不需要额外的「方向」状态：`display:none → block` 会让 CSS 动画自动重放，
+ * 而歌词页那半边的进场动画本来就写在 `[data-pager='lyric'] .imm-lyric` 上。
+ */
+@keyframes imm-page-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes imm-page-in-l { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+
+html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-cover { animation: imm-page-fade 220ms ease-out; }
+html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-meta-block,
+html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-acts {
+  animation: imm-page-in-l 240ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric-body {
+  animation: imm-page-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-cover,
+  html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-meta-block,
+  html[data-shell='phone'] .imm-grid[data-pager='art'] .imm-acts,
+  html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric-body { animation: none; }
+}
+
+/*
+ * 按压反馈。
+ *
+ * `.press` 由 App.tsx 里那个捕获阶段的 pointerdown 监听挂上/摘掉：
+ * 安卓 WebView 的 `:active` 对「按钮里包着 svg」这种情况经常不触发
+ * （手指按在图标上，命中的是 svg 不是 button），所以不能只靠伪类。
+ * `:active` 那条留着兜桌面触屏和较新的 WebView——它比 .press 更跟手。
+ */
+html[data-shell='phone'] .press,
+html[data-shell='tablet'] .press,
+html[data-shell='car'] .press {
+  transform: scale(0.96);
+  filter: brightness(1.15);
+}
+html[data-shell='phone'] button:not(:disabled):active,
+html[data-shell='tablet'] button:not(:disabled):active,
+html[data-shell='car'] button:not(:disabled):active { filter: brightness(1.15); }
+
+/*
+ * 列表行 / 卡片：按下去提亮，**不缩放**。
+ *
+ * 整行 scale 0.96 会把标题、时长、右侧图标一起缩，手指按住时整块在抖，
+ * 比没有反馈更像卡了。这里用 brightness：作用在元素**连同子元素**的整块渲染上，
+ * 封面图也跟着亮，比铺一层背景可靠（卡片里几乎全是图，铺底色看不见）。
+ * 再用 `:not(...)` 之外的规则把缩放/亮度抵掉——`.press` 那条通用规则也命中它们。
+ */
+html[data-shell='phone'] .press.track-row,
+html[data-shell='phone'] .press.sr-row,
+html[data-shell='phone'] .press.pl-row,
+html[data-shell='phone'] .press.cm-row,
+html[data-shell='phone'] .press.sq-card,
+html[data-shell='phone'] .press.home-card,
+html[data-shell='phone'] .press.sr-card-wrap,
+html[data-shell='phone'] .press.pl-card,
+html[data-shell='tablet'] .press.track-row,
+html[data-shell='tablet'] .press.sr-row,
+html[data-shell='tablet'] .press.pl-row,
+html[data-shell='tablet'] .press.cm-row,
+html[data-shell='tablet'] .press.sq-card,
+html[data-shell='tablet'] .press.home-card,
+html[data-shell='tablet'] .press.sr-card-wrap,
+html[data-shell='tablet'] .press.pl-card {
+  transform: none;
+  filter: brightness(1.14);
+}
+
+/*
+ * 强调色跟着主题走（深色也一样）。
+ *
+ * 设计稿是照蓝色的 accent 画的，令牌里就写死成 `#6E8BFF`；但应用有九套主题，
+ * 换到「月黄昏」（金 `#C9A96E`）之后，播放键是金的、选中的标签是蓝的，
+ * 一个界面两套强调色——用户的评价就是「不协调」。这里只把颜色换成主题的，
+ * 结构/尺寸/圆角一条不动。浅色主题本来就是跟随的，值一致，覆盖也不会打架。
+ *
+ * 半透明的两支（weak / glow）**不在这里写**：它们要带 alpha，而 color-mix()
+ * 在 Chrome 111 以下会被判成无效值（连透明都留不下，选中胶囊直接消失）。
+ * 由 ThemeProvider 用 theme-engine 的 withAlpha() 算成 rgba 挂到 :root 上。
+ */
+html[data-shell='phone']:not([data-dark='false']),
+html[data-shell='tablet']:not([data-dark='false']),
+html[data-shell='car']:not([data-dark='false']) {
+  --hd-accent: var(--sy-accent);
+  --hd-accent-text: var(--sy-accent-soft);
+}
+
+/* 评论列表最后一行别顶到进度条底下：进度条压在滚动区下沿 17px 处 */
+html[data-shell='phone'] .imm-lyric-body .cm-wrap { padding-bottom: 22px; }
+
+/* ==================================================================== */
+/* 手机 · 这一轮的口径修正                                               */
+/*                                                                      */
+/* 全部写在文件末尾，靠**顺序**覆盖前面的基础规则：不去改那些写着         */
+/* 「设计稿 02 是 XX」的原始值，免得下次对照设计稿时看不懂哪条是基线。    */
+/* ==================================================================== */
+
+/* ---------- 1. 评论「来自 网易云」看不清 ----------
+ * 原来是 `color: color-mix(--sy-text-1 76%)` 配 9% 白底、10.5px。
+ * 两个问题叠在一起：字号小 + 对比度低；而且 color-mix() 在真机 WebView
+ * （Chrome 104）里整条声明作废，颜色退回继承值，越看越像「灰掉的禁用标签」。
+ * 这里给死值：字提到 11.5，白字压 10% 白底，再加一圈 14% 的描边当边界。
+ */
+html[data-shell='phone'] .cm-src {
+  font-size: 11.5px;
+  color: var(--hd-text-1);
+  background: var(--hd-surface-3);
+  box-shadow: inset 0 0 0 1px var(--hd-line-strong);
+}
+html[data-shell='phone'] .cm-src-dot { background: var(--hd-accent); }
+
+/* ---------- 2. 上一首 / 下一首：大一点、近一点 ----------
+ * 原来 `.imm-ctl` 是 flex + space-between，两侧各一组贴着容器边：
+ * 分组里是「循环 + 上一首」，于是上一首被推到离播放键 110px 的地方，
+ * 五颗按钮铺满 372 的整行——常用键够不着，边上的循环/队列反而更靠外。
+ *
+ * 改成三列网格：1fr / 播放键 / 1fr。两侧分组内部再用 space-between，
+ * 于是「上一首」自然贴到播放键左边（留 10px），循环/队列留在最外侧。
+ * 尺寸：step 40→48、图标 24→28；播放键 58→60 保持「最大那颗」的层级。
+ */
+html[data-shell='phone'] .imm-ctl {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  column-gap: 0;
+}
+html[data-shell='phone'] .imm-ctl-l { justify-content: space-between; padding-right: 10px; }
+html[data-shell='phone'] .imm-ctl-r { justify-content: space-between; padding-left: 10px; }
+html[data-shell='phone'] .imm-ctl .imm-step { width: 48px; height: 48px; }
+html[data-shell='phone'] .imm-ctl .imm-step svg { width: 28px; height: 28px; }
+html[data-shell='phone'] .imm-play { width: 60px; height: 60px; }
+
+/* ---------- 3. 顶部：删掉和底部 dock 重复的页名 ----------
+ * 「我的 / 在线搜索 / 歌单广场 / 下载 / 设置」这五个页名在底部 dock 上
+ * 已经有一份（还是带高亮的选中态），页内再顶一个 26px 大标题属于重复信息，
+ * 而且它 + 14px 下边距 + 页头上边距一共吃掉近 50px 的屏高。
+ * 只藏 h1，下面那行 `.sub`（「N 个歌单 · M 首收藏」「4 个进行中」…）保留——
+ * 那才是这一页真正要说的东西。
+ */
+html[data-shell='phone'] .home-page .lib-head h1,
+html[data-shell='phone'] .search-page .lib-head h1,
+html[data-shell='phone'] .sq-page .lib-head h1,
+html[data-shell='phone'] .downloads-page .lib-head h1,
+html[data-shell='phone'] .settings-page > h1 { display: none; }
+
+/*
+ * 竖屏页头不许折行。
+ *
+ * `pages.css` 里有一条 `@media (max-width: 860px) { .lib-head { flex-direction: column } }`
+ * ——那是给桌面窄窗口用的（窗口一窄，标题和按钮挤在一行确实难看）。
+ * 但手机竖屏恒在这条规则范围内：副标题 298 + 「导入歌单」104，512 宽的屏上
+ * 根本放得下，却被硬折成「副标题一行 / 按钮一行靠左」，白占 40 高，
+ * 还把按钮从右上角挪到了左边——这就是「导入歌单被改了」。
+ * 只针对歌单广场恢复成一行：其它页的页头各有各的形态（搜索页是整条搜索框、
+ * 我的页是状态文字 + 两颗按钮），不在这一条里一刀切。
+ */
+html[data-shell='phone'] .sq-page .lib-head {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+html[data-shell='phone'] .sq-page .lib-head .lib-actions {
+  width: auto;
+  justify-content: flex-end;
+}
+/* 副标题在手机上只留后半句「排行榜与热门歌单」：前半句那串平台名在下面
+   平台胶囊里已经有了一份（还是能点的），留在这儿只会把宽度挤到折行。
+   见 PlaylistSquarePage.tsx 里 `.sub-sq-head` / `.sub-sq-tail` 那段注释。 */
+html[data-shell='phone'] .sq-page .lib-head .sub-sq-head { display: none; }
+html[data-shell='phone'] .sq-page .lib-head .sub-sq-de { display: none; }
+html[data-shell='phone'] .sq-page .lib-head .sub-sq-tail { display: block; margin-left: 0; }
+
+/* 页头上边距：14 → 8。状态栏已经让出 39，这 14 是「第二层」留白 */
+html[data-shell='phone'] .page {
+  inset: calc(8px + var(--safe-top)) 0 calc(var(--phone-tab) + var(--phone-dock) + 22px + var(--safe-bottom)) 0;
+}
+
+/*
+ * 跟手滑动期间（lib/pageSwipe 挂 `data-swiping`）：
+ *   · 页面自己的入场动画要停 —— 二层页面的 `page-push`（右移 26px + 淡入）
+ *     和横向位移叠在一起，滑到一半会「闪一下」；
+ *   · 位移全程走合成层；`touch-action: pan-y` 是兜底，别让浏览器把这次拖动
+ *     判成滚动（真机上是 300ms 左右的连续拖动）。
+ */
+html[data-shell='phone'] .page-host[data-swiping='true'] {
+  /* 兜底：真机上是 300ms 左右的连续拖动，别让浏览器把它判成滚动 */
+  touch-action: pan-y;
+}
+html[data-shell='phone'] .page-host[data-swiping='true'] .page-keep.push {
+  animation: none !important;
+}
+
+
+/* 播放页页头：52 → 44（返回键 44 高，正好等于一行），下方胶囊行 14 → 12 */
+html[data-shell='phone'] .imm-top-m { height: 44px; }
+html[data-shell='phone'] .imm-tabrow-solo { margin: 0 0 12px; }
+
+/* ---------- 4. 歌单详情：标题与返回键都收一收 ----------
+ * 手机上这一块原本是：整行「← 返回广场」+ 132 的封面 + 19px 两行标题
+ * + 元信息 + 两行 40 高的按钮 ≈ 275px，第一首排在 300 之后，
+ * 一进页面几乎看不到歌。现在：返回键压到 32 高、封面 92、标题 15.5 一号两行、
+ * 按钮 34 高，整块落到 ~190。
+ */
+html[data-shell='phone'] .sr-back {
+  height: 32px;
+  padding: 0 12px 0 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  border-radius: 999px;
+}
+html[data-shell='phone'] .sr-detail-hero {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  /* 「封面 | 标题」「封面 | 元信息」「按钮横贯整行」。
+     按钮原本挤在右侧那一列（268 宽）：三颗加起来 345，必然折行，
+     而折出来的是孤零零一颗「收藏」——看着像漏排了一行。
+     铺满整行之后三颗一次放得下，也不用缩字号。 */
+  grid-template-areas:
+    'cover name'
+    'cover meta'
+    'acts  acts';
+  column-gap: 12px;
+  row-gap: 6px;
+  align-items: start;
+  padding-bottom: 10px;
+}
+html[data-shell='phone'] .sr-detail-cover {
+  grid-area: cover;
+  width: 92px;
+  height: 92px;
+  border-radius: 14px;
+}
+/* `display: contents`：把 info 这一层「拆掉」，让标题 / 元信息 / 按钮
+   直接成为上面那张网格的项——不拆的话按钮只能待在右列里 */
+html[data-shell='phone'] .sr-detail-info {
+  display: contents;
+  padding-bottom: 0;
+}
+html[data-shell='phone'] .sr-detail-name {
+  grid-area: name;
+  font-size: 15.5px;
+  line-height: 1.32;
+  margin: 0;
+}
+html[data-shell='phone'] .sr-detail-meta {
+  grid-area: meta;
+  gap: 8px;
+  font-size: 11px;
+  margin: 0;
+}
+html[data-shell='phone'] .sr-detail-acts {
+  grid-area: acts;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+html[data-shell='phone'] .sr-detail-acts .primary-btn,
+html[data-shell='phone'] .sr-detail-acts .ghost-btn {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+/* ==================================================================== */
+/* 手机 · 切歌方向动画（盖过上面「切回封面页」的进场动画）                */
+/* ==================================================================== */
+/*
+ * 切歌时 data-slide 挂在 .imm-grid 上（next=下一首从右滑入 / prev=从左滑入）。
+ * 它和翻页动画同时触发（切歌自动回封面页），同特异性下按加载顺序赢——
+ * 所以这里必须写在文件末尾，而且选择器强度要和上面的翻页规则打平。
+ */
+html[data-shell='phone'] .imm-grid[data-pager='art'][data-slide='next'] .imm-cover,
+html[data-shell='phone'] .imm-grid[data-pager='art'][data-slide='next'] .imm-disc {
+  animation: imm-slide-next 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+html[data-shell='phone'] .imm-grid[data-pager='art'][data-slide='next'] .imm-meta-block {
+  animation: imm-slide-next 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+html[data-shell='phone'] .imm-grid[data-pager='art'][data-slide='prev'] .imm-cover,
+html[data-shell='phone'] .imm-grid[data-pager='art'][data-slide='prev'] .imm-disc,
+html[data-shell='phone'] .imm-grid[data-pager='art'][data-slide='prev'] .imm-meta-block {
+  animation: imm-slide-prev 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+@keyframes imm-slide-next {
+  from { opacity: 0; transform: translateX(44px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes imm-slide-prev {
+  from { opacity: 0; transform: translateX(-44px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-shell='phone'] .imm-grid[data-slide] .imm-cover,
+  html[data-shell='phone'] .imm-grid[data-slide] .imm-disc,
+  html[data-shell='phone'] .imm-grid[data-slide] .imm-meta-block { animation: none; }
+}
+
+/*
+ * 歌单详情歌曲行：行尾三颗常显（收藏 / 下一首播放 / ⋯）。
+ *
+ * 覆盖两条旧规矩：mobile.css 里「三颗只留最后一颗」（那颗还是下载），
+ * 以及 search.css 里 `.sr-acts` 默认 opacity:0（悬停才显形，手指上等于不存在）。
+ * 用 `[data-acts]` 把作用域锁在歌单详情上——搜索页 / 收藏页的行尾按钮
+ * 各有各的动作，别跟着一起变宽。
+ */
+html[data-shell='phone'] .sr-acts[data-acts='fav-next-more'],
+html[data-shell='tablet'] .sr-acts[data-acts='fav-next-more'] {
+  opacity: 1;
+  gap: 2px;
+}
+html[data-shell='phone'] .sr-acts[data-acts='fav-next-more'] > .icon-btn,
+html[data-shell='tablet'] .sr-acts[data-acts='fav-next-more'] > .icon-btn {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  color: var(--hd-text-3);
+}
+html[data-shell='phone'] .sr-acts[data-acts='fav-next-more'] > .icon-btn.on,
+html[data-shell='tablet'] .sr-acts[data-acts='fav-next-more'] > .icon-btn.on {
+  color: var(--hd-accent-text);
+}
+/* 多选态：行点击是勾选，行尾按钮一律让位（底部工具条接管） */
+html[data-shell='phone'] .sr-list[data-selecting='true'] .sr-acts[data-acts='fav-next-more'] {
+  display: none;
+}
+
+/*
+ * 曲目菜单：手机上是**磨砂玻璃**，不是实心卡。
+ *
+ * 底版那行写的是 `color-mix(in srgb, … 97%, transparent)`，WebView 104 不认
+ * （整条声明作废）——所以旧版在真机上其实是「没有底」的一层字，直接透出列表。
+ * 用户喜欢那个透亮劲儿，但那是撞出来的：字压在歌名上会糊，也没有边界感。
+ * 这里改成**真的玻璃**，而且必须绕开两条真机不认的东西：
+ *
+ *   1. `backdrop-filter`：声明能过 `CSS.supports`、计算值也读得出来 blur(20px)，
+ *      但这台 MIUI 的 WebView 就是**不渲染**它（实测把模糊拉到 60px、底色压到 12%，
+ *      后面的图标依然清清楚楚）。所以不能把玻璃效果押在它身上——留着当增强，
+ *      真支持的设备上会更漂亮，不支持的设备靠下面这层。
+ *   2. `color-mix`：会话色带 alpha 只能用纯值或 opacity。
+ *
+ * 于是玻璃靠「伪元素底色 + 斜向高光 + 发丝边」三层堆出来，透明度听着色主题走
+ * （`--hd-glass-alpha` 在深浅两套令牌里各一份），这样自定义主题换底色它也跟得上。
+ */
+html[data-shell='phone'] .ctx-menu,
+html[data-shell='car'] .ctx-menu {
+  background: transparent;
+  -webkit-backdrop-filter: blur(var(--sy-glass-blur)) saturate(var(--sy-glass-saturate));
+  backdrop-filter: blur(var(--sy-glass-blur)) saturate(var(--sy-glass-saturate));
+  border-color: var(--hd-line-strong);
+  box-shadow:
+    0 22px 54px rgba(0, 0, 0, 0.52),
+    0 2px 8px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 var(--hd-line-subtle);
+  padding: 6px;
+  border-radius: 14px;
+  overflow: hidden;
+  /*
+   * 小屏上菜单可能装不进可用高度（见 ContextMenu 的限高逻辑），那时会内部滚动。
+   * 让滚动止步于菜单、别把列表一起带着滚；手指也只在纵向生效。
+   */
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+html[data-shell='phone'] .ctx-menu::before,
+html[data-shell='car'] .ctx-menu::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  /* 上亮下暗的一点点渐变 = 玻璃的折射感；再叠一层菜单自身条目（z-index 0 以上） */
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.02) 38%, rgba(255, 255, 255, 0) 70%),
+    var(--hd-bg-elevated);
+  opacity: var(--hd-glass-alpha, 0.55);
+}
+html[data-shell='phone'] .ctx-menu .ctx-item,
+html[data-shell='car'] .ctx-menu .ctx-item {
+  height: 46px;
+  padding: 0 12px;
+  gap: 11px;
+  border-radius: 10px;
+  font-size: 14px;
+}
+html[data-shell='phone'] .ctx-menu .ctx-icon,
+html[data-shell='car'] .ctx-menu .ctx-icon { width: 20px; }
+
+/*
+ * 多选里「一首都没选」时工具条还在（不自动退出多选），此时动作必须看起来是关着的，
+ * 否则点了「播放」什么也不会发生，像卡住。
+ */
+.lib-batchbar .bb-btn:disabled { opacity: 0.4; cursor: default; }
+html[data-shell='phone'] .lib-batchbar .bb-btn:disabled,
+html[data-shell='tablet'] .lib-batchbar .bb-btn:disabled {
+  opacity: 0.34;
+  pointer-events: none;
+}
+html[data-shell='phone'] .lib-batchbar .bb-btn:disabled svg {
+  background: var(--hd-surface-2);
+  color: var(--hd-text-3);
+}
+
+/* ==================================================================== */
+/* 手机 · 播放页 v4：整页横滑（封面 / 歌词）+ 封面竖滑切歌 + 固定底部控制 */
+/* ==================================================================== */
+/*
+ * 结构（对照 JSX 里的注释）：
+ *   .imm-mpager
+ *     .imm-mp-track       200% 宽，装两个 .imm-mp
+ *       .imm-mp[data-p=art]    封面 + 歌名 + 两行歌词（一整页）
+ *       .imm-mp[data-p=lyric]  tab + 歌词 / 评论
+ *     .imm-mp-acts        5 颗操作（固定，两页共用）
+ *     .imm-mp-foot        进度 / 控制 / 胶囊（固定）
+ *
+ * 横滑整页走（封面也一起滑）。曾经试过只滑文字带，唱片模式下看着像
+ * 「只翻了半个屏」，用户说不协调；底部控制区仍然固定不动。
+ */
+html[data-shell='phone'] .imm-mpager {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* 只裁横向，纵向放行。
+     原来是 overflow:hidden（裁住 200% 宽的轨道），但唱臂的转轴按设计就在
+     「盘沿外上方」（svg 坐标 (66,-4)），整块伸出 pager 顶边 → 被裁掉半个，
+     用户看到的是「唱臂被遮住了一半」。
+     hidden 会把另一轴一起变成 auto，救不回来；`clip` 允许另一轴保持 visible。 */
+  overflow-x: clip;
+  overflow-y: visible;
+  /* 手势自己接管横滑，但**必须放行纵向**：评论列表要能滚。
+     `none` 会把后代所有原生滚动一起封死（「评论不能滑动」就是这么来的）；
+     `pan-y` 只禁横向浏览器手势，横滑仍然全落在我们手里。 */
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ---------- 封面 / 唱片 ---------- */
+html[data-shell='phone'] .imm-mp-stage {
+  position: relative;
+  /* 吃掉封面页的余量（封面在里头居中），歌名 / 歌词才不会被顶到中间带 */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  /*
+   * 横滑时**跟着整页一起走**（用户：「左滑的时候封面不跟手」）。
+   * 曾经这里写 `transform: translate3d(var(--page-x), 0, 0)` 反向补偿，
+   * 把封面钉死在屏幕原位——手指拖半个屏它一动不动，看着像贴纸。
+   * 补偿撤掉之后 stage 就是一个普通居中盒子，没有自己的 transform 了。
+   */
+  z-index: 1;
+}
+
+/* ---------- 竖向翻页轨道（上下滑切歌） ----------
+ *
+ * 结构：.imm-mp-clip > .imm-mp-reel > 三张（上一首 / 当前 / 下一首）。
+ *
+ * 静止时画面上**只有当前那一张**（用户：「我不要上下露出一个边缘」）。
+ * 邻居平时是透明的，竖着拖起来才显形，跟着轨道一起走——滑到一半看到的是
+ * 下一张正从下方/上方进来，而不是一条边常年摆在那儿。
+ *
+ * clip 比封面高一点（--mp-peek）只为让封面阴影不被裁断。
+ */
+html[data-shell='phone'] .imm-mp-stage {
+  --mp-size: clamp(200px, min(100vw - 48px, 46vh), 364px);
+  /* 相邻两张之间的距离（翻页时中间露出的那一道背景） */
+  --mp-gap: 18px;
+  /*
+   * 上下留出来的是**给封面阴影的呼吸位**，不是给邻居露脸的。
+   *
+   * 用户：「我不要上下露出一个边缘，只要拖动的时候有下一个进来的动画」。
+   * 所以邻居在这里默认 `opacity: 0`（见下），只有真正开始竖着拖
+   * （stage[data-slide='1']）才显形——静止时上下只有阴影，没有别的封面。
+   */
+  --mp-peek: 26px;
+}
+html[data-shell='phone'] .imm-mp-stage[data-vinyl='true'] {
+  --mp-size: clamp(190px, min(100vw - 88px, 44vh), 316px);
+}
+html[data-shell='phone'] .imm-mp-clip {
+  display: grid;
+  /*
+   * `place-content` 而不是 `place-items`：轨道比这块高得多，grid 的「行」会按
+   * align-content 对齐；写成 items 的话溢出时行会贴顶，当前封面被推到下面去
+   * （实测当前封面 404~704，整块跑到可视区外面）。
+   */
+  place-content: center;
+  overflow: hidden;
+  width: var(--mp-size);
+  /* 只留「当前封面 + 上下各一条」这么高，轨道其余部分裁掉。
+     max-height 兜住矮屏：stage 装不下时就少露一点，别把歌名顶下去。 */
+  height: calc(var(--mp-size) + 2 * var(--mp-peek));
+  max-height: 100%;
+}
+html[data-shell='phone'] .imm-mp-reel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--mp-gap);
+}
+html[data-shell='phone'] .imm-mp-neigh {
+  flex: none;
+  width: var(--mp-size);
+  height: var(--mp-size);
+  pointer-events: none;
+  /*
+   * 静止时完全不可见：clip 上下那 26px 里如果站着邻居，就是用户说的
+   * 「上下露出一个边缘」。邻居只在竖着拖动的那一下显形（data-slide），
+   * 那时它已经跟着轨道往上/往下走，是「下一张正滑进来」而不是「一张边摆在上面」。
+   */
+  opacity: 0;
+}
+html[data-shell='phone'] .imm-mp-stage[data-slide='1'] .imm-mp-neigh { opacity: 1; }
+/* 邻居里的封面跟当前那张同尺寸 */
+html[data-shell='phone'] .imm-mp-neigh .imm-mp-cover,
+html[data-shell='phone'] .imm-mp-neigh .imm-mp-disc {
+  width: 100%;
+  height: 100%;
+}
+html[data-shell='phone'] .imm-mp-cover,
+html[data-shell='phone'] .imm-mp-disc {
+  /* 宽和高都要顾：宽决定它不能太扁，高决定下面歌名/歌词还剩多少。
+     上限 364 就是「页宽 - 两边各 4」——再大就顶到屏幕边了；
+     46vh 是保底：矮屏（横屏 / 小机）上按高度收，歌名那行不会被挤没。
+     用户对照 QQ 音乐那屏说「还可以再大一点」，这里比上一版大了一档。 */
+  width: var(--mp-size, clamp(200px, min(100vw - 48px, 46vh), 364px));
+  aspect-ratio: 1;
+}
+/* 唱片比方形封面**再小一档**：唱臂的转轴在「盘沿外上方」，盘越大伸出去越多，
+   一路顶到页头就被压住；用户原话「唱臂压在唱片上了，要不唱片还是小一点」。
+   盘缩到 316 上限之后，转轴圆头整颗落在盘框的右上角空白里，既不压盘也不顶栏。
+   尺寸统一由 stage 上的 `--mp-size` 给（vinyl 态另有一档），见上面的轨道注释。 */
+html[data-shell='phone'] .imm-mp-disc {
+  width: var(--mp-size, clamp(190px, min(100vw - 88px, 44vh), 316px));
+}
+html[data-shell='phone'] .imm-mp-cover {
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.52), 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+html[data-shell='phone'] .imm-mp-cover .cover-art {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 20px !important;
+}
+/* 黑胶：圆盘 + 标签 + 中心孔 + 高光（转动交给 .imm-disc-spin，暂停就停住） */
+html[data-shell='phone'] .imm-mp-disc {
+  position: relative;
+  border-radius: 50%;
+  background: #0c0d11;
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.58), 0 0 0 1px var(--hd-line-subtle);
+}
+/*
+ * 手机把标签放大到 68%（桌面仍 58%）：黑胶那圈就窄了一截，封面图更大，
+ * 环形频谱的跑道也跟着变短——用户原话「黑圈可以窄一些，封面图大一些，
+ * 顺带就把频谱柱子弄短一些」。唱针落点 0.82R 正好落在这圈的中线上。
+ */
+html[data-shell='phone'] .imm-mp-disc .imm-disc-label,
+html[data-shell='car'] .imm-mp-disc .imm-disc-label {
+  width: 68%;
+  height: 68%;
+}
+html[data-shell='phone'] .imm-mp-disc .imm-disc-spin {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  overflow: hidden;
+}
+html[data-shell='phone'] .imm-mp-disc[data-playing='true'] .imm-disc-spin {
+  animation-play-state: running;
+}
+/* 翻到歌词页之后唱片还在下面转——看不见，纯烧 GPU，还会把整页帧率拖下去。
+   暂停它（回封面页自动恢复，因为这两条只在 data-page=lyric 时命中）。 */
+html[data-shell='phone'] .imm-mpager[data-page='lyric'] .imm-mp-disc .imm-disc-spin {
+  animation-play-state: paused;
+}
+/* 唱臂（照 QQ 音乐唱片模式那屏）：白色臂杆从盘沿外上方的转轴伸进盘面。
+   整块跟唱片同尺寸（inset:0），svg 坐标系 = 盘心 (50,50)、半径 50，
+   所以转轴 / 唱头的位置可以直接按「盘的百分之几」算：
+   转轴 (66,-4) = 盘心右上 0.12R + 上抬 8px，唱头播放时落在 0.75R 的黑圈上。
+
+   **wrapper 必须挂在 .imm-mp-stage 上、和 disc 平级**：
+   唱臂以前在 disc 里，切歌/拖动时靠 translateY 反向补偿才「看着不动」，
+   一旦封面被推得超过页顶，唱臂就被 art 页的 overflow 整块裁掉——
+   用户看到的是「指针滑着滑着消失了」。挂在 stage 上之后，disc 怎么动
+   都跟它无关，只剩抬臂这一件事。 */
+html[data-shell='phone'] .imm-disc-arm-wrap {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  /*
+   * 尺寸**必须和 .imm-mp-disc 用同一个变量**，绝对定位居中盖在它上面。
+   *
+   * 曾经这里抄了一份 clamp(190px, min(100vw - 88px, 44vh), 316px)，
+   * 恰好等于竖屏那档 `--mp-size`，看着没事；但平板宽屏把 `--mp-size` 抬到
+   * 430 之后两边就对不上了：臂框比唱片小一圈、又被居中，转轴 (66%,-4%)
+   * 直接从盘外掉进盘面——用户看到的就是「竖屏时指针跑到唱片上去了」
+   * （2026-11-13）。同一个尺寸只写一次。
+   */
+  width: var(--mp-size, clamp(190px, min(100vw - 88px, 44vh), 316px));
+  aspect-ratio: 1;
+  /* 不能靠往下挪来躲页头——一挪转轴就压到盘面上了（用户：「唱臂又压在唱片上了」）。
+     宁可把盘缩小（见上面的 .imm-mp-disc），转轴天然落在盘框右上角的空当里。 */
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  /* 压在 disc 与频谱之上（disc 带 transform 动画，本身就是合成层） */
+  z-index: 2;
+}
+html[data-shell='phone'] .imm-disc-arm-wrap .imm-disc-arm {
+  position: absolute;
+  inset: 0;
+  color: rgba(246, 247, 251, 0.9);
+  filter: drop-shadow(0 5px 10px rgba(0, 0, 0, 0.5));
+  pointer-events: none;
+  /* 转轴坐标 (66,-4)/100 —— 旋转中心必须正好压在转轴上，否则根部会被甩出屏幕 */
+  transform-origin: 66% -4%;
+  transform: rotate(var(--arm-rot, 0deg));
+  transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* 暂停：整臂抬 32°，唱头从黑圈 0.82 半径抬到盘外 1.18 半径（根轴不动） */
+html[data-shell='phone'] .imm-disc-arm-wrap[data-playing='false'] .imm-disc-arm {
+  --arm-rot: -32deg;
+}
+html[data-shell='phone'] .imm-disc-arm-wrap .imm-disc-arm svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 转轴在方框上沿之外，不放开就会被 svg 自己的视口裁掉一半 */
+  overflow: visible;
+}
+/*
+ * 频谱可视化开启时：**黑胶那一圈让位给频谱**。
+ *
+ * 用户原话：「安卓上如果开启频谱，就切换到唱片模式，唱片外面的那个黑圈就不要了，
+ * 用来展示频谱，但是关闭的时候又要展示黑圈的哈」。所以这里不是把频谱叠在黑胶上，
+ * 而是把圆盘底色、纹路、斜向高光整块撤掉（否则一圈淡色柱压在近黑底上几乎看不见），
+ * 只留专辑标签和唱臂——`data-spec` 一关，三条规则全部失效，黑胶原样回来。
+ *
+ * 标签外那圈 `0 0 0 5px #08090c` 也换成更淡的一圈：开频谱时它是画面里唯一的
+ * 「黑圈」，太实会把频谱和封面割成两块。
+ */
+html[data-shell='phone'] .imm-mp-disc[data-spec='true'],
+html[data-shell='car'] .imm-mp-disc[data-spec='true'] {
+  /*
+   * 盘体不能全透明：只剩封面 + 一圈悬空的柱子，看着像「封面周围炸开的光刺」，
+   * 不像「唱片上的一圈频谱」。这里留一层**没有纹路、边缘渐隐**的暗底，
+   * 既托住那圈柱子，又不会被当成「那圈黑胶还在」。
+   */
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(20, 22, 28, 0.94) 0 70%,
+    rgba(14, 15, 21, 0.78) 86%,
+    rgba(10, 11, 15, 0.3) 100%
+  );
+  box-shadow: 0 24px 58px rgba(0, 0, 0, 0.42);
+}
+html[data-shell='phone'] .imm-mp-disc[data-spec='true'] .imm-disc-grooves,
+html[data-shell='phone'] .imm-mp-disc[data-spec='true'] .imm-disc-gloss,
+html[data-shell='car'] .imm-mp-disc[data-spec='true'] .imm-disc-grooves,
+html[data-shell='car'] .imm-mp-disc[data-spec='true'] .imm-disc-gloss {
+  opacity: 0;
+}
+html[data-shell='phone'] .imm-mp-disc[data-spec='true'] .imm-disc-label,
+html[data-shell='car'] .imm-mp-disc[data-spec='true'] .imm-disc-label {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.07), 0 10px 26px rgba(0, 0, 0, 0.42);
+}
+/* 环形频谱画布：铺满整个圆盘（绘制时按盘心/半径算，尺寸随 CSS 走） */
+html[data-shell='phone'] .imm-mp-disc .imm-disc-spec,
+html[data-shell='car'] .imm-mp-disc .imm-disc-spec {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /*
+   * 必须显式抬层级。`.imm-disc-spin` 带 `transform` 动画 = 独立合成层，
+   * 画布排在它后面**不等于**画在上面——实测整圈柱子被那张透明层吃掉，
+   * 页面上一条都看不见（DOM 里 getImageData 全是金色，截图里空空如也）。
+   */
+  z-index: 1;
+}
+/* 唱臂压在频谱之上：柱子长到 0.96R 时会顶到唱头下面，别让它盖住唱臂 */
+html[data-shell='phone'] .imm-mp-disc .imm-disc-hole,
+html[data-shell='car'] .imm-mp-disc .imm-disc-hole {
+  z-index: 3;
+}
+/* 封面 / 唱片切换钮：坐在歌名那一行的右端（用户要求从封面右下角挪过来），
+   视觉 36、热区 44。
+
+   右边**不能**给负 margin：`.imm-mpager` 是 `overflow:hidden`（要裁住 200% 宽的
+   轨道），往外顶多少就被切多少——用户看到的是「切换封面和唱片的按钮超出容器、
+   只显示了一部分」。这里让热区正好落在行的内容边上（meta 自己还有 2px 内边距）。 */
+html[data-shell='phone'] .imm-mp-vswitch {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: -2px 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: var(--hd-text-2);
+  background: var(--hd-surface-2);
+  box-shadow: inset 0 0 0 1px var(--hd-line-subtle);
+}
+html[data-shell='phone'] .imm-mp-vswitch:active { background: var(--hd-surface-3); }
+
+/* ---------- 两整页：封面页 / 歌词页 ---------- */
+html[data-shell='phone'] .imm-mp-track {
+  display: flex;
+  flex-direction: row;
+  width: 200%;
+  flex: 1 1 auto;
+  min-height: 0;
+  will-change: transform;
+  backface-visibility: hidden;
+}
+html[data-shell='phone'] .imm-mp {
+  width: 50%;
+  height: 100%;
+  min-height: 0;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* 封面页：封面吃掉余量、歌名和歌词紧跟其后。
+   千万别在这页用 justify-content:center —— 歌名会被推到中间带里居中，
+   上中下各空一块，就是用户说的「被分成三部分」。
+
+   overflow 必须是 visible：横滑时封面靠反向平移钉在原地，会伸到本页右边界
+   外面一格（那里正好是歌词页的位置，被它盖住）。这一页要是一裁，
+   滑动中封面就只剩左半边。 */
+html[data-shell='phone'] .imm-mp[data-p='art'] {
+  justify-content: flex-start;
+  padding-bottom: 4px;
+  overflow: visible;
+}
+
+/* 歌名 / 歌手 · 专辑（右侧挂封面/唱片切换钮） */
+html[data-shell='phone'] .imm-mp-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 2px 0;
+}
+html[data-shell='phone'] .imm-mp-metatxt {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+html[data-shell='phone'] .imm-mp-title {
+  margin: 0;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.28;
+  color: var(--hd-text-1);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+html[data-shell='phone'] .imm-mp-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html[data-shell='phone'] .imm-mp-sub {
+  margin: 7px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--hd-text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+html[data-shell='phone'] .imm-mp-sub .a { color: var(--hd-text-2); flex: none; }
+html[data-shell='phone'] .imm-mp-sub .sep { opacity: 0.5; }
+html[data-shell='phone'] .imm-mp-sub .b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 两条歌词：当前句 + 下一句，左对齐（照用户给的 QQ 音乐那屏）。
+   两行**同一号字**（21 / 14.5 那种一大一小用户看着不齐），
+   靠颜色和字重分主次；长句最多折两行，不缩字号。 */
+html[data-shell='phone'] .imm-mp-lyr {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  padding: 18px 2px 4px;
+  overflow: hidden;
+}
+html[data-shell='phone'] .imm-mp-lyr[data-empty='true'] { padding: 18px 2px 8px; gap: 6px; }
+html[data-shell='phone'] .imm-mp-lyr .imp-l {
+  max-width: 100%;
+  font-size: 18px;
+  line-height: 1.42;
+  /* 上一句用 --hd-text-2 再乘 .7：浅色主题下 --hd-text-3 本身就是淡灰，
+     再压到 .7 就快看不见了 */
+  color: var(--hd-text-2);
+  text-align: left;
+  /* 歌词一律允许折行（最多两行）：一首中文词里长句很常见，
+     截成省略号看着像「歌词坏了」 */
+  white-space: normal;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  transition: color 200ms ease, opacity 200ms ease;
+}
+html[data-shell='phone'] .imm-mp-lyr .imp-l.next { opacity: 0.7; }
+html[data-shell='phone'] .imm-mp-lyr .imp-l.cur {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--hd-text-1);
+  opacity: 1;
+}
+html[data-shell='phone'] .imm-mp-lyr .imp-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+html[data-shell='phone'] .imm-mp-lyr .imp-empty .t { font-size: 15px; color: var(--hd-text-dim); }
+html[data-shell='phone'] .imm-mp-lyr .imp-empty .s { font-size: 12px; color: var(--hd-text-3); }
+
+/* 5 颗操作 */
+html[data-shell='phone'] .imm-mp-acts {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  padding: 2px 2px 6px;
+}
+html[data-shell='phone'] .imm-mact,
+html[data-shell='phone'] .imm-mact-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 6px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--hd-text-dim);
+}
+html[data-shell='phone'] .imm-mact { flex: 1 1 0; min-width: 0; }
+html[data-shell='phone'] .imm-mact-btn { color: inherit; }
+html[data-shell='phone'] .imm-mact.on { color: var(--hd-accent-text); }
+html[data-shell='phone'] .imm-mact-dl {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  /* 它是 <span> 套 <button>，两层 padding 会叠起来，文字比其它四颗低一截 */
+}
+html[data-shell='phone'] .imm-mp-acts .imm-mact-dl .imm-mact-btn { padding: 0; }
+html[data-shell='phone'] .imm-mact.off { opacity: 0.4; }
+
+/* ---------- 歌词页 ---------- */
+/* 歌词页：横滑时它是「盖上来的那一层」，底下正好压着钉在原地的封面，
+   所以底色必须不透明（和 .imm 同一个底色），而且必须显式抬层级——
+   封面的 stage 带 z-index:1，不压住它就会穿到歌词页上面来（实测一整块
+   唱片浮在歌词上）。pad 下沿留 4px 给控制条。 */
+html[data-shell='phone'] .imm-mp[data-p='lyric'] {
+  padding-bottom: 4px;
+  /*
+   * 用 **--hd-bg-base**，不是 --sy-bg-base。
+   *
+   * 播放页永远是深色（见文件开头「浅色主题下把 --hd-* 换回深色那一套」），
+   * 歌词文字用的是 --hd-text-*；这里却取主题底色，浅色主题 / 纸感主题下
+   * 就成了「米白卡片 + 近白歌词」——用户截图里那句「主题不匹配、文字看不清」。
+   * --hd-bg-base 在 .imm 子树里恒为近黑，和播放页其它区域同一块底色。
+   */
+  background: var(--hd-bg-base);
+  position: relative;
+  z-index: 2;
+}
+html[data-shell='phone'] .imm-mp-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+html[data-shell='phone'] .imm-mp-tab {
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--hd-text-dim);
+  font-size: 12.5px;
+}
+html[data-shell='phone'] .imm-mp-tab.on {
+  background: var(--hd-surface-3);
+  color: var(--hd-text-1);
+}
+/* 歌词对齐三档（居左 / 居中 / 居右）：贴在 tab 行右端。
+   手机上以前压根没有这个入口，还硬写成左对齐——用户说的「不能调整」就是这个。 */
+html[data-shell='phone'] .imm-mp-align {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+html[data-shell='phone'] .imm-mp-align-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--hd-text-3);
+}
+html[data-shell='phone'] .imm-mp-align-btn.on {
+  color: var(--hd-text-1);
+  background: var(--hd-surface-3);
+}
+html[data-shell='phone'] .imm-mp-align-btn:active { background: var(--hd-surface-3); }
+/* 歌词组件自身不设高，空态（暂无歌词 / 搜索按钮）会缩成一小条贴在顶上 */
+html[data-shell='phone'] .imm-mp-lyricbody > .lyrics { height: 100%; }
+/*
+ * 只留**一层**渐隐。
+ *
+ * `.lyrics.immersive` 自己带 18%~82% 的 mask，外面 `.imm-mp-lyricbody`
+ * 又套了一层 9%~84%——两层相乘，可见区被压到中间约 60%，上下各有一大块
+ * 是彻底透明的「黑边」。屏幕上看着就是「歌词区只有中间一条」。
+ * 这里把内层关掉，渐隐统一交给外层按容器高度算。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+html[data-shell='phone'] .imm-mp-lyricbody {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 自己**不滚**：歌词组件靠内部 transform 滚动，外面再套一层滚动会让
+     超出容器的最后几行直接压到进度条上（实测底部会叠字）。这里只做裁剪，
+     上下渐隐，滚到边界的半行不会硬邦邦地切断。 */
+  overflow: hidden;
+  /* 上下渐隐：滚到边界的半行不会硬邦邦地切一刀。
+     渐隐要够长（9% / 16%），太短仍是「切了一半」的观感。 */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 9%, #000 84%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 9%, #000 84%, transparent 100%);
+}
+/* 右下角「歌词 · lrclib」来源角标：手机歌词窗口矮，它会压在最后一行上 */
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics-source { display: none; }
+
+/*
+ * Folia（歌词动效）在手机歌词页。
+ *
+ * `.folia` 是 `flex:1` + 内部 `.folia-stage` 绝对定位 inset:0 ——
+ * 容器不是 flex 上下文时它一点高度都没有，舞台塌成 0，页面上什么都看不见
+ * （用户看到的「打开歌词动效就没反应」）。这里把容器补成列向 flex，
+ * 再给 `.folia` 一个确定高度。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='lyric'] {
+  display: flex;
+  flex-direction: column;
+}
+html[data-shell='phone'] .imm-mp-lyricbody > .folia {
+  flex: 1 1 auto;
+  height: 100%;
+}
+/*
+ * flat 版面：一句一行居中。左边那列时间戳（`foot-time` 那套）在 360 宽上
+ * 会和居中的句子抢位置，长句直接被挤成两截 —— 手机上不显示。
+ */
+html[data-shell='phone'] .folia[data-flat='true'] .folia-time,
+html[data-shell='phone'] .folia[data-flat='true'] .fline-time { display: none; }
+/* 底部来源角标同理：歌词区本来就矮 */
+html[data-shell='phone'] .folia[data-flat='true'] .folia-foot { display: none; }
+/* 手机上的光晕收一档：vmax 单位在竖屏上是按长边算的，原尺寸会把整屏糊成一片 */
+html[data-shell='phone'] .folia[data-flat='true'] .folia-blob.a {
+  width: 68vmax; height: 52vmax; left: -26vmax;
+  top: calc(-18vmax + var(--fl-prog, 0) * 10vmax);
+}
+html[data-shell='phone'] .folia[data-flat='true'] .folia-blob.b {
+  width: 58vmax; height: 44vmax; right: -24vmax;
+  bottom: calc(-18vmax - var(--fl-prog, 0) * 8vmax);
+}
+/*
+ * 手机上的「焦点」只留一份。
+ *
+ * 360dp 宽的屏幕同时能看到四五行字，前后句用正文色 + 0.5 不透明度时，
+ * 它们和白底正文一样抢眼，正在唱的那句反而没有存在感（用户 2026-11-09：
+ * 「动效没之前强烈，注意力都被其他句吸走了」）。三件事一起收：
+ *   ① 前后句压暗、退到次要文字色（字号仍然一样——「一行大一行小」被否过）；
+ *   ② 当前句托一层更强的同色辉光，把这一行从背景里拎出来；
+ *   ③ 唱过的字留在强调色上（KTV 那种「走字」感），一句唱完能看到一整条进度。
+ */
+html[data-shell='phone'] .folia[data-flat='true'] .fline { color: var(--sy-text-2); }
+html[data-shell='phone'] .folia[data-flat='true'] .folia-line {
+  text-shadow:
+    0 2px 30px rgba(0, 0, 0, 0.42),
+    0 0 54px var(--sy-accent-a26),
+    0 0 96px var(--sy-accent-a15);
+}
+html[data-shell='phone'] .folia[data-flat='true'] .fw[data-s='passed'] {
+  color: var(--sy-accent-soft);
+  opacity: 0.92;
+  text-shadow:
+    0 0 24px var(--sy-accent-a20),
+    0 2px 26px rgba(0, 0, 0, 0.34);
+}
+
+/* ---------- 评论面板 ----------
+ * 这层只做排版，不遮不裁：评论本身是 `.cm-wrap`（overflow-y:auto），
+ * 之前外面 `touch-action:none` 把它的原生滚动一起封死了——「评论不能滑动」。
+ * 现在手势层放行纵向，这里再把高度和滚动惯性补齐。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] {
+  /*
+   * 顶部**不做**渐隐：列表第一行是「7726 条评论 · 来自酷狗」，
+   * 那行被 5% 的透明压过之后，用户以为上面盖了一层遮罩，
+   * 连带觉得「加载更多」也点不动。底部只留最后一小段，够提示「还能滚」。
+   */
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 94%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0, #000 94%, transparent 100%);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] > .cm-wrap {
+  height: 100%;
+  /* 操作行已经藏掉了，这里仍留一脚高：最后一条「加载更多」滚到底时
+     不会被 tab 行/底部控制压着，也不会贴在安全区边上。 */
+  padding-bottom: 72px;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+/*
+ * 吸顶的「2.8 万条评论 · 来自酷狗」那一条。
+ *
+ * 原来底色是 `color-mix(#06070b 92%, transparent)`，等于留了 8% 的透，
+ * 列表滚到它下面时字会从缝里透出来——看着像「上面盖了一层遮罩」，
+ * 用户还以为这条也点不动。手机上写死一个实底，边界干净。
+ *
+ * 实底走 `--hd-bg-elevated`：深色主题 #14161c、浅色主题白卡片。
+ * 原来写死 #080a10，浅色主题下就是一条近黑带压在浅色播放页顶上。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-sum {
+  background: var(--hd-bg-elevated);
+  border-bottom: 1px solid var(--hd-line-subtle);
+  border-radius: 0;
+  margin-left: 0;
+  margin-right: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/*
+ * ---------- 评论面板 · 触屏配色 ----------
+ *
+ * immersive.css 里这一整套（面板底、来源胶囊、引用块、楼中楼竖线、图片占位）
+ * 都是用 `color-mix(in srgb, …)` 写的：桌面 WebView2 认，但这台真机是 Chrome 104，
+ * 整条声明直接判无效——
+ *   · `.cm-wrap` 的背景没了 → 评论直接压在封面糊图上，一片灰蒙蒙，
+ *     深色文字半隐在里面，看着像「一个没做完的深色页」；
+ *   · 用户名 / 分组 / 引用块的颜色也没了，全退回继承色。
+ * 深色主题下靠封面糊图还能凑合看，浅色主题下就是「白页 + 灰块 + 糊字」。
+ *
+ * 这里按令牌重写一遍：--hd-* 在深色主题是白 4%~14% 的提亮，
+ * 在浅色主题是黑 3.5%~14% 的压深，两套主题各自成立，也不用再写第二遍。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-wrap,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-wrap {
+  background: var(--hd-bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--hd-line-subtle);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-ava,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-ava {
+  background: var(--hd-surface-2);
+  box-shadow: inset 0 0 0 1px var(--hd-line-subtle);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-user,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-user {
+  color: var(--hd-accent-text);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-group,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-group {
+  color: var(--hd-text-3);
+}
+/* 正文是这一屏唯一要长时间读的东西，给定满档文字色 */
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-text,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-text {
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-quote,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-quote {
+  background: var(--hd-surface-1);
+  border-left-color: var(--hd-line-strong);
+  color: var(--hd-text-2);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-quote-u,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-quote-u {
+  color: var(--hd-accent-text);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-src,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-src {
+  color: var(--hd-text-2);
+  background: var(--hd-surface-2);
+  box-shadow: inset 0 0 0 1px var(--hd-line-subtle);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-img,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-img {
+  background: var(--hd-surface-1);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-img.bad,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-img.bad {
+  box-shadow: inset 0 0 0 1px var(--hd-line-strong);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-replies,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-replies {
+  border-left-color: var(--hd-line-subtle);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-reply .cm-text,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-reply .cm-text {
+  color: var(--hd-text-2);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-like,
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-like-num,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-like,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-like-num {
+  color: var(--hd-text-3);
+}
+html[data-shell='phone'] .imm-mp-lyricbody[data-panel='comments'] .cm-more,
+html[data-shell='tablet'] .imm-mp-lyricbody[data-panel='comments'] .cm-more {
+  color: var(--hd-accent-text);
+}
+
+/*
+ * 歌词字号统一 19：Folia 那种「一行大一行小」是按距离缩放出来的，
+ * 看着像排版坏了——用户原话「歌词有的显示大，有的显示小」。
+ * 主次只靠亮度和字重分。
+ * 对齐默认**居中**（用户：「默认居中对齐」），三档由 `data-align` 覆盖。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line {
+  font-size: 19px;
+  line-height: 1.4;
+  padding: 0 6px;
+  justify-content: center;
+  text-align: center;
+  letter-spacing: 0.01em;
+  /*
+   * 非当前句用**次要文字色**，不写死。
+   *
+   * 原来写死 `#adb2bd`（≈65% 白），因为那时播放页恒为近黑底。现在浅色主题下
+   * 播放页也是浅的，这个值落在白底上等于「歌词只剩一句」——同一类问题换个方向又来一次。
+   * `--hd-text-2` 在深色主题是 #8b90a0、浅色主题是 #5A5E6C，两边都比当前句弱一档。
+   */
+  color: var(--hd-text-2);
+  opacity: 1;
+}
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics[data-align='left'] .lyric-line {
+  justify-content: flex-start;
+  text-align: left;
+}
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics[data-align='right'] .lyric-line {
+  justify-content: flex-end;
+  text-align: right;
+}
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line.active {
+  font-size: 19px;
+  font-weight: 600;
+  opacity: 1;
+  text-shadow: none;
+}
+/*
+ * KTV 染色（当前句）在手机上是坏的：基础样式用 `color-mix()` 拼未唱段的颜色，
+ * WebView 104 不认 color-mix → 整条 `background-image` 作废，而文字又被设成
+ * `color: transparent`，于是**当前句整行消失**（看着像漏了一句）。
+ * 这里用写死的 rgba 重写渐变，唱过的部分是强调色、没唱的是 40% 白，
+ * 逐字推进的效果保留。
+ */
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics .lyric-text.kara {
+  background-image: linear-gradient(
+    90deg,
+    var(--hd-accent-text) 0%,
+    var(--hd-accent-text) calc(var(--kara, 0) * 100% - 0.5%),
+    var(--hd-text-1) calc(var(--kara, 0) * 100% + 2%)
+  );
+  -webkit-text-fill-color: transparent;
+  filter: none;
+}
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line:hover { opacity: 1; }
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line.active:hover { opacity: 1; }
+
+/* 长句：不缩字号，超出就裁；唱到这一句时文字块按 --wrap-x 横向推到末尾露出来 */
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics[data-wrap='true'] .lyric-line { overflow: hidden; }
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics[data-wrap='true'] .lyric-line > .lyric-text {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics[data-wrap='true'] .lyric-line.active > .lyric-text {
+  /* 自然宽度：让它撑出整行，位移才有东西可露 */
+  flex: 0 0 auto;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  will-change: transform;
+  transform: translateX(var(--wrap-x, 0px));
+}
+/* 居中 + 长句会互相打架：居中的行比盒子宽时，左右同时被裁，
+   而横推只能往左走 → 左边的字永远露不出来。当前句一旦超出，就临时靠左，
+   唱到哪字推到哪字；下一句恢复居中。 */
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics[data-wrap='true'][data-ov='true'] .lyric-line.active {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+/* ---------- 底部固定区 ---------- */
+html[data-shell='phone'] .imm-mp-foot {
+  flex: none;
+  padding: 2px 0 2px;
+  /* 底色交给 `.imm-scrim` 那层全屏渐变（见文件上方的说明）：
+     这里再铺一块只有内容宽的深色，屏幕两边就会漏出两条浅色。 */
+  background: none;
+}
+/* 进度条：手机上要粗一点好点（QQ 音乐也是 3dp 的线 + 一圈热区） */
+html[data-shell='phone'] .imm-mp-foot .imm-progress { margin: 0; padding: 0 2px; }
+html[data-shell='phone'] .imm-mf-ctl {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 0;
+}
+html[data-shell='phone'] .imm-mf-l,
+html[data-shell='phone'] .imm-mf-r {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+/* 上一首 / 下一首与播放键之间留 22px（18 padding + 4 播放键外边距）。
+   两组仍是 space-between：循环 / 队列留在最外侧，切歌键靠中间。
+   上一版把组内距离压到 0、切歌键直接贴住播放键（用户：「又太近了，
+   不是让你稍微近一点吗，你这也太近了」）——取两次的中间值。 */
+html[data-shell='phone'] .imm-mf-l { justify-content: space-between; padding-right: 18px; }
+html[data-shell='phone'] .imm-mf-r { justify-content: space-between; padding-left: 18px; }
+html[data-shell='phone'] .imm-mf-ctl .play-primary {
+  width: 66px;
+  height: 66px;
+  border-radius: 50%;
+  flex: none;
+  margin: 0 4px;
+}
+html[data-shell='phone'] .imm-mf-ctl .play-primary svg { width: 26px; height: 26px; }
+html[data-shell='phone'] .imm-mf-ctl .icon-btn { width: 48px; height: 48px; }
+html[data-shell='phone'] .imm-mf-ctl .icon-btn svg { width: 27px; height: 27px; }
+html[data-shell='phone'] .imm-mf-pills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px 0;
+}
+
+/* 切歌：手机上「上下滑」换歌，新的一首要**顺着手指的方向**滑进来——
+   往上滑（下一首）从下面顶上来，往下滑（上一首）从上面落下来。
+
+   以前这两条用的是横滑的 `imm-slide-next/prev`（从右/从左进来），
+   和手势方向垂直，看着就是「手往上了，画面却从右边窜出来」。
+   **只让封面/唱片本体走**，歌名与歌词带用更小的位移跟一段；唱臂反向走
+   同样的距离，视觉上钉在原地（用户：「指针没必要跟着滑动」）。
+
+   位置必须留在文件末尾：这一段和上面的翻页动画、进场动画特异性相同，
+   按加载顺序赢，写到前面会被后面那些盖掉。 */
+html[data-shell='phone'] .imm-mpager[data-slide='next'] .imm-mp-cover,
+html[data-shell='phone'] .imm-mpager[data-slide='next'] .imm-mp-disc {
+  animation: imm-vslide-next 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+html[data-shell='phone'] .imm-mpager[data-slide='next'] .imm-mp-meta,
+html[data-shell='phone'] .imm-mpager[data-slide='next'] .imm-mp-lyr {
+  animation: imm-vslide-next-sm 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+html[data-shell='phone'] .imm-mpager[data-slide='prev'] .imm-mp-cover,
+html[data-shell='phone'] .imm-mpager[data-slide='prev'] .imm-mp-disc {
+  animation: imm-vslide-prev 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+html[data-shell='phone'] .imm-mpager[data-slide='prev'] .imm-mp-meta,
+html[data-shell='phone'] .imm-mpager[data-slide='prev'] .imm-mp-lyr {
+  animation: imm-vslide-prev-sm 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+@keyframes imm-vslide-next {
+  from { opacity: 0; transform: translate3d(0, 84px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes imm-vslide-prev {
+  from { opacity: 0; transform: translate3d(0, -84px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes imm-vslide-next-sm {
+  from { opacity: 0; transform: translate3d(0, 38px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes imm-vslide-prev-sm {
+  from { opacity: 0; transform: translate3d(0, -38px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-shell='phone'] .imm-mpager[data-slide] .imm-mp-cover,
+  html[data-shell='phone'] .imm-mpager[data-slide] .imm-mp-disc,
+  html[data-shell='phone'] .imm-mpager[data-slide] .imm-mp-meta,
+  html[data-shell='phone'] .imm-mpager[data-slide] .imm-mp-lyr { animation: none; }
+}
+
+/* 下载那颗是 <span class="imm-mact imm-mact-dl imm-dl-wrap">，会被上面那条
+   「手机隐藏 imm-dl-wrap」的规则整颗吃掉（它不带 imm-act-dl 类名）。
+   新操作行里它是第二颗，必须显出来。 */
+html[data-shell='phone'] .imm-mp-acts .imm-dl-wrap { display: flex; }
+
+/* ------------------------------------------------------------------ */
+/* 频谱设置弹窗（手机播放页 →「更多」→ 频谱样式）                      */
+/* ------------------------------------------------------------------ */
+
+/* 比 ActionSheet 高一层：两个弹层交接时不会互相盖住 */
+.spx-scrim { z-index: 132; }
+.spx { max-height: 80vh; }
+
+/* 头部那颗开关：button 上复用 .sheet-sw 的外观，去掉原生边框与内边距 */
+.spx-swb { border: 0; padding: 0; margin-right: 2px; appearance: none; }
+
+/* 录音权限提示行：只在「频谱开着但拿不到真实数据」时出现（安卓）。
+   右侧那颗按钮要么再弹一次系统框（denied），要么跳设置（blocked / 仅此一次）。 */
+.spx-perm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  /* Chrome 104 不认 color-mix，这里写死 rgba */
+  background: rgba(255, 196, 92, 0.13);
+  border: 1px solid rgba(255, 196, 92, 0.26);
+}
+.spx-perm[data-kind='blocked'] {
+  background: rgba(255, 118, 118, 0.13);
+  border-color: rgba(255, 118, 118, 0.3);
+}
+.spx-perm-t {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--hd-text-2);
+}
+.spx-perm-b {
+  flex: none;
+  border: 0;
+  padding: 5px 11px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #0b0c10;
+  background: #ffc45c;
+  cursor: pointer;
+}
+.spx-perm[data-kind='blocked'] .spx-perm-b { background: #ff7676; }
+.spx-perm-b:active { transform: scale(0.96); }
+
+.spx-body { margin-top: 14px; transition: opacity 160ms linear; }
+/* 频谱关掉时两组选项压暗且不吃点击，但**保留内容**——
+   用户要能看见「有这些选项，只是现在是关的」 */
+.spx-body[data-off='1'] { opacity: .42; pointer-events: none; }
+
+.spx-sec { margin-bottom: 14px; }
+.spx-sec:last-child { margin-bottom: 2px; }
+.spx-label {
+  margin-bottom: 8px;
+  font-size: 10px;
+  letter-spacing: .08em;
+  color: var(--hd-text-3);
+}
+
+.spx-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.spx-pos { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* 卡片底色走令牌：深色主题是白 4%，浅色主题是黑 3.5%，两边都不用写第二份 */
+.spx-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 54px;
+  padding: 9px 11px;
+  border: 1px solid var(--hd-line-strong);
+  border-radius: 12px;
+  background: var(--hd-surface-1);
+  color: var(--hd-text-1);
+  text-align: left;
+  transition: border-color 140ms linear, background 140ms linear;
+}
+.spx-card.on {
+  border-color: var(--hd-accent);
+  background: var(--hd-surface-2);
+}
+.spx-n { font-size: 13px; font-weight: 600; line-height: 1.25; }
+.spx-d { font-size: 10px; line-height: 1.35; color: var(--hd-text-3); }
+.spx-tick { position: absolute; top: 8px; right: 8px; color: var(--hd-accent); }
+.spx-pos .spx-card { padding: 9px 8px; min-height: 62px; }
+.spx-pos .spx-n { font-size: 12px; }
+.spx-pos .spx-d { font-size: 9.5px; }
+
+/* ------------------------------------------------------------------ */
+/* 频谱横条（手机播放页，位置=页面底部 / 页面顶部）                     */
+/* ------------------------------------------------------------------ */
+/* 作为 `.imm-mpager` 的 flex 子项参与布局，**不做绝对定位**：
+   绝对定位要猜 bottom 值，一旦操作行高度变了就压住按钮；
+   这里占掉固定的 34px，剩下的本来也该让给封面。 */
+html[data-shell='phone'] .imm-mp-specbar,
+html[data-shell='car'] .imm-mp-specbar {
+  flex: none;
+  height: 34px;
+  padding: 0 10px;
+  pointer-events: none;   /* 纯装饰：别挡住下面的滑动与点击 */
+  opacity: .92;
+}
+html[data-shell='phone'] .imm-mp-specbar canvas,
+html[data-shell='car'] .imm-mp-specbar canvas { display: block; width: 100%; }
+
+/* 设置页 → 频谱：手机上也要能改（以前整段只对桌面渲染）。
+   pages.css 里 .pos-card 用的是 color-mix，Chrome 104 不认会整条作废，
+   这里用令牌重写一遍，顺带让它在浅色主题下也是黑 3.5% 而不是一块白。 */
+html[data-shell='phone'] .pos-card,
+html[data-shell='car'] .pos-card {
+  background: var(--hd-surface-1);
+  border-color: var(--hd-line-strong);
+}
+html[data-shell='phone'] .pos-card.active,
+html[data-shell='car'] .pos-card.active {
+  background: var(--hd-accent-a15);
+  border-color: var(--hd-accent);
+  box-shadow: none;
+}
+html[data-shell='phone'] .pos-desc,
+html[data-shell='car'] .pos-desc {
+  display: block;
+  font-size: 9.5px;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--hd-text-3);
+}
+
+/* 手机页头右上角：频谱 + 更多 两颗并排。
+   不直接并进 .imm-top-m 的 space-between，否则三段变四段、
+   kicker 会被挤到中间偏左，分页点跟着乱跑。 */
+html[data-shell='phone'] .imm-m-topacts {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+html[data-shell='phone'] .imm-m-spec { width: 40px; height: 40px; color: var(--hd-text-2); }
+
+/* ------------------------------------------------------------------ */
+/* 手机 · 顶部提示条（播放失败 / 换源那一条）                           */
+/* ------------------------------------------------------------------ */
+/*
+ * 手机上提示条**一律挂顶部**，不再走 `.low` 的「挪到下方」。
+ *
+ * 那套是给桌面播放页定的：往下挪压的是频谱，不挡任何东西。手机底部是
+ * 134 高的固定控制区（进度 / 播放键 / 胶囊），往下挪无论怎么算都会盖住
+ * 进度条或播放键——真机上看着就是「一块提示条糊在控制区上」。
+ * 顶部这条位置压在封面上，那里本来也点不出东西，是最干净的一档。
+ *
+ * `bottom: auto` 不能省：`fixed` 同时有 top 和 bottom 时高度会被拉满整屏
+ * （试过，块白板直接铺满）。
+ */
+html[data-shell='phone'] .app-toast,
+html[data-shell='phone'] .app-toast.low {
+  top: calc(var(--sy-safe-top, 40px) + 52px);
+  bottom: auto;
+  animation: toast-drop 200ms var(--sy-ease-panel);
+}
+
+
+/* ====================================================================
+ * 平板横屏：两列（侧栏 + 内容），右侧「正在播放」栏让位给底部播放条
+ * --------------------------------------------------------------------
+ * 横屏时 340 的右栏按比例吃掉的是整屏的四分之一，剩下那截内容区
+ * 比手机还窄——用户原话「平板横屏不要做三列布局，两列就行」。
+ * 竖屏保留右栏（那时它是一块自然的侧边信息区，底下压着也不抢宽度）。
+ * 播放条是同一份 `.playbar`，桌面那套样式本来就能用，只是平板默认
+ * 把它 display:none 了（因为竖屏有右栏）；横屏这里放回来。
+ * ==================================================================== */
+@media (orientation: landscape) {
+  html[data-shell='tablet'] .tab-dock { display: none; }
+  html[data-shell='tablet'] .page { right: 0; }
+  html[data-shell='tablet'] .playbar {
+    display: flex;
+    left: 232px;
+    right: 0;
+  }
+}
+
+
+/* ====================================================================
+ * 手机横屏（780×360 这一档）：底部导航条 → 左侧图标条，播放页改两列
+ * --------------------------------------------------------------------
+ * 竖屏那套是「整屏竖着排」的地基，横过来只剩 360 高，底部 64 的导航条 +
+ * 60 的播放条就吃掉三分之一，中间内容区只剩 200 出头——用户说的
+ * 「横屏过来还是原模原样的按钮，很多页面超出去了看不到」。
+ *
+ * 这里按 QQ 音乐 / 网易云的车载横屏做法：
+ *   1. 导航挪到左边一条 68 宽的图标条，页面拿到整高；
+ *   2. 播放页从「封面在上、信息在下」改成左右两列（封面 / 信息+歌词），
+ *      封面按**高度**定尺寸，横屏才不会顶出屏幕；
+ *   3. 操作行只留图标，底部控制收窄，给内容让出高度。
+ *
+ * 高度门槛 520：折叠屏展开、小平板横屏都能命中；再高的横屏（车机 720）
+ * 走 car 那套，不会误伤。
+ * ==================================================================== */
+@media (orientation: landscape) and (max-height: 520px) {
+  /* ---------- 导航：底部横条 → 左侧竖条（图标 + 小标签） ----------
+   * 宽度从 68 加到 76：68 只够放一颗图标，导航就退化成「五个猜谜图标」——
+   * 用户的原话是「歌单这些都显示不全」。横屏高度紧，但宽度富裕，
+   * 竖排「图标 + 9.5px 标签」只多占 8px 宽，能一眼看懂每个入口。
+   */
+  html[data-shell='phone'] .sidebar {
+    left: 0;
+    right: auto;
+    top: 0;
+    bottom: 0;
+    width: 76px;
+    height: auto;
+    flex-direction: column;
+    justify-content: center;
+    padding: 4px 4px;
+    border-top: 0;
+    border-right: 1px solid var(--hd-line-subtle);
+  }
+  html[data-shell='phone'] .sb-nav {
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    height: auto;
+    justify-content: center;
+  }
+  /*
+   * 按钮本身要**撑满整条宽度**。
+   *
+   * 竖屏时它是「横条里的一个等分格子」，靠 flex 分宽度；改成竖排之后标签一隐藏，
+   * 宽度就缩成图标那 22px，而选中态的胶囊 `::before` 是写死的 46×26 ——
+   * 胶囊比按钮还宽、还挂在按钮顶部，看起来就是「背景没盖在图标上」。
+   * 这里给足宽高、再让胶囊以中心对齐。
+   */
+  html[data-shell='phone'] .sb-item {
+    width: 100%;
+    height: auto;
+    min-height: 56px;
+    flex: 0 0 auto;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    padding: 6px 0 5px;
+    border-radius: 12px;
+  }
+  html[data-shell='phone'] .sb-label {
+    display: block;
+    font-size: 9.5px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  html[data-shell='phone'] .sb-item svg { width: 21px; height: 21px; }
+  /*
+   * 选中胶囊不用单独写：上面那条 inset 规则在横屏同样成立
+   * （这一格是 `width:100%` 的竖条，胶囊自然罩住图标 + 9.5px 标签），
+   * 竖横两套从此一致——用户要的就是这个。
+   */
+
+  /* ---------- 页面 / 播放条：让开左侧 68 ---------- */
+  /*
+   * 安全区**夹一下**：`--sy-safe-bottom` 是原生量出来的「WebView 距屏幕下沿多少」，
+   * 一旦在 WebView 还没完成布局时取到（熄屏、刚启动、横竖切换的中间态），
+   * 它会是个离谱的大数（实测拿到过 914px），整页会被顶出屏幕。
+   * 横屏本来就没有底部手势条要躲，夹到 24 足够。
+   */
+  html[data-shell='phone'] .page {
+    inset: calc(8px + min(var(--safe-top), 32px)) 0
+      calc(var(--phone-dock) + 12px + min(var(--safe-bottom), 24px)) 76px;
+    padding: 0 16px;
+  }
+  html[data-shell='phone'] .playbar {
+    left: 86px;
+    right: 12px;
+    bottom: calc(8px + min(var(--safe-bottom), 24px));
+    height: 52px;
+  }
+
+  /* ---------- 歌单详情：整个页头压成一行 ----------
+   * 横屏能给到内容区的只有 332 - 40(上) - 88(下) ≈ 204 高，
+   * 而竖屏那套页头是「返回键 32 + 92 封面 + 标题 + 元信息 + 一行 34 的按钮」
+   * 叠起来的 186 —— 列表只剩 30，一屏看不见一首歌。
+   *
+   * 横过来不再纵向堆：返回键挪到最左边当一行里的第一格，封面缩到 44，
+   * 标题和元信息叠在它右边，动作按钮贴最右。整块落到 44 出头，
+   * 列表拿回 150（两行半）。宽的地方横着用，这才是横屏该干的事。
+   */
+  html[data-shell='phone'] .sr-detail-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  html[data-shell='phone'] .sr-back {
+    flex: none;
+    height: 28px;
+    margin-bottom: 0;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+  html[data-shell='phone'] .sr-detail-hero {
+    flex: 1;
+    min-width: 0;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    grid-template-areas:
+      'cover name acts'
+      'cover meta acts';
+    column-gap: 10px;
+    row-gap: 0;
+    align-items: center;
+    padding-bottom: 0;
+  }
+  html[data-shell='phone'] .sr-detail-cover {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+  }
+  html[data-shell='phone'] .sr-detail-name {
+    align-self: end;
+    font-size: 13px;
+    line-height: 1.3;
+    -webkit-line-clamp: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  html[data-shell='phone'] .sr-detail-meta {
+    align-self: start;
+    gap: 6px;
+    font-size: 10px;
+  }
+  html[data-shell='phone'] .sr-detail-acts {
+    margin-top: 0;
+    gap: 6px;
+    justify-self: end;
+  }
+  html[data-shell='phone'] .sr-detail-acts .primary-btn,
+  html[data-shell='phone'] .sr-detail-acts .ghost-btn {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+
+  /* ---------- 多选工具条：别把半屏盖住 ----------
+   * 竖屏它是贴着播放条上沿的一块「计数 + 一排 42 圆钮」，129 高在 781 的屏上
+   * 只占六分之一；横屏只剩 332 高，同样一块就是**小半屏**，一行歌都露不出来。
+   * 这里收小圆钮、收紧留白，并把底边重新贴回播放条上沿（`--phone-tab` 那 60
+   * 在横屏已经挪到左边当导航条了，不该再让出来）。
+   */
+  html[data-shell='phone'] .lib-batchbar {
+    bottom: calc(68px + min(var(--safe-bottom), 24px));
+    padding: 6px 12px;
+    border-radius: 16px;
+    gap: 8px;
+    /* 横屏宽度富裕：把「已选 N 首」和「✕」都挪进同一行，
+       不再像竖屏那样让计数独占一行——那一行在 332 高的屏上是白扔的 21px。 */
+    grid-template-columns: auto minmax(0, 1fr) 30px;
+  }
+  html[data-shell='phone'] .lib-batchbar .bb-count {
+    grid-area: 1 / 1;
+    font-size: 11.5px;
+  }
+  html[data-shell='phone'] .lib-batchbar .bb-clear {
+    grid-area: 1 / 3;
+    width: 30px;
+    height: 30px;
+  }
+  html[data-shell='phone'] .lib-batchbar .bb-actions {
+    grid-area: 1 / 2;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(auto-fit, minmax(40px, 1fr));
+  }
+  html[data-shell='phone'] .lib-batchbar .bb-btn {
+    flex-direction: column;
+    gap: 3px;
+    font-size: 9px;
+  }
+  html[data-shell='phone'] .lib-batchbar .bb-btn svg {
+    width: 32px;
+    height: 32px;
+    padding: 8px;
+  }
+  /* 列表底部要让开这块条：横屏列表本来就矮，不留白最后一行会被压住 */
+  html[data-shell='phone'] .sr-list[data-selecting='true'] { padding-bottom: 64px; }
+
+  /* ---------- 播放页 ---------- */
+  html[data-shell='phone'] .imm-shell { padding: 4px 14px 6px; }
+  html[data-shell='phone'] .imm-top-m { height: 38px; }
+  html[data-shell='phone'] .imm-m-kicker { font-size: 12px; }
+
+  /*
+   * 封面页 / 歌词页**并排都露出来**，跟桌面端（`.imm-grid`）读起来是同一件事：
+   * 左边封面 + 歌名，右边整首歌词。
+   *
+   * 竖屏那套是「一列从上顶到下 + 横滑翻页」。横过来照搬，左右拉满 800 多宽之后
+   * 就成了「左边一坨、右边一大片黑」，操作行和进度条被扯到两头——用户原话
+   * 「横屏的播放页样式也没改」。横屏该做的是**换构图**，不是拉宽。
+   *
+   * 轨道本来就是 `display:flex; width:200%` + JS 打的 translate，
+   * 这里把宽度还成 100%、把 transform 归零，两页自然就成了左右两栏，
+   * DOM 一行都不用动（横滑手势随之失效，横屏本来也没地方滑）。
+   */
+  html[data-shell='phone'] .imm-mp-track {
+    width: 100%;
+    transform: none !important;
+    will-change: auto;
+  }
+  html[data-shell='phone'] .imm-mp { width: 50%; }
+  /* 两页都看得见了，那两颗「还有一页」的指示点就没意义，还会压住歌名 */
+  html[data-shell='phone'] .imm-pagedots { display: none; }
+
+  /* 左栏：封面撑满可用高度、水平居中，歌名歌手落在它下面 */
+  html[data-shell='phone'] .imm-mp[data-p='art'] {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    padding: 0 18px 4px 0;
+    overflow: hidden;
+  }
+  /*
+   * stage 一定要有**确定高度**，封面才能用 `height:100%` 算出尺寸。
+   * 给 `flex: 1 1 auto` + `min-height: 0` 就是让它吃满剩余高度；
+   * 里面再 flex 居中，封面按高度取正方形，宽高比由 aspect-ratio 顶住。
+   * （别用 grid + `justify-self:center`：auto 宽度遇上 `height:100%`+`aspect-ratio`
+   * 会互相等对方，最后解出 0 —— 实测封面直接塌成一条竖线。）
+   */
+  html[data-shell='phone'] .imm-mp-stage {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transform: none;
+    padding: 0;
+  }
+  /*
+   * 封面 / 唱片一律**按可用高度定尺寸**。
+   *
+   * 竖屏那套公式是 `clamp(200px, min(100vw - 48px, 46vh), 364px)`：横屏 372 高时
+   * 中间项算 170，却被下限 200 抬回去——而这一栏只有 190 高，封面必然顶出页头、
+   * 上半截被裁掉。改成「stage 撑满整行，封面取 height:100%」，尺寸跟着行高走，
+   * 高度再小也不会溢出；宽高比仍由 aspect-ratio 保持正方形。
+   */
+  html[data-shell='phone'] .imm-mp-cover,
+  html[data-shell='phone'] .imm-mp-disc {
+    width: auto;
+    height: 100%;
+    max-width: 100%;
+    aspect-ratio: 1;
+  }
+  html[data-shell='phone'] .imm-mp-cover { border-radius: 16px; }
+  html[data-shell='phone'] .imm-mp-cover .cover-art { border-radius: 16px !important; }
+  /*
+   * 唱臂的方框是 `clamp(190px, …)`，按竖屏那个大唱片定的死尺寸。
+   * 横屏唱片被压到 127 之后，190 的臂框一半挂到盘外——抬起来的那截就是
+   * 页头下面那条莫名其妙的短线（用户看到的是「有一道横线浮在标题上面」）。
+   * 改成跟着 stage 高度走，和唱片同尺寸、同一个圆心。
+   */
+  html[data-shell='phone'] .imm-disc-arm-wrap {
+    width: auto;
+    height: 100%;
+    aspect-ratio: 1;
+  }
+  html[data-shell='phone'] .imm-mp-meta {
+    justify-content: center;
+    padding: 0 0 2px;
+    text-align: center;
+  }
+  html[data-shell='phone'] .imm-mp-title { font-size: 18px; line-height: 1.25; }
+  html[data-shell='phone'] .imm-mp-sub { margin-top: 4px; font-size: 12px; }
+  /* 右边就是整首歌词，左下角这两行预览纯属重复，横屏收掉 */
+  html[data-shell='phone'] .imm-mp-lyr { display: none; }
+
+  /* 右栏：歌词页。往下落一点——横屏高度富裕，贴着页头顶边读起来像没排过版 */
+  html[data-shell='phone'] .imm-mp[data-p='lyric'] { padding: 0 0 0 18px; }
+  html[data-shell='phone'] .imm-mp-tab { margin-bottom: 6px; }
+
+  /* 操作行：只留图标（文字在 372 高里纯属占地方），并跟正文同一根中轴 */
+  html[data-shell='phone'] .imm-mp-acts {
+    /* `margin:0 auto` 会让 flex 项缩成内容宽（实测 114），必须显式 width:100% */
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+    padding: 0 2px 2px;
+  }
+  html[data-shell='phone'] .imm-mact,
+  html[data-shell='phone'] .imm-mact-btn { padding: 4px 0; min-height: 38px; }
+  html[data-shell='phone'] .imm-mact > span:last-child { display: none; }
+
+  /* 底部控制：进度条 + 一行按钮，整体压到 ~96 */
+  html[data-shell='phone'] .imm-mp-foot { padding: 0; }
+  html[data-shell='phone'] .imm-mf-ctl { padding: 2px 4px 0; }
+  html[data-shell='phone'] .imm-mf-play { width: 44px; height: 44px; }
+  html[data-shell='phone'] .imm-mf-ctl .icon-btn { width: 38px; height: 38px; }
+  /* 频谱带是纯装饰（`aria-hidden`），26px 在 372 高的屏上不值这个价，让给封面 */
+  html[data-shell='phone'] .imm-mp-specbar { display: none; }
+  /*
+   * 进度条收成一小截，和上面两栏同宽居中。
+   * 横屏原本是拉满 800 多宽的一条——手指从中点拖到右端要横穿半个屏幕，
+   * 端到端反而更难点准；桌面端（`.imm-grid`）它本来也就是一段，不是整条边。
+   */
+  html[data-shell='phone'] .imm-progress {
+    width: 100%;
+    max-width: 440px;
+    /* `!important` 是必要的：base 里那条 `margin: 12px 0 0` 属于同一个
+       媒体查询里的同一层，实测普通声明压不住（计算值仍是 0px，条子贴着左栏）。
+       真要改就两边一起改，别在别处再补一条。 */
+    margin-left: auto !important;
+    margin-right: auto !important;
+    padding: 0;
+  }
+  html[data-shell='phone'] .imm-mf-ctl {
+    width: 100%;
+    max-width: 440px;
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
+
+  /* 歌词页：往下落 16，别贴着页头顶边；行高收窄，多塞几句 */
+  html[data-shell='phone'] .imm-mp-lyricbody { padding: 16px 0 0; }
+  html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line { line-height: 1.45; }
+  /* 音质/缓存那两枚胶囊在 360 高里正好和频谱带叠在一起，横屏不显示：
+     它们是「知道了也没什么用」的信息，腾出来的高度留给内容。
+     真实的类名是 `.imm-mf-pills`（`.imm-pills` 从来没存在过，上一版白写了一条）。 */
+  html[data-shell='phone'] .imm-mf-pills,
+  html[data-shell='phone'] .imm-pills { display: none; }
+
+  /* 歌单广场的横屏重排见下面「平台胶囊竖排」那一段 */
+
+  /* ==================================================================
+   * 横屏的根子问题：**竖向空间被页头吃光**，不是按钮太小
+   * ------------------------------------------------------------------
+   * 横过来只剩 372 高，`.page` 上让 40、下让 88，内容区实际只有 244。
+   * 而每一页的 `.lib-head` 还是竖屏那套「副标题一行 + 操作按钮一行」= 75~81，
+   * 一下吃掉三分之一。实测三处：
+   *   · 歌单广场：内容区 112（刚好一张榜卡）
+   *   · 在线搜索：只剩 20 —— 输入了也看不见结果
+   *   · 下载：103
+   * 用户说的「很多东西都点不到」就是这个：不是按不着，是那块地方**根本没剩下**。
+   *
+   * 横屏宽度有 837，本来就是把东西横着摆的空间。页头改一行、筛选条改一行，
+   * 省下来的 90~140 全给内容。
+   * ================================================================== */
+  html[data-shell='phone'] .lib-head {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 8px;
+  }
+  html[data-shell='phone'] .lib-head-left { flex: 1; min-width: 0; }
+  html[data-shell='phone'] .lib-head .sub,
+  html[data-shell='phone'] .lib-status {
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  html[data-shell='phone'] .lib-actions { flex: none; flex-wrap: nowrap; gap: 8px; }
+  /* 「我的」页的页头是 `display:block`（竖屏靠块级流自然堆叠），
+     光改 flex-direction 没用，得先把容器变成 flex。 */
+  html[data-shell='phone'] .home-page .lib-head { display: flex; }
+  /* 竖屏给右上角两颗圆钮留了 110 右侧内边距、给操作行留了 14 上边距；
+     横屏把它们放回行内，这两处留白就都成了纯浪费。 */
+  html[data-shell='phone'] .home-page .home-head { padding-right: 0; }
+  html[data-shell='phone'] .home-page .home-head .lib-actions { margin-top: 0; }
+  html[data-shell='phone'] .home-page .home-head .home-refresh,
+  html[data-shell='phone'] .home-page .home-head .home-acct {
+    position: static;
+    width: 36px;
+    height: 36px;
+  }
+  /*
+   * 新建 / 导入两颗：竖屏是 `flex: 1 1 0` 各占半行，横屏并排时会被
+   * 「内容宽 = 0 + 平分剩余」压到 64 宽，四字标题直接顶边。
+   * 这里必须**在同一个高优先级选择器里**改回 `flex: 0 0 auto`——
+   * 光靠外面那条 `.lib-actions > *` 压不住 `.home-head` 这条更具体的规则。
+   */
+  html[data-shell='phone'] .home-page .home-head .lib-actions > .primary-btn,
+  html[data-shell='phone'] .home-page .home-head .lib-actions > .ghost-btn {
+    flex: 0 0 auto;
+    height: 36px;
+    padding: 0 14px;
+    font-size: 12.5px;
+  }
+  /* 新建 / 导入两颗在竖屏是 `flex:1` 各占半行，横屏并排会被这两颗吃光，
+     状态文字就没地方了。这里让它们回到内容宽。 */
+  html[data-shell='phone'] .home-page .lib-actions > * { flex: 0 0 auto; }
+  html[data-shell='phone'] .lib-actions .btn,
+  html[data-shell='phone'] .lib-actions .primary-btn,
+  html[data-shell='phone'] .lib-actions .ghost-btn {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  /* 按钮里的图标一律不许被压：竖屏有半行宽，`flex-shrink` 轮不到图标；
+     横屏收到内容宽之后，最先被挤掉的就是它（实测「新建歌单」那颗 + 被压成 0 宽）。 */
+  html[data-shell='phone'] .lib-actions svg { flex: none; }
+
+  /* ---------- 在线搜索：搜索框并进页头那一行 ---------- */
+  html[data-shell='phone'] .search-page .lib-actions { flex: 1; min-width: 0; }
+  html[data-shell='phone'] .search-page .lib-actions .search-box {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+  }
+  html[data-shell='phone'] .search-page .lib-actions .search-box input {
+    width: 100%;
+    height: 32px;
+    font-size: 12.5px;
+  }
+  /* 单曲/歌单 + 四个平台塞一行：横屏宽 729，112 + 264 绰绰有余 */
+  html[data-shell='phone'] .sr-bar {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 10px;
+    padding: 0 0 6px;
+  }
+  html[data-shell='phone'] .sr-tabs { flex: none; }
+  html[data-shell='phone'] .sr-tab { height: 32px; padding: 0 14px; font-size: 12.5px; }
+  html[data-shell='phone'] .sr-platforms { flex: 1; min-width: 0; flex-wrap: nowrap; }
+  html[data-shell='phone'] .sr-plat { height: 32px; padding: 0 12px; font-size: 12px; }
+  /* 最近搜索：一行 32，别单独占掉 48 */
+  html[data-shell='phone'] .sr-history { height: 32px; gap: 8px; padding: 0; }
+  html[data-shell='phone'] .sr-ghost { height: 28px; padding: 0 10px; font-size: 12px; }
+
+  /* ==================================================================
+   * 歌单广场：把「平台切换 + 导入」挪到左列，右边一整格给卡片
+   * ------------------------------------------------------------------
+   * 竖屏那套是上下堆叠：副标题行 40 + 平台胶囊行 39 + 「歌单」小标题 28，
+   * 内容区只剩 165 —— 而一张卡（方形封面 + 名字 + 标签）要 238，
+   * **一行都显示不全**，进来看到的是半张图。
+   *
+   * 横屏 837 宽最不缺的就是横向空间，把这堆控件竖着摆到左边 92 宽，
+   * 右列就能从页头顶一直铺到播放条：165 → 244，正好一行卡片 + 下一行露头。
+   * ================================================================== */
+  html[data-shell='phone'] .sq-page {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    grid-template-rows: 34px minmax(0, 1fr);
+    column-gap: 12px;
+    row-gap: 8px;
+  }
+  /* 页头只留「导入歌单」。副标题（「各平台热门歌单」）横屏是废话——
+     左列那排平台胶囊已经说明正在看谁了。 */
+  html[data-shell='phone'] .sq-page .lib-head {
+    grid-area: 1 / 1;
+    min-width: 0;
+    padding-bottom: 0;
+  }
+  html[data-shell='phone'] .sq-page .lib-head .lib-head-left { display: none; }
+  html[data-shell='phone'] .sq-page .lib-head .lib-actions { width: 100%; gap: 0; }
+  /*
+   * 92 宽的格子里，「↑ 导入歌单」要留出让图标喘气的地方。
+   * 上一版把 padding 和 gap 一起清零，图标直接贴在左边框上、字又紧挨图标，
+   * 看着像排版塌了。现在：14 的左右内边距 + 5 的图标间距，整体居中。
+   */
+  html[data-shell='phone'] .sq-page .lib-head .ghost-btn {
+    width: 100%;
+    height: 34px;
+    gap: 5px;
+    justify-content: center;
+    padding: 0 8px;
+    font-size: 11.5px;
+  }
+  /* 平台胶囊竖排成一列 tab，高度和 dock 项一个量级，好点 */
+  html[data-shell='phone'] .sq-page .sq-bar {
+    grid-area: 2 / 1;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 5px;
+    height: auto;
+    padding: 0;
+    border-bottom: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+  html[data-shell='phone'] .sq-page .sq-plats {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 5px;
+    width: 100%;
+  }
+  /* 4 颗 × 36 + 3 × 5 = 159，正好塞进左列 162（系统栏没隐藏、屏只剩 332 时的最小值）。
+     早先给的 38 高会溢 8px，最后一颗「酷狗」压到播放条上。 */
+  html[data-shell='phone'] .sq-page .sq-plat {
+    width: 100%;
+    height: 36px;
+    padding: 0 4px;
+    font-size: 11.5px;
+  }
+  /* 账号那条横屏一律不占位（`sq-bar-right` 里只有一个提示文字 + 登录钮，
+     登录入口在「我的」，这里不重复） */
+  html[data-shell='phone'] .sq-page .sq-bar-right { display: none; }
+  /* 右列：从页头顶一直铺到播放条 */
+  html[data-shell='phone'] .sq-page .sq-scroll {
+    grid-area: 1 / 2 / span 2 / auto;
+    padding: 0 0 4px;
+    scrollbar-gutter: auto;
+  }
+  /* 「歌单」这行小标题横屏省掉：左列选中哪家一目了然，卡片自己也带平台标签 */
+  html[data-shell='phone'] .sq-page .sq-sec-head-pl { display: none; }
+  /* 右列 625 宽、4 列各 148：卡片落到 ~212，一行刚好放得下 */
+  html[data-shell='phone'] .sq-page .sq-grid {
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    gap: 12px 10px;
+    padding-right: 0;
+  }
+  /* 名字留两行（截成一行会丢「短视频DJ热门歌曲 | 网红BGM」这种后半段），
+     只把上边距和字号收一收，整卡高度从 238 收到 209 */
+  html[data-shell='phone'] .sq-page .sq-name {
+    margin-top: 6px;
+    font-size: 12px;
+  }
+  html[data-shell='phone'] .sq-page .sq-meta { margin-top: 3px; font-size: 10px; gap: 4px; }
+
+  /*
+   * 播放页整组限宽居中（细节都在上面「播放页」那一段，这里只补一条）。
+   *
+   * 只写 `max-width` 会被 flex 的 `width:auto` 收成内容宽（实测 430），
+   * 必须显式 `width:100%` 才是「最多 760、超出居中」。
+   */
+  html[data-shell='phone'] .imm-mpager {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  /* 操作行图标固定尺寸：挤在 520 宽里被 flex 压扁过 */
+  html[data-shell='phone'] .imm-mact svg,
+  html[data-shell='phone'] .imm-mact-btn svg { width: 22px; height: 22px; flex: none; }
+
+  /* ==================================================================
+   * 播放队列 sheet：横屏不能用竖屏存下来的高度
+   * ------------------------------------------------------------------
+   * 抽屉高度是行内 style（记住用户拖过的像素高，竖屏 1178 半屏就存了 589）。
+   * 横过来整屏只剩 372，589 高的底部 sheet 会把顶部那排
+   * 「← 播放队列 排序」整块顶到屏幕外面——用户的原话就是
+   * 「横屏打开播放列表，关闭按钮那些都不显示」。
+   * JS 里已经按当前视口夹了一次（Sheet.tsx 的 sheetMax），
+   * 这里再兜一层 max-height，顺带把行高压到 58、封面 40：
+   * 372 高也能完整露出 4 行，而不是两行半。
+   * ================================================================== */
+  html[data-shell='phone'] .queue-drawer { max-height: 92vh; }
+  html[data-shell='phone'] .queue-drawer .q-grip { height: 14px; }
+  html[data-shell='phone'] .queue-drawer .q-head-m {
+    height: 40px;
+    grid-template-columns: 44px minmax(0, 1fr) 60px;
+  }
+  html[data-shell='phone'] .queue-drawer .q-head-m .q-back { width: 36px; height: 36px; }
+  html[data-shell='phone'] .queue-drawer .q-head-m h2 { font-size: 15px; }
+  html[data-shell='phone'] .queue-drawer .q-label { padding: 2px 16px 6px; font-size: 11px; }
+  html[data-shell='phone'] .queue-drawer .q-row { height: 58px; gap: 10px; }
+  html[data-shell='phone'] .queue-drawer .q-row .cover-art {
+    width: 38px !important;
+    height: 38px !important;
+    border-radius: 8px !important;
+  }
+  html[data-shell='phone'] .queue-drawer .q-row .name { font-size: 14px; }
+  html[data-shell='phone'] .queue-drawer .q-row .singer { font-size: 11px; }
+}
+
+/* 平板竖屏：左列窄一点、整块贴顶排。
+   竖屏高 1280，如果沿用「居中 + 进度条 margin-top:auto」，
+   封面会孤零零吊在屏幕正中，上下各空一大片；改成贴顶之后
+   右列歌词自然吃满整个高度。 */
+@media (orientation: portrait) {
+  html[data-shell='tablet'] .imm-grid {
+    grid-template-columns: minmax(0, 40%) minmax(0, 1fr);
+    align-content: start;
+  }
+  html[data-shell='tablet'] .imm-art { justify-content: flex-start; }
+  html[data-shell='tablet'] .imm-art > .imm-progress { margin-top: 28px; }
+}
+
+/* ============================================================
+ * 触摸屏：别让 :hover 的底色粘在按钮上
+ *
+ * Chrome / WebView 在触摸设备上会把「最后一次点中的元素」**一直留在 :hover**
+ * 状态（直到你点别的东西）。桌面上那是「鼠标还停在这儿」，触摸屏上就是
+ * 玩家看到的「点完按钮，它那块浅色底不消失、像按下去没弹回来」
+ * （用户报的就是播放页那颗按钮）。触摸设备本来没有悬停这回事，这里把
+ * hover 带来的**底色 / 位移 / 放大**统一抹回去。
+ *
+ * 三条约束：
+ *   1. 只重置 background / transform，不碰 color —— 很多 hover 只是提亮文字，
+ *      留着不难看，而重置颜色会把强调色（收藏、循环模式那种）一起吃掉；
+ *   2. 选中态（.on / .current / .selected / .playing / aria-*）显式排除，
+ *      它们的底色是「状态」，不是「悬停」；
+ *   3. **有底色的按钮不能写成 `background: none`**（那会把按钮本身刷成透明），
+ *      要写回它自己的基色；只有基色本来就是透明的那批才用 `none`；
+ *   4. 用 `html[data-shell=…]` 前缀把权重压过原规则，所以一条 `!important`
+ *      都不用——以后新增 hover 规则记得也在下面补一条，或者干脆写在
+ *      `@media (hover: hover)` 里。
+ *
+ * **不能写成 `@media (hover: none)`**：安卓 WebView 实测 `hover: none` 是 false、
+ * `hover: hover` 是 true（`pointer: coarse` 又是 true）——它为了兼容鼠标事件
+ * 谎报「能悬停」，媒体查询根本命中不了。所以这里按壳子判断：
+ * phone / tablet / car 三套壳都是触摸设备。
+ * ============================================================ */
+
+/* 基色本来就是透明的：直接抹成 none / transparent */
+html[data-shell='phone'] .icon-btn:hover:not([aria-expanded='true']):not(.on),
+html[data-shell='tablet'] .icon-btn:hover:not([aria-expanded='true']):not(.on),
+html[data-shell='car'] .icon-btn:hover:not([aria-expanded='true']):not(.on),
+html[data-shell='phone'] .ghost-btn:hover:not(:disabled),
+html[data-shell='phone'] .bb-btn:hover:not(.primary),
+html[data-shell='phone'] .link-btn:hover,
+html[data-shell='phone'] .chip-opt:hover:not(.on),
+html[data-shell='phone'] .segmented button:hover:not([aria-pressed='true']),
+html[data-shell='phone'] .app-toast button:hover,
+html[data-shell='phone'] .pl-tabs button:hover:not([aria-selected='true']),
+html[data-shell='phone'] .sq-plat:hover:not(.on),
+html[data-shell='phone'] .sq-daily:hover,
+html[data-shell='tablet'] .icon-btn:hover,
+html[data-shell='tablet'] .pl-tabs button:hover:not([aria-selected='true']),
+html[data-shell='tablet'] .chip-opt:hover:not(.on) {
+  background: none;
+}
+
+/* 有底色的按钮：写回基色（值和上面各自的基础规则一致），别写成 none */
+html[data-shell='phone'] .play-primary:hover:not([aria-busy='true']),
+html[data-shell='tablet'] .play-primary:hover:not([aria-busy='true']),
+html[data-shell='car'] .play-primary:hover:not([aria-busy='true']),
+html[data-shell='phone'] .primary-btn:hover {
+  background: var(--sy-accent);
+}
+html[data-shell='phone'] .imm-close:hover { background: var(--sy-surface); }
+html[data-shell='phone'] .imm-chip:hover[aria-pressed='true'] {
+  background: var(--sy-accent-a26);
+}
+html[data-shell='phone'] .imm-chip:hover:not([aria-pressed='true']) {
+  background: var(--sy-chip-bg-hover);
+}
+html[data-shell='phone'] .imm-tool:hover {
+  background: color-mix(in srgb, var(--sy-text-1) 5%, transparent);
+}
+
+/* 列表行：触摸上「点过的那一行」会留一条底 */
+html[data-shell='phone'] .track-row:hover:not(.selected):not(.playing),
+html[data-shell='phone'] .q-row:hover:not(.current),
+html[data-shell='phone'] .cm-row:hover,
+html[data-shell='phone'] .pl-row:hover:not(.miss),
+html[data-shell='phone'] .pl-recent-row:hover,
+html[data-shell='phone'] .dlp-row:hover,
+html[data-shell='phone'] .plp-row:hover:not(.live),
+html[data-shell='phone'] .atp-row:hover,
+html[data-shell='phone'] .atp-pickrow:hover:not(.on),
+html[data-shell='phone'] .ctx-item:hover,
+html[data-shell='tablet'] .track-row:hover:not(.selected):not(.playing),
+html[data-shell='tablet'] .q-row:hover:not(.current),
+html[data-shell='tablet'] .cm-row:hover {
+  background: transparent;
+}
+/* 队列行 hover 会把序号藏起来换成抓手：触摸上那一行会一直「缺个号」 */
+html[data-shell='phone'] .q-row:hover .idx,
+html[data-shell='tablet'] .q-row:hover .idx { display: block; }
+html[data-shell='phone'] .q-row:hover .grip,
+html[data-shell='tablet'] .q-row:hover .grip { display: none; }
+
+/* 卡片：hover 只在鼠标上来时抬一下 / 放大一点，触摸上会一直翘着 */
+html[data-shell='phone'] .home-card:hover .home-cover,
+html[data-shell='phone'] .home-band:hover,
+html[data-shell='phone'] .spec-card:hover,
+html[data-shell='phone'] .pos-card:hover,
+html[data-shell='phone'] .fx-card:hover,
+html[data-shell='phone'] .lc-card:hover,
+html[data-shell='phone'] .theme-card:hover,
+html[data-shell='phone'] .swatch:hover,
+html[data-shell='phone'] .sq-card:hover .sq-fav,
+html[data-shell='tablet'] .home-card:hover .home-cover,
+html[data-shell='tablet'] .home-band:hover,
+html[data-shell='tablet'] .theme-card:hover {
+  transform: none;
+}
+/* 封面在卡片 hover 时放大：手机上点过一张封面它就一直略大一圈 */
+html[data-shell='phone'] .sq-art:hover img,
+html[data-shell='phone'] .sq-rank:hover .sq-rank-art img { transform: none; }
+
+/* ------------------------------------------------------------------ */
+/* 下载页（手机）：一条一张卡，不是四列表格                            */
+/* ------------------------------------------------------------------ */
+/*
+ * 桌面那套 40 / 1fr / 168 / 76 的网格搬到手机上会当场塌：168 的状态列
+ * （「已下载 10.3 MB · 高品质 · 酷狗」）+ 76 的操作列吃掉一多半宽度，
+ * 标题只剩几十像素——歌手被压成一字一行的竖排，路径条也被 hint 挤成
+ * 「/storage/emulate...」。这里按手机的读法重排：
+ *
+ *   · 页头：状态文字和两颗按钮**同一行**（h1 已经因为底部 dock 有页名而藏掉了，
+ *     再折成两行等于白占 44px）；
+ *   · 目录条：路径占满一整行，那句「公共文件夹…」降到第二行小字；
+ *   · 列表行：44 封面 · 标题/歌手 · 两字状态 · 操作，进度条压在标题下面。
+ */
+html[data-shell='phone'] .downloads-page .lib-head {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+html[data-shell='phone'] .downloads-page .lib-head-left { min-width: 0; }
+html[data-shell='phone'] .downloads-page .lib-head .sub { font-size: 11.5px; }
+html[data-shell='phone'] .downloads-page .lib-actions {
+  width: auto;
+  margin-left: auto;
+  flex: none;
+  gap: 6px;
+}
+html[data-shell='phone'] .downloads-page .lib-actions .ghost-btn {
+  height: 30px;
+  padding: 0 10px;
+  gap: 4px;
+  font-size: 11.5px;
+}
+
+/* 目录条：路径一行、说明一行 */
+html[data-shell='phone'] .dlp-dir {
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+html[data-shell='phone'] .dlp-dir-path { flex: 1 1 auto; font-size: 11px; }
+html[data-shell='phone'] .dlp-dir-hint {
+  flex: 1 0 100%;
+  margin-left: 0;
+  font-size: 10.5px;
+}
+
+html[data-shell='phone'] .dlp-list { gap: 8px; padding-bottom: 28px; }
+
+/* 一条一张卡：底色一铺，「行与行的边界」自己就出来了 */
+html[data-shell='phone'] .dlp-row {
+  grid-template-columns: 44px minmax(0, 1fr) 54px 56px;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--sy-chip-bg);
+}
+html[data-shell='phone'] .dlp-row:hover { background: var(--sy-chip-bg); }
+html[data-shell='phone'] .dlp-cover { width: 44px; height: 44px; border-radius: 10px; }
+html[data-shell='phone'] .dlp-title { font-size: 13.5px; }
+html[data-shell='phone'] .dlp-sub { gap: 5px; }
+html[data-shell='phone'] .dlp-tag { padding: 0 4px; font-size: 9.5px; }
+html[data-shell='phone'] .dlp-bar { height: 3px; margin-top: 5px; }
+/* 失败行左侧一道红条：卡片化之后没有浅红底了，得有别的标记 */
+html[data-shell='phone'] .dlp-row[data-status='error'] {
+  background: var(--sy-chip-bg);
+  box-shadow: inset 2px 0 0 var(--sy-error);
+}
+html[data-shell='phone'] .dlp-state { gap: 2px; text-align: right; }
+html[data-shell='phone'] .dlp-label { font-size: 11px; }
+html[data-shell='phone'] .dlp-num { font-size: 10px; }
+html[data-shell='phone'] .dlp-act { gap: 2px; }
+
+html[data-shell='phone'] .dlp-group {
+  margin: 6px 2px 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+}
+
+/* 失败行不画进度条：原因已经红字摊在标题下面了，再压一条满格红条
+   看着像「卡在 100%」，反而不知道是失败了还是快好了 */
+html[data-shell='phone'] .dlp-row[data-status='error'] .dlp-bar { display: none; }
+/* 状态是这一页的主角，别用最淡的那一档灰 */
+html[data-shell='phone'] .dlp-label.ok { color: var(--sy-text-2); }
+html[data-shell='phone'] .dlp-num { color: var(--sy-text-3); }
+
+/* ==================================================================== */
+/* 平板 · 大屏（竖屏 / 横屏）                                            */
+/* ==================================================================== */
+/*
+ * 只对「手机结构 + 大屏」生效：`data-shell='phone'` 且短边 ≥ 560（见
+ * lib/shellMode.ts 的 data-wide）。
+ *
+ * 为什么不用 data-shell='tablet'：那是**桌面端窄窗**的降级形态——左侧图标栏 +
+ * 右侧 340 的「正在播放」，整套交互是按鼠标写的。平板是手指设备，功能必须和
+ * 手机完全一致，所以壳里安卓一律回 'phone'，平板只在这里放大尺寸。
+ *
+ * 要解决的是三个具体问题（800×1280 / 1280×800 实测）：
+ *   1. 内容横向拉满 1280 —— 搜索框、设置行被拉成一条长带，眼睛一行扫不完；
+ *   2. 底部五格 dock 每格 253 宽，图标 24 孤零零悬在中间；
+ *   3. 字号还是手机的 12.5/10.5，坐在平板前面（比手机远一臂）明显偏小。
+ *
+ * 前缀统一写 `html[data-shell='phone'][data-wide='1']`，桌面窄窗（tablet）
+ * 一条都不命中，手机（短边 < 560）也不命中。
+ */
+html[data-shell='phone'][data-wide='1'] {
+  /* 内容列宽 / 底栏宽 */
+  --tab-content: 900px;
+  --tab-bar: 720px;
+  --tab-pad: 24px;
+  /* 底部占位跟着放大：dock 56 + 上下 8+8 = 72，播放条 68 */
+  --phone-tab: 76px;
+  --phone-dock: 68px;
+}
+/* 横屏：横向空间富余、纵向只有 800 上下，内容收得更窄、留白更紧 */
+@media (orientation: landscape) {
+  html[data-shell='phone'][data-wide='1'] {
+    --tab-content: 1120px;
+    --tab-bar: 880px;
+    --tab-pad: 28px;
+  }
+}
+
+/*
+ * 内容列居中。
+ *
+ * `.page` 是 absolute + inset 拉满，这里**不能用 transform 居中**：
+ * transform 会让它成为内部 fixed 元素的包含块（多选工具条、长按面板都挂在
+ * `.page` 里），一平移就跟着错位。用 left 百分比算，right 交回 auto。
+ */
+html[data-shell='phone'][data-wide='1'] .page {
+  right: auto;
+  width: min(100%, var(--tab-content));
+  left: max(0px, calc((100% - var(--tab-content)) / 2));
+  padding-left: var(--tab-pad);
+  padding-right: var(--tab-pad);
+}
+
+/* 页面大标题：手机 26 在平板上显得单薄 */
+html[data-shell='phone'][data-wide='1'] .page h1 {
+  font-size: 30px;
+  margin-bottom: 16px;
+}
+
+/* ---------- 底部 dock ---------- */
+/* 通栏背景保留（和内容区之间要有一条明确的分界），只把五格收窄居中 */
+html[data-shell='phone'][data-wide='1'] .sidebar {
+  padding: 8px 14px calc(8px + var(--safe-bottom));
+}
+html[data-shell='phone'][data-wide='1'] .sb-nav {
+  max-width: var(--tab-bar);
+  margin: 0 auto;
+}
+html[data-shell='phone'][data-wide='1'] .sb-item {
+  height: 56px;
+  gap: 4px;
+  font-size: 11.5px;
+  border-radius: 18px;
+}
+html[data-shell='phone'][data-wide='1'] .sb-item svg {
+  width: 24px;
+  height: 24px;
+}
+html[data-shell='phone'][data-wide='1'] .sb-item.active::before { border-radius: 17px; }
+
+/* ---------- 迷你播放条 ----------
+ *
+ * 平板这套和手机不是「同一个条子放大」：手机是 60 高、两边贴边、封面 40 带进度环；
+ * 平板上**封面要更大、文字要更大、条子反而不能拉满**。
+ *
+ * 2026-11-13 用户反馈「横屏和竖屏都不适配」，实测两个成因：
+ *   · 竖屏：封面被抬到 52，`.pb-ring` 还写死 46 —— 环比封面小一圈，压在图上；
+ *   · 横屏：宽度直接吃 `--tab-bar` 的 880，`.pb-meta` 有 flex:1，于是
+ *     中间空出 630 一条白板，右边三个键飘在最右端（截图上就是「一条被拉长的手机条」）。
+ *
+ * 定宽比拉满好看：竖屏和内容列左右对齐（640 - 2*24 = 592），
+ * 横屏收成 600 居中——上面浮一张胶囊，而不是一条被抻开的长带。
+ * 封面尺寸统一由 `--pb-cover` 给，环跟着它算，谁也别再写死像素。
+ */
+html[data-shell='phone'][data-wide='1'] .playbar {
+  --pb-cover: 48px;
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  /* 两边各让一个 pad：播放条和内容列左右对齐，不再贴到屏幕边 */
+  width: min(calc(100% - 2 * var(--tab-pad)), 600px);
+  height: var(--phone-dock);
+  padding: 0 16px;
+  gap: 12px;
+  border-radius: 22px;
+}
+/* 竖屏（640）用内容列宽，正好压在列表卡片的左右沿上 */
+@media (orientation: portrait) {
+  html[data-shell='phone'][data-wide='1'] .playbar { width: calc(100% - 2 * var(--tab-pad)); }
+}
+html[data-shell='phone'][data-wide='1'] .playbar .pb-left { gap: 12px; }
+html[data-shell='phone'][data-wide='1'] .pb-cover-wrap .cover-art {
+  width: var(--pb-cover) !important;
+  height: var(--pb-cover) !important;
+  border-radius: 11px !important;
+}
+/* 环盒 = 封面 + 每边 3px（和手机同一条规则，只是数字跟着 `--pb-cover` 走） */
+html[data-shell='phone'][data-wide='1'] .pb-ring {
+  left: -3px;
+  top: -3px;
+  width: calc(var(--pb-cover) + 6px);
+  height: calc(var(--pb-cover) + 6px);
+}
+html[data-shell='phone'][data-wide='1'] .pb-name { font-size: 13.5px; }
+html[data-shell='phone'][data-wide='1'] .pb-sub { font-size: 14px; }
+html[data-shell='phone'][data-wide='1'] .pb-mini-acts { gap: 6px; }
+html[data-shell='phone'][data-wide='1'] .pb-mini-acts .icon-btn { width: 42px; height: 42px; }
+html[data-shell='phone'][data-wide='1'] .pb-mini-acts .play-primary { width: 44px; height: 44px; }
+html[data-shell='phone'][data-wide='1'] .pb-mini-acts svg { width: 20px; height: 20px; }
+
+
+/* ---------- 设置页：字号整体上调一档 ---------- */
+html[data-shell='phone'][data-wide='1'] .set-tab { font-size: 14px; padding: 8px 16px; }
+html[data-shell='phone'][data-wide='1'] .set-group h3 { font-size: 14.5px; }
+html[data-shell='phone'][data-wide='1'] .set-label { font-size: 14.5px; }
+html[data-shell='phone'][data-wide='1'] .set-sub { font-size: 12px; }
+html[data-shell='phone'][data-wide='1'] .set-row { padding: 16px 0; }
+/*
+ * 行尾并排两个按钮（「快速备份」那行的导出/导入）。
+ *
+ * `.set-ctl` 是个裸 `<span>`，全项目没有任何布局规则——两个 ghost-btn 是
+ * inline-flex，之间有且只有一个换行空格，于是贴在一起，横屏时尤其明显
+ * （用户：「导出配置包和导入配置包按钮连在一起了」2026-11-13）。
+ *
+ * 排除 `.scope-ctl` / `.src-maint`：那两个变体自己有 flex + 自己的 gap，
+ * 不要被这里的 10 盖掉。
+ */
+html[data-shell='phone'] .set-ctl:not(.scope-ctl):not(.src-maint) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* ---------- 播放页：竖屏放大封面，横屏改成两栏 ---------- */
+
+/* 竖屏：一列布局不动，封面/唱片放大一档（手机那套 272 在 800 宽的屏上偏小） */
+html[data-shell='phone'][data-wide='1'] .imm-cover .cover-art {
+  width: min(320px, 62vw) !important;
+  height: min(320px, 62vw) !important;
+}
+html[data-shell='phone'][data-wide='1'] .imm-disc {
+  width: min(320px, 62%);
+  margin: 30px auto 18px;
+}
+
+/*
+ * 横屏：手机那套「封面页 / 歌词页」左右翻是为一屏塞不下的手机设计的。
+ * 1280×800 上继续单列，就变成「封面孤零零在上、进度条横跨整屏、歌词还得滑过去」，
+ * 横向 900 多的空白全浪费。这里把两页**并排**：左封面 + 信息 + 控制，右歌词。
+ *
+ * pager 的隐藏规则要一并解除——横屏两栏之后「在 art 页」和「在 lyric 页」
+ * 指的是同一块屏，再藏内容就成了空白。
+ */
+@media (orientation: landscape) {
+  html[data-shell='phone'][data-wide='1'] .imm-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: none;
+    align-items: stretch;
+    column-gap: 44px;
+    padding: 0 26px;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-art,
+  html[data-shell='phone'][data-wide='1'] .imm-lyric {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+  }
+  /* 左列：唱片居中、控制贴底 */
+  html[data-shell='phone'][data-wide='1'] .imm-disc { width: min(340px, 100%); margin: 0 auto; }
+  html[data-shell='phone'][data-wide='1'] .imm-cover { margin: 0 auto; }
+  html[data-shell='phone'][data-wide='1'] .imm-progress { margin-top: auto; }
+  /* 右列：歌词吃满 */
+  html[data-shell='phone'][data-wide='1'] .imm-lyric-body { flex: 1 1 auto; min-height: 0; }
+
+  /* 分页在两栏里没有意义：两页同时在场，页点也收掉 */
+  html[data-shell='phone'][data-wide='1'] .imm-pagedots { display: none; }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='art'] .imm-lyric-body {
+    display: flex;
+    flex-direction: column;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-cover,
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-meta-block {
+    display: block;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-disc { display: block; }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-acts { display: grid; }
+}
+
+/* ---------- 列表与卡片：平板上手指离得更远，行高/封面各放大一档 ---------- */
+html[data-shell='phone'][data-wide='1'] .track-row {
+  grid-template-columns: 52px minmax(0, 1fr) 44px;
+  padding: 10px 10px;
+}
+html[data-shell='phone'][data-wide='1'] .track-row.selecting {
+  grid-template-columns: 28px 52px minmax(0, 1fr) 44px;
+}
+html[data-shell='phone'][data-wide='1'] .library-page .track-row .col-title .t-name { font-size: 15px; }
+html[data-shell='phone'][data-wide='1'] .library-page .track-row .col-artist { font-size: 12.5px; }
+
+/* 曲库页头：手机上被折成两行（标题 / 扫描+搜索），平板一行放得下 */
+html[data-shell='phone'][data-wide='1'] .library-page .lib-head {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+html[data-shell='phone'][data-wide='1'] .library-page .lib-actions {
+  width: auto;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+html[data-shell='phone'][data-wide='1'] .library-page .search-box { flex: 0 1 260px; }
+
+/* 竖屏：进度 / 控制贴底，中间的空当留给封面与标题，不要全堆在顶部 */
+html[data-shell='phone'][data-wide='1'] .imm-progress { margin-top: auto; }
+
+/*
+ * 「我的」页头：手机是「状态 + 圆钮 / 新建 + 导入」两层，平板 1000+ 宽放得下一行。
+ * 按钮也不再平分（各 500 宽的两颗胶囊看着像两条横幅），固定 168。
+ */
+html[data-shell='phone'][data-wide='1'] .home-head {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  grid-template-areas: 'info ops tools';
+  gap: 12px;
+}
+html[data-shell='phone'][data-wide='1'] .home-head .lib-actions { justify-content: flex-end; }
+html[data-shell='phone'][data-wide='1'] .home-head .lib-actions > .primary-btn,
+html[data-shell='phone'][data-wide='1'] .home-head .lib-actions > .ghost-btn {
+  flex: 0 0 auto;
+  min-width: 168px;
+  height: 48px;
+  font-size: 14.5px;
+}
+/* 曲库 / 广场页头的按钮同理：不拉伸 */
+html[data-shell='phone'][data-wide='1'] .library-page .lib-actions .primary-btn,
+html[data-shell='phone'][data-wide='1'] .sq-page .lib-actions .primary-btn {
+  flex: 0 0 auto;
+  min-width: 150px;
+  height: 44px;
+  font-size: 14px;
+}
+
+/* 歌单广场：手机上固定两列（一屏两卡），平板交给 auto-fill 自己长列数 */
+html[data-shell='phone'][data-wide='1'] .sq-grid {
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 20px 16px;
+}
+
+/*
+ * 播放页顺序（平板通用）：封面 → 标题 → 歌词 → 操作行 → 进度 → 控制。
+ *
+ * 手机是两页，操作行（收藏/下载/评论…）挂在封面页、歌词页里被藏掉，所以
+ * 「封面 → 标题 → 操作 → 进度 → 控制」没问题；平板把两页合并成一屏后，
+ * 操作行夹在歌词上面会让歌词被拦腰截断，往下挪到歌词之后。
+ */
+html[data-shell='phone'][data-wide='1'] .imm-acts { order: 4; }
+html[data-shell='phone'][data-wide='1'] .imm-progress { order: 5; }
+html[data-shell='phone'][data-wide='1'] .imm-ctl { order: 6; }
+
+@media (orientation: portrait) {
+  /*
+   * 竖屏：1280 高放得下「封面 + 标题 + 歌词 + 控制」，就不必再左右翻页了。
+   * 手机分页的前提是 360×780 一屏塞九块；平板竖屏照搬会出现
+   * 「封面在上、控制在底、中间 800px 空着」。
+   */
+  html[data-shell='phone'][data-wide='1'] .imm-pagedots { display: none; }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='art'] .imm-lyric-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 140px;
+  }
+  /* 歌词页那一套 grid 模板要还原成一列，否则合并后封面会被塞进 ly r 格 */
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] {
+    display: flex;
+    flex-direction: column;
+    grid-template-areas: none;
+    gap: 0;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-cover,
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-meta-block { display: block; }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-disc { display: block; }
+  html[data-shell='phone'][data-wide='1'] .imm-grid[data-pager='lyric'] .imm-acts { display: grid; }
+  html[data-shell='phone'][data-wide='1'] .imm-lyric-body { flex: 1 1 auto; min-height: 140px; }
+}
+
+/* ==================================================================== */
+/* 平板 · 播放页（安卓真机走的是 .imm-mpager 那套手机 DOM）              */
+/* ==================================================================== */
+/*
+ * 注意：`mobile = isAndroid && shell !== 'tablet'`，安卓平板上 mobile 仍为 true，
+ * 播放页渲染的是 `.imm-mpager`（两整页横滑 + 底部固定控制），**不是**上面那段
+ * `.imm-grid`。所以平板尺寸必须写在 `.imm-mp*` 上，否则真机一条都不生效
+ * （浏览器预览里 `isAndroid` 为 false，看到的是 `.imm-grid`，别被它骗了）。
+ */
+
+/* 竖屏：封面 / 字号放大一档，手机上那套 18 号字在 800 宽的屏上明显小 */
+html[data-shell='phone'][data-wide='1'] .imm-mp-stage {
+  --mp-size: clamp(260px, min(100vw - 200px, 42vh), 430px);
+}
+html[data-shell='phone'][data-wide='1'] .imm-mp-stage[data-vinyl='true'] {
+  --mp-size: clamp(240px, min(100vw - 240px, 38vh), 400px);
+}
+html[data-shell='phone'][data-wide='1'] .imm-mp-title { font-size: 28px; }
+html[data-shell='phone'][data-wide='1'] .imm-mp-sub { font-size: 14.5px; }
+html[data-shell='phone'][data-wide='1'] .imm-mp-lyr .imp-l,
+html[data-shell='phone'][data-wide='1'] .imm-mp-lyr .imp-l.cur { font-size: 21px; }
+html[data-shell='phone'][data-wide='1'] .imm-mact { font-size: 12px; }
+/* 底部两条固定区不跟着屏宽摊开：5 颗操作 / 进度+控制各收一档居中 */
+html[data-shell='phone'][data-wide='1'] .imm-mp-acts {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
+html[data-shell='phone'][data-wide='1'] .imm-mp-foot {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+@media (orientation: landscape) {
+  /*
+   * 横屏：把「封面页 / 歌词页」两整页**并排**成一左一右。
+   *
+   * 手机横滑翻页的前提是一屏只放得下一页；1280×800 上一页只有封面 + 两行歌词，
+   * 右半边整块空着，还得滑过去才看得到词。并排之后两边同时在场。
+   *
+   * `transform: none !important` 是用来压死 `mpPlace()` 的内联位移的
+   * （它每次翻页都写 `translate3d(-屏宽)`）——两栏布局下再平移整条轨道，
+   * 左栏会滑出屏幕。手势照样触发，但视觉不动，等于自然禁用。
+   */
+  html[data-shell='phone'][data-wide='1'] .imm-mpager {
+    width: min(100%, 1180px);
+    margin: 0 auto;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-track {
+    display: grid;
+    grid-template-columns: minmax(0, 400px) minmax(0, 1fr);
+    /*
+     * 行高必须显式占满轨道。
+     *
+     * 默认的 auto 行高是「由内容撑开」，而左栏封面现在的尺寸是
+     * `height:100%` + `aspect-ratio:1`（要跟着列高走）——容器等内容、
+     * 内容等容器，百分比高度解不出来，实测封面直接塌成 0（只剩唱臂和中心孔）。
+     * 写死一行 1fr，「轨道高 → 行高 → 封面高」这条链就是确定的。
+     */
+    grid-template-rows: minmax(0, 1fr);
+    column-gap: 44px;
+    width: 100%;
+    transform: none !important;
+    will-change: auto;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp {
+    width: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  /* 左栏封面按列宽收：400 的列里放 330 刚好，再大就把歌名挤出去 */
+  html[data-shell='phone'][data-wide='1'] .imm-mp-stage {
+    --mp-size: clamp(240px, min(30vw, 42vh), 340px);
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-stage[data-vinyl='true'] {
+    --mp-size: clamp(220px, min(28vw, 38vh), 320px);
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='lyric'] { padding-left: 0; }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-lyr { padding-top: 12px; }
+}
+
+/* ---------- 浮层：队列抽屉 / 底部动作面板在平板上限宽居中 ---------- */
+/*
+ * 手机上这两个都是贴底通栏（一屏只有 360~412，通栏才对）。
+ * 1280 宽上通栏会变成一条 1280×400 的横条，第一行歌名和右侧时长隔着一整个屏，
+ * 眼睛没法一行扫完——限宽到「手机宽的两倍」，居中当一张卡片。
+ *
+ * 不用 `left:50% + translate(-50%)`：`.queue-drawer.open` 和其它规则都会写
+ * `transform`（还有拖动收起的 translateY），居中位移一混进去就会被覆盖。
+ * `left/right:0 + width + margin:auto` 对 fixed 元素本来就是居中的。
+ */
+html[data-shell='phone'][data-wide='1'] .queue-drawer {
+  left: 0;
+  right: 0;
+  width: min(100%, 720px);
+  margin-left: auto;
+  margin-right: auto;
+  height: 46vh;
+  border-radius: 20px 20px 0 0;
+}
+html[data-shell='phone'][data-wide='1'] .sheet {
+  width: min(100%, 560px);
+  margin-left: auto;
+  margin-right: auto;
+  align-self: center;
+  border-radius: 22px;
+}
+
+/*
+ * 设置页 · 主题模式的三段控件。
+ *
+ * 手机那条规则是 `width: 100%`（412 宽下三格各 130，正好）。
+ * 平板上内容列有 968 宽，三段会被拉成各 320 的长条——「浅色」和「深色」
+ * 隔着一整个屏幕，已经不是一组单选了。限到 460，左对齐跟标题走。
+ *
+ * 主题卡网格不动：那 4 列在宽屏上是有效利用，不是拉伸。
+ */
+html[data-shell='phone'][data-wide='1'] .settings-page [data-sec='appearance'] .segmented {
+  width: min(100%, 460px);
+}
+
+/*
+ * 设置页 · 内容定宽。
+ *
+ * 手机上设置行是「标题在左、开关在右」，412 宽时两边刚好凑成一行；
+ * 平板上内容列 968 宽，同一个开关被推到离标题 700px 的右边，
+ * 说明文字也跟着拉成一条长带——眼睛要在屏幕上横跳才能对上是哪个开关。
+ * 收到 820，和分类条一起居中。
+ *
+ * 分类条**不要**跟着设 max-width：它是 sticky 的、靠 `margin: 0 -32px`
+ * 抵消 `.page` 内边距来铺满，改成 auto 居中后宽度会塌到内容宽（实测 500），
+ * 背景也盖不住滚过去的内容。保持通栏反而更稳。
+ */
+html[data-shell='phone'][data-wide='1'] .settings-page > .set-group {
+  width: 100%;
+  max-width: 820px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/*
+ * 卡片定宽 820 之后，网格列数要重算，否则会留下一个孤零零的尾巴：
+ *
+ *   频谱 `.spec-grid`  手机 minmax(132) → 784 内宽切出 5 列 → 6 张排成 5+1
+ *                     改成 240 后是 3 列，6 张正好 3+3；频谱图本来也是横的，
+ *                     宽一点比拉成细条好看。
+ *   音效 `.fx-grid`    手机 minmax(116) → 7 列，每张 130 太窄（前面的说明挤三行）；
+ *                     145 切出 5 列，9 张是 5+4，卡片 150 宽刚好放下两行说明。
+ */
+html[data-shell='phone'][data-wide='1'] .spec-grid {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+html[data-shell='phone'][data-wide='1'] .fx-grid {
+  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+}
+
+/*
+ * 分类条是通栏的（要盖住滚过去的内容），但里面那排按钮得跟卡片左边缘对齐，
+ * 否则卡片居中到 102、按钮还在 28，两排竖线错开 74px，看着像没对齐。
+ * 用 padding 把按钮推进去，背景仍然铺满。
+ */
+html[data-shell='phone'][data-wide='1'] .settings-page .set-tabs {
+  padding-left: max(14px, calc((100% - 820px) / 2));
+  padding-right: max(14px, calc((100% - 820px) / 2));
+}
+
+/* ==================================================================== */
+/* 平板横屏 · 播放页左栏（封面页）重新排版                                */
+/* ==================================================================== */
+/*
+ * 为什么单开一段：手机横屏那套排版压在
+ * `@media (orientation: landscape) and (max-height: 520px)` 里——
+ * 那是按 780×360 写的。平板是 1024×640，**高度超出这条阈值**，
+ * 于是一条都不命中，封面页落回竖屏那套「封面贴顶、文字左对齐、下面还挂两行歌词」。
+ *
+ * 实测（1024×640）：轨道高 356，封面页却排到 412 ——
+ *   · 封面 243 缩在 400 宽的左栏正中间，歌名却从屏幕左边 22 起（差 76px，两条竖线错开）；
+ *   · 两行歌词从 y=471 一直排到 556，直接压进 504 起的操作行里。
+ * 用户说的「封面模式布局有点丑」就是这个：不是审美问题，是**溢出 + 不对齐**。
+ *
+ * 右边的歌词页本来就是整首歌词，左下角再放两行预览纯属重复，这里收掉。
+ */
+@media (orientation: landscape) {
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='art'] {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 18px 6px 0;
+    overflow: hidden;
+  }
+  /* stage 撑满剩余高度（封面尺寸仍由 `--mp-size` 决定，见上面那条 —
+     别改成 `height:100%`：clip 是 grid、行高 auto，百分比解不出来，实测塌成 0） */
+  html[data-shell='phone'][data-wide='1'] .imm-mp-stage {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  /*
+   * 歌名跟封面同一个中轴：封面居中、文字左对齐是最刺眼的那种错位。
+   *
+   * 这一行里还挂着「方形封面 / 唱片」那颗切换钮。它一旦参与 flex 布局，
+   * 文字块就得给它让出 40 宽，中轴立刻偏移 20——所以把它抽出来绝对定位
+   * 钉在右端，文字块单独居中。
+   */
+  html[data-shell='phone'][data-wide='1'] .imm-mp-meta {
+    position: relative;
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+    padding: 0 0 2px;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-metatxt {
+    flex: 0 1 auto;
+    min-width: 0;
+    text-align: center;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-vswitch {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-title { font-size: 21px; line-height: 1.28; }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-sub { margin-top: 4px; font-size: 12.5px; }
+  html[data-shell='phone'][data-wide='1'] .imm-mp-lyr { display: none; }
+}
+
+/* -------------------------------------------------------------------- */
+/* 平板竖屏 · 封面页：文字跟着封面走同一根中轴                            */
+/* -------------------------------------------------------------------- */
+/*
+ * 竖屏是一屏一页（封面页 / 歌词页横滑切换），封面在 640 宽里居中、
+ * 左右各留 120，而歌名从屏幕左边距 24 起——两条竖线错开将近 100px，
+ * 中间那块空白全是浪费。手机上（360 宽）封面本来几乎满宽，这点差别看不出来，
+ * 所以只对 data-wide 生效。
+ */
+@media (orientation: portrait) {
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='art'] .imm-mp-meta {
+    position: relative;
+    justify-content: center;
+    text-align: center;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='art'] .imm-mp-metatxt {
+    flex: 0 1 auto;
+    min-width: 0;
+    text-align: center;
+  }
+  /* 切换钮在这行末尾会把文字块挤偏，抽出来钉在右端 */
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='art'] .imm-mp-vswitch {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    margin: 0;
+  }
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='art'] .imm-mp-lyr { text-align: center; }
+  /* `.imp-l` 自己写着 `text-align: left`，光给容器加不顶用 */
+  html[data-shell='phone'][data-wide='1'] .imm-mp[data-p='art'] .imm-mp-lyr .imp-l {
+    text-align: center;
+  }
+}
+
