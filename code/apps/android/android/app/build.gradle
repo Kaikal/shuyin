@@ -18,8 +18,8 @@ android {
     defaultConfig {
         minSdk 24
         targetSdk 34
-        versionCode 108
-        versionName '0.6.107'
+        versionCode 110
+        versionName '0.6.109'
         resValue "string", "app_name", "疏音"
     }
 
@@ -108,4 +108,7 @@ tasks.named('preBuild') { dependsOn 'checkWebAssets' }
  */
 dependencies {
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    // 只为 FileProvider：装更新包必须给 content:// （Android 7 起 file:// 直接抛）。
+    // media3 会带进来一个 androidx.core，但那是 runtime 依赖，编译期不保证可见。
+    implementation 'androidx.core:core:1.13.0'
 }

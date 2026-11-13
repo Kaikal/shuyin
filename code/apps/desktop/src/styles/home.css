@@ -318,6 +318,22 @@
 .home-sec-sub { font-size: 10.5px; color: var(--sy-text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /*
+ * 一组卡全被过滤掉时的一句说明（现在只有「收藏的歌单」会这样：都空了）。
+ *
+ * 不写成空网格：网格塌成 0 高以后，用户看不出这一组是「没有」还是「没加载出来」，
+ * 而且得让他知道去「整理」里能取消收藏 —— 否则那些 0 首的卡就再也点不到了。
+ */
+.home-empty-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--sy-chip-bg);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--sy-text-3);
+}
+
+/*
  * 「我的歌单」里的分组（本地 / 各家平台）。
  *
  * 登录四个平台之后歌单会到十几二十个，平铺时只能靠卡片角标那行小字分是谁家的。

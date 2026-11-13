@@ -495,14 +495,27 @@ export function App() {
   }, [])
 
   /* ---------- 检查更新 ----------
-   * 启动 4 秒后再查：先把首屏和曲库扫描让出来，别跟它们抢带宽。
-   * 12 小时内只查一次；点过「以后再说」的版本不再提（见 lib/update.ts）。 */
+   * 启动后再查，先把首屏和曲库扫描让出来，别跟它们抢带宽。
+   *
+   * **必须重试**：冷启动那几秒 WebView 刚起来、网卡可能刚从休眠里醒，
+   * 第一次 `net_request` 失败率不低。只查一次的话现象就是用户报的
+   * 「打开应用没有更新提示，去设置里手动点检查才弹」——
+   * 手动那次能成，纯粹因为那时网络已经好了。三次覆盖前 30 秒，够用了。
+   *
+   * 查成功（不论有没有新版）都会写 `update.lastAt`，后面的重试会被 3 分钟的
+   * 间隔挡掉，所以不会出现「连查三次」。
+   */
   useEffect(() => {
     if (!bridge.isNative) return
-    const t = window.setTimeout(() => {
-      void autoCheckUpdate().then(i => { if (i) setUpd(i) })
-    }, 4000)
-    return () => window.clearTimeout(t)
+    let stop = false
+    const timers = [4000, 13_000, 35_000].map(ms => window.setTimeout(() => {
+      void autoCheckUpdate().then(i => {
+        if (stop || !i) return
+        stop = true
+        setUpd(i)
+      })
+    }, ms))
+    return () => { stop = true; timers.forEach(t => window.clearTimeout(t)) }
   }, [])
 
   /* ---------- 全局快捷键 / 耳机线控 ----------

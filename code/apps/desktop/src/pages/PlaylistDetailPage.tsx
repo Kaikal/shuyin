@@ -510,15 +510,20 @@ export function PlaylistDetailPage({ source, id, name, backLabel = '返回搜索
                 title="点击播放 · 长按多选 · ⋯ 更多"
                 onClick={e => { if (consumeLongPress()) return; onRowClick(sg, i, e) }}
                 onTouchStart={() => { touchAt.current = Date.now() }}
-                {...longPressProps(() => {
+                {...longPressProps(at => {
                   /*
                    * 触摸屏：长按 = 进入多选并选中这一行。
                    * 以前这里同时弹 `OnlineSongMenu`（贴手指的右键菜单），
                    * 手机上它经常被播放条压住、也放不到屏幕边上——用户反馈
                    * 「长按以后没有可操作空间」说的就是这个。多选工具条贴底，
                    * 空间足够，动作也齐（播放 / 队列 / 下载 / 加入歌单）。
+                   *
+                   * **已经选中的行再长按 = 要菜单**：多选态里想对某首单独操作
+                   * （看详情 / 复制链接）时，不必先取消选择再长按，也不用去找行尾那颗 ⋯。
                    */
-                  if (!on) { setSel(new Set([key])); anchor.current = i }
+                  if (on) { setMenu({ x: at.x, y: at.y, song: sg }); return }
+                  setSel(new Set([key]))
+                  anchor.current = i
                   /* 长按一定进多选；之后把勾选全取消也不会自己退出去 */
                   setSelecting(true)
                 })}

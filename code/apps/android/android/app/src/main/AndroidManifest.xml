@@ -39,6 +39,16 @@
          首次开启时会跳系统设置页让用户手动允许（见 FloatingLyrics）。 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!--
+        应用内更新：下载完 APK 之后直接拉起系统安装器（见 UpdateApk）。
+
+        这条权限声明只是「允许这个应用去请求安装」，**不代表能静默安装**：
+        Android 8 起还得用户在「安装未知应用」里单独给我们开一次，
+        没开时原生会跳到那个设置页（`ACTION_MANAGE_UNKNOWN_APP_SOURCES`）。
+        不声明的话 `canRequestPackageInstalls()` 恒 false，设置页也进不去。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- 频谱不再需要 RECORD_AUDIO。
          以前靠 android.media.audiofx.Visualizer，那是「采集系统输出音频」，
          系统只认录音权限；换成 ExoPlayer 之后，PCM 是在自己进程里解码出来、
@@ -130,6 +140,23 @@
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!--
+            安装包的出口。
+
+            Android 7 起 `file://` 一律抛 `FileUriExposedException`，装包只能给 content://。
+            authority 用 `${applicationId}.fileprovider`：phone / car 两个 applicationId
+            各算各的，装在同一台设备上也不会撞。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- 媒体键落点：会话失活时系统把耳机/蓝牙按键发成这个广播。
              必须 exported —— 发广播的是系统（蓝牙、SystemUI），不是我们自己。

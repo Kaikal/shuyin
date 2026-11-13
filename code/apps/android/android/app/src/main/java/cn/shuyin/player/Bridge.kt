@@ -310,6 +310,29 @@ class Bridge(private val web: WebView) {
         }
 
         /*
+         * 应用内更新：下 APK + 拉起系统安装器（见 UpdateApk）。
+         *
+         * 进度走事件 `app://update-dl`（{pct,got,total}），不走返回值——
+         * 一次下载要推几十次，没有哪个调用方能等；返回值只报最终结果
+         * `{status:"installed"|"need_perm", path}`。
+         */
+        "update_download" -> {
+            val urls = ArrayList<String>()
+            a.optJSONArray("urls")?.let { arr ->
+                for (i in 0 until arr.length()) urls.add(arr.optString(i))
+            }
+            /* 兼容单地址调用，省得以后改前端还要动这里 */
+            if (urls.isEmpty()) urls.add(a.optString("url"))
+            UpdateApk.downloadAndInstall(urls, a.optString("name", "shuyin-update.apk")) { p ->
+                emit("app://update-dl", p.toString())
+            }
+        }
+        /* 从「安装未知应用」设置页回来之后续装（文件还在缓存里） */
+        "update_install" -> UpdateApk.installDownloaded(a.optString("path")) { p ->
+            emit("app://update-dl", p.toString())
+        }
+
+        /*
          * 「在文件夹中显示」：安卓没有等价的公开接口，见 `Paths`。
          * 回 `{ opened, copied, path }` —— 前端按结果给不同提示，
          * 不能像以前那样 `if (!isTauri) return` 静默什么都不做。

@@ -7,8 +7,8 @@
 | | 版本 | 形态 |
 |---|---|---|
 | Windows | `0.5.25` | Tauri 2 + Rust 后端，安装包约 5.6 MB |
-| Android 手机 | `0.6.107` | Kotlin + WebView 壳，约 3.5 MB |
-| Android 车机 | `0.6.107` | 同壳横向版（`cn.shuyin.player.car`） |
+| Android 手机 | `0.6.109` | Kotlin + WebView 壳，约 4.0 MB |
+| Android 车机 | `0.6.109` | 同壳横向版（`cn.shuyin.player.car`） |
 
 ## 功能
 
