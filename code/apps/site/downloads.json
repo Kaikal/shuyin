@@ -1,0 +1,30 @@
+{
+  "base": "",
+  "headline": "v0.6.104 · 已支持平板大屏",
+  "items": [
+    {
+      "id": "android",
+      "version": "0.6.104",
+      "tag": "v0.6.104",
+      "file": "shuyin-android-0.6.104.apk",
+      "size": 3685452,
+      "mirror": ""
+    },
+    {
+      "id": "car",
+      "version": "0.6.104",
+      "tag": "v0.6.104",
+      "file": "shuyin-car-0.6.104.apk",
+      "size": 3685472,
+      "mirror": ""
+    },
+    {
+      "id": "windows",
+      "version": "0.5.24",
+      "tag": "v0.5.24",
+      "file": "shuyin-windows-0.5.24.exe",
+      "size": 5853955,
+      "mirror": ""
+    }
+  ]
+}

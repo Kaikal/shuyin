@@ -125,7 +125,290 @@
 
 .qr-alt:hover { color: var(--sy-text-2); }
 
+/* ---------------- QQ 音乐 · 手机验证码登录 ---------------- */
+
+/*
+ * 号码和「获取验证码」挤一行：这两件事在用户心里是一件事（填完就要点它），
+ * 拆成两行会让弹窗多出一行高度，手机上还容易被键盘顶。
+ */
+.phone-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phone-cc {
+  flex: none;
+  font-size: 12px;
+  color: var(--sy-text-3);
+}
+
+.phone-row .text-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 倒计时会把文案撑长（「60 秒后重发」），给它 nowrap 免得按钮宽度一直跳 */
+.phone-send {
+  flex: none;
+  white-space: nowrap;
+}
+
+.phone-go {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* ---------------- 人机验证（铺满一屏） ---------------- */
+
+/*
+ * 比弹窗遮罩（280）和播放条 / 导航都高：验证页要盖住整个界面。
+ * 验证页自己是一整屏的移动端页面，所以这块也是一个整屏容器，
+ * 只在宽屏上收成一条居中的纵向区域，免得在电脑上被拉成一条。
+ */
+.cap-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--sy-bg-base);
+}
+
+.cap-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 560px;
+  /* 顶部安全区：刘海 / 挖孔机不把标题压在状态栏底下 */
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) 16px 10px;
+  box-sizing: border-box;
+}
+
+.cap-title {
+  font-size: 13px;
+  color: var(--sy-text-2);
+}
+
+.cap-x {
+  border: 0;
+  background: none;
+  padding: 4px 2px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--sy-text-3);
+  cursor: pointer;
+}
+
+.cap-frame {
+  flex: 1;
+  width: 100%;
+  max-width: 560px;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+.cap-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 560px;
+  padding: 10px 16px calc(env(safe-area-inset-bottom, 0px) + 12px);
+  box-sizing: border-box;
+}
+
+.cap-acts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cap-err {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--sy-error);
+}
+
+.cap-done { flex: none; }
+
+.phone-err {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--sy-error);
+}
+
+.phone-note {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--sy-text-3);
+}
+
+/* ---------------- 酷狗 · 一个手机号多个账号时选一个 ---------------- */
+
+.kg-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.kg-pick-t {
+  margin: 0 0 2px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--sy-text-3);
+}
+
+/*
+ * 整行可点。不做 :hover 过渡：安卓 WebView 的 hover 会粘在最后点中的那行上，
+ * 一点完所有条目里始终有一条亮着，看着像「已经选中了」。
+ */
+.kg-acct {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--sy-radius-small);
+  background: var(--sy-surface);
+  box-shadow: inset 0 0 0 1px var(--sy-surface-border);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.kg-acct:disabled { opacity: .55; }
+
+.kg-acct-av {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--sy-surface);
+}
+
+.kg-acct-ph {
+  display: block;
+  box-shadow: inset 0 0 0 1px var(--sy-surface-border);
+}
+
+/* 昵称可能是全角空格这类「看不见」的名字，这里必须能截断，不能把 uid 挤出去 */
+.kg-acct-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.kg-acct-nm {
+  font-size: 13px;
+  color: var(--sy-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kg-acct-id {
+  font-size: 10.5px;
+  color: var(--sy-text-4);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------- 「我的」页 · 平台账号 ---------------- */
+
+/*
+ * 折叠头 + 列表（手机端在 handoff.css 里另有一套卡片式）
+ *
+ * 桌面这里是「一行小字 + 一排小胶囊」：全登录之后默认收起，
+ * 省下四颗胶囊的位置；点开才铺开成原来的样子。
+ */
+.home-plats-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.home-plats-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 8px 0 4px;
+  border: 0;
+  border-radius: var(--sy-radius-small);
+  background: none;
+  color: var(--sy-text-3);
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.home-plats-head:hover { background: var(--sy-row-hover); color: var(--sy-text-2); }
+
+.hph-dots { display: inline-flex; gap: 3px; flex: none; }
+.hph-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--sy-text-4);
+  opacity: 0.45;
+}
+/*
+ * 登录过的才点亮品牌色。
+ *
+ * 顺序要紧：品牌色规则必须挂在 `[data-on]` 上。以前四条 `[data-src='wy']` 是
+ * 无条件写的，未登录的四个点也全是彩色的——只是半透明，看上去像「四个都登了、
+ * 只是有点暗」，完全读不出「一家都没登」。没登录就老老实实是灰点。
+ */
+.hph-dots i[data-on] { opacity: 1; }
+.hph-dots i[data-on][data-src='wy'] { background: #e0524b; }
+.hph-dots i[data-on][data-src='tx'] { background: #2cb56e; }
+.hph-dots i[data-on][data-src='kg'] { background: #2e7bff; }
+.hph-dots i[data-on][data-src='kw'] { background: #f0a63a; }
+
+.hph-title { font-size: 11.5px; font-weight: 500; color: var(--sy-text-2); flex: none; }
+.hph-sum { font-size: 11.5px; flex: none; color: var(--sy-text-3); }
+/* 折叠是默认态，这句「N 家待登录」就是唯一的入口提示，用强调色点出来 */
+.hph-sum[data-need] { color: var(--sy-accent); }
+
+.hph-avatars { display: inline-flex; align-items: center; flex: none; }
+.hph-avatars i {
+  width: 17px;
+  height: 17px;
+  margin-left: -5px;
+  border-radius: 50%;
+  background-color: var(--sy-surface);
+  background-position: center;
+  background-size: cover;
+  box-shadow: 0 0 0 1.5px var(--sy-bg, #14161c);
+}
+.hph-avatars i:first-child { margin-left: 0; }
+
+/* 三角用 CSS 画：图标库里没有 chevron，为一个箭头加一条 path 不值 */
+.hph-chev {
+  width: 0;
+  height: 0;
+  flex: none;
+  margin-left: 1px;
+  border: 4px solid transparent;
+  border-top-color: currentColor;
+  transform: translateY(2px);
+  transition: transform var(--sy-dur-pop) var(--sy-ease-soft);
+}
+.hph-chev[data-open] { transform: translateY(-2px) rotate(180deg); }
 
 .home-plats {
   display: flex;
@@ -133,6 +416,8 @@
   gap: 8px;
   margin: 0 0 12px;
 }
+/* 进了折叠容器就由 .home-plats-wrap 统一管外边距，否则下面会多空一截 */
+.home-plats-wrap .home-plats { margin: 0; }
 
 .home-plat {
   display: flex;

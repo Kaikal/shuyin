@@ -23,6 +23,8 @@ import './styles/tray.css'
 import './styles/login.css'
 // 形态适配必须最后引：它要覆盖上面这些桌面布局
 import './styles/mobile.css'
+// 设计交付包（Android/design-handoff）：触屏三形态的最终版式，必须排在 mobile.css 之后
+import './styles/handoff.css'
 
 /**
  * 一个 main.tsx 承载五个窗口：

@@ -91,6 +91,31 @@ object Sources {
         return name
     }
 
+    /**
+     * 从「其他应用打开」送进来的文件导入。
+     *
+     * 文件由 MainActivity 落到 cache/inbox（content:// 的 Uri 在跨线程/跨进程之后
+     * 未必还能读，先拷一份最稳），这里只负责解码 + 入库。
+     *
+     * 编码：洛雪音源脚本绝大多数是 UTF-8，但国内流传的改版里有 GBK 的。
+     * 按「解出来含替换符 U+FFFD」判断 UTF-8 失败，再退回 GB18030。
+     */
+    fun importFile(path: String, nameIn: String): String {
+        val f = File(path)
+        if (!f.exists()) throw IllegalStateException("文件已经不在了")
+        if (f.length() > 4L * 1024 * 1024) {
+            throw IllegalStateException("这个文件太大（${f.length() / 1024}KB），不像是音源脚本")
+        }
+        val bytes = f.readBytes()
+        if (bytes.isEmpty()) throw IllegalStateException("文件是空的")
+        val utf8 = String(bytes, Charsets.UTF_8)
+        val code = if (utf8.contains('\uFFFD')) String(bytes, charset("GB18030")) else utf8
+        /* 导完就把暂存文件清掉：它只是搬运工，留着只会堆缓存 */
+        val name = importText(nameIn.substringBeforeLast('.'), code)
+        try { f.delete() } catch (_: Exception) {}
+        return name
+    }
+
     fun importUrl(url: String, nameIn: String): String {
         val res = Http.request(url, timeoutMs = 20_000)
         val status = res.optInt("status")

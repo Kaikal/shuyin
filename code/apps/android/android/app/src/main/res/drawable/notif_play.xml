@@ -1,0 +1,8 @@
+<!-- 通知栏动作：播放（实心三角） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M8,5.14v13.72c0,0.78 0.86,1.25 1.52,0.83l10.02,-6.86c0.6,-0.41 0.6,-1.29 0,-1.7L9.52,4.31C8.86,3.89 8,4.36 8,5.14z" />
+</vector>

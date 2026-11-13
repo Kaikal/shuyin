@@ -33,7 +33,7 @@
 }
 .sq-plat:hover { color: var(--sy-text-1); background: var(--sy-row-hover); }
 .sq-plat.active {
-  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
+  background: var(--sy-accent-a20);
   color: var(--sy-accent-soft);
 }
 .sq-hint-sub {
@@ -58,7 +58,7 @@
 .sq-login {
   height: 26px;
   padding: 0 12px;
-  border: 1px solid color-mix(in srgb, var(--sy-accent) 42%, var(--sy-line));
+  border: 1px solid var(--sy-accent-a42);
   border-radius: var(--sy-radius-pill);
   background: transparent;
   color: var(--sy-accent-soft);
@@ -69,7 +69,7 @@
               border-color var(--sy-dur-fast) var(--sy-ease-soft);
 }
 .sq-login:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--sy-accent) 14%, transparent);
+  background: var(--sy-accent-a15);
   border-color: var(--sy-accent);
 }
 .sq-login:disabled { opacity: 0.6; cursor: default; }
@@ -155,44 +155,67 @@
 .sq-scroll > .sq-sec-head-pl:first-child { margin-top: 0; }
 
 /* ---------- 每日推荐 ----------
- * 一张横卡：左边封面、右边「每日推荐 + 今天这一份的名字」。
- * 宽度收在 520——它是「一键开听」的入口，不是网格里的一格，
- * 拉满整屏反而会让人以为那是一整排歌单。 */
+ * 通栏横带，和首页「为你推荐」同一套语言：左边 3px 强调色 + 强调色向左淡出。
+ *
+ * 以前是 `max-width: 520` 的窄卡。它上下挨着 104 的榜单卡和 164+ 的歌单卡，
+ * 三种尺度并排，520 那一条像是「网格缺了一半」——这就是看着怪的原因。
+ * 它每天只有一张、又不进网格，那就该是通栏的：横带在页面里天然是「一整行」，
+ * 不会跟下面的格子比宽窄。
+ *
+ * 底色一律走 rgba 令牌：真机 WebView 104 不认 color-mix，整条声明会作废。
+ */
 .sq-daily {
   display: flex;
   align-items: center;
   gap: 14px;
   width: 100%;
-  max-width: 520px;
-  padding: 10px 14px;
-  border: 1px solid var(--sy-line);
-  border-radius: 14px;
-  background: var(--sy-surface);
+  margin: 0 0 22px;
+  padding: 12px 14px;
+  border: 1px solid var(--sy-accent-a26);
+  border-radius: var(--sy-radius-container);
+  background: linear-gradient(100deg, var(--sy-accent-a15) 0%, var(--sy-surface) 62%);
+  /* 左边一条实色：只靠淡淡的底色区分不够一眼看出「这是入口」 */
+  box-shadow: inset 3px 0 0 var(--sy-accent);
+  color: inherit;
+  font: inherit;
   text-align: left;
   cursor: pointer;
+  min-width: 0;
   transition: border-color var(--sy-dur-fast) var(--sy-ease-soft),
-              background var(--sy-dur-fast) var(--sy-ease-soft);
+              box-shadow var(--sy-dur-fast) var(--sy-ease-soft);
 }
 .sq-daily:hover {
-  border-color: color-mix(in srgb, var(--sy-accent) 46%, var(--sy-line));
-  background: var(--sy-row-hover);
+  border-color: var(--sy-accent-a42);
+  /* 别把上面那条 inset 弄丢：下面这条会整条覆盖 box-shadow */
+  box-shadow: inset 3px 0 0 var(--sy-accent), var(--sy-shadow-card-hover);
 }
-.sq-daily.is-loading { opacity: 0.55; cursor: default; }
+.sq-daily:focus-visible { outline: 2px solid var(--sy-accent-soft); outline-offset: 3px; }
+.sq-daily.is-loading { opacity: 0.6; cursor: default; }
 .sq-daily-art {
-  width: 64px;
-  height: 64px;
+  position: relative;
+  width: 74px;
+  height: 74px;
   flex: none;
-  border-radius: 10px;
-  background-color: var(--sy-surface);
+  border-radius: var(--sy-radius-card);
+  overflow: hidden;
+  border: 1px solid var(--sy-surface-border);
+  background-color: var(--sy-bg-elevated);
   background-size: cover;
   background-position: center;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
-.sq-daily-txt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* 封面还没到 / 没封面：给一块强调色底纹，别留一个空灰方块 */
+.sq-daily-ph {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 90% at 30% 20%, var(--sy-accent-a26), transparent 62%);
+}
+.sq-daily-txt { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
 .sq-daily-name {
-  font: 600 13px/1.3 var(--sy-font-cn);
+  font: 600 15px/1.3 var(--sy-font-cn);
   color: var(--sy-text-1);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .sq-daily-sub {
   font: 400 11px/1.35 var(--sy-font-cn);
@@ -201,7 +224,24 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.sq-daily-hint { font-size: 11px; color: var(--sy-text-3); padding-bottom: 6px; }
+/* 右侧那颗 ›：横带只有一行，没有它就看不出「点了会进去」 */
+.sq-daily-go {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--sy-accent-a15);
+  color: var(--sy-accent-soft);
+  transition: background var(--sy-dur-fast) var(--sy-ease-soft),
+              transform var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sq-daily:hover .sq-daily-go {
+  background: var(--sy-accent-a26);
+  transform: translateX(2px);
+}
 
 /* ---------- 排行榜 ----------
  * 榜单卡片比歌单卡小一号：它只是入口，名字都短（「热歌榜」），
@@ -253,7 +293,7 @@
   align-items: center;
   justify-content: center;
   background:
-    radial-gradient(120% 90% at 30% 20%, color-mix(in srgb, var(--sy-accent) 26%, transparent), transparent 62%),
+    radial-gradient(120% 90% at 30% 20%, var(--sy-accent-a26), transparent 62%),
     var(--sy-surface);
   color: var(--sy-text-3);
   font: 500 20px/1 var(--sy-font-cn);
@@ -326,7 +366,7 @@
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(120% 90% at 30% 20%, color-mix(in srgb, var(--sy-accent) 26%, transparent), transparent 60%),
+    radial-gradient(120% 90% at 30% 20%, var(--sy-accent-a26), transparent 60%),
     var(--sy-bg-elevated);
 }
 
@@ -392,7 +432,7 @@
 .sq-card:hover .sq-fav,
 .sq-fav:focus-visible { opacity: 1; transform: none; }
 .sq-fav:hover { background: rgba(10, 12, 16, 0.72); color: #fff; }
-.sq-fav.on { opacity: 1; transform: none; color: var(--sy-accent-soft); border-color: color-mix(in srgb, var(--sy-accent) 60%, transparent); }
+.sq-fav.on { opacity: 1; transform: none; color: var(--sy-accent-soft); border-color: var(--sy-accent-a42); }
 
 .sq-name {
   margin-top: 8px;
@@ -425,7 +465,7 @@
 .sq-tag {
   padding: 1px 6px;
   border-radius: 5px;
-  background: color-mix(in srgb, var(--sy-accent) 14%, transparent);
+  background: var(--sy-accent-a15);
   color: var(--sy-accent-soft);
   font-size: 10px;
   line-height: 1.5;
@@ -476,6 +516,9 @@
 .sq-more,
 .sq-end {
   padding: 20px 0 4px;
+  /* 高度写死：这一行常驻、只换文字，「正在加载更多…」出现/消失时
+     页面底部不能跟着弹一下（翻页时看着像闪了一下） */
+  min-height: 39px;
   text-align: center;
   font-size: 11px;
   color: var(--sy-text-4);
@@ -491,4 +534,9 @@
   .sq-hint-sub { display: none; }
   /* 窄窗里昵称先让位：头像 + 「退出」还留着，账号是谁能看出来 */
   .sq-acct-name { max-width: 72px; }
+  /* 横带在手机上竖向空间紧：封面和左右内边距一起收一档 */
+  .sq-daily { gap: 12px; margin-bottom: 18px; padding: 10px 12px; }
+  .sq-daily-art { width: 60px; height: 60px; }
+  .sq-daily-name { font-size: 14px; }
+  .sq-daily-go { width: 24px; height: 24px; }
 }

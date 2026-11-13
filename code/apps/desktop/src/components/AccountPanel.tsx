@@ -53,6 +53,8 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
         onProfile?.(saved)
         const live = await restoreSession()
         if (live) { setProfile(live); onProfile?.(live) }
+        // 会话失效时别装没事：restoreSession 已经把本地资料清了，这里同步 UI
+        else { setProfile(null); onProfile?.(null) }
       }
     })()
     // onProfile 是个回调用，别让它进依赖，否则父组件每次渲染都会重跑一轮网络请求
@@ -69,13 +71,13 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
 
   const doSend = async () => {
     if (busy) return
-    if (!emailOk) { toast('邮箱格式看着不对', { bad: true }); return }
+    if (!emailOk) { toast('请输入有效的邮箱地址', { bad: true }); return }
     setBusy('code')
     try {
       const v = await sendEmailCode(email)
       setVerification(v)
       setWait(60)
-      toast('验证码已发送，去邮箱里看一下', { ok: true })
+      toast('验证码已发送，请查收邮箱', { ok: true })
     } catch (e) {
       toast(humanizeCloudError(e), { bad: true })
     } finally {
@@ -85,8 +87,8 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
 
   const doLogin = async () => {
     if (busy) return
-    if (!verification) { toast('先点「发送验证码」', { bad: true }); return }
-    if (!/^\d{4,8}$/.test(code.trim())) { toast('验证码是 4~8 位数字', { bad: true }); return }
+    if (!verification) { toast('请先获取验证码', { bad: true }); return }
+    if (!/^\d{4,8}$/.test(code.trim())) { toast('验证码为 4~8 位数字', { bad: true }); return }
     setBusy('login')
     try {
       const p = await signInWithEmail(email, code, verification)
@@ -94,7 +96,7 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
       setCode('')
       setVerification(null)
       onProfile?.(p)
-      toast('登录成功，可以同步了', { ok: true })
+      toast('登录成功', { ok: true })
     } catch (e) {
       toast(humanizeCloudError(e), { bad: true })
     } finally {
@@ -104,8 +106,8 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
 
   const doLogout = async () => {
     const okQuit = await confirm({
-      title: '退出登录？',
-      message: '本地数据都还在，只是不再同步到云端。',
+      title: '退出登录',
+      message: '本机数据会保留，只是不再与云端同步。',
       confirmText: '退出',
       danger: true,
     })
@@ -114,18 +116,25 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
     setProfile(null)
     setLastSync(0)
     onProfile?.(null)
-    toast('已退出登录，数据仍然保存在本地')
+    toast('已退出登录，本机数据不受影响')
   }
 
   const doPush = useCallback(async () => {
     if (!profile || busy) return
     setBusy('push')
     try {
-      const bytes = await pushToCloud(profile)
+      const r = await pushToCloud(profile)
       setLastSync(Date.now())
-      toast(`已同步到云端（${Math.max(1, Math.round(bytes / 1024))} KB）`, { ok: true })
+      const kb = Math.max(1, Math.round(r.bytes / 1024))
+      if (r.adopted > 0) {
+        /* 云端有本机没有的歌单 → 已经合并进来了，重载一次让「我的」列出来 */
+        toast(`已同步（${kb} KB），并从云端取回 ${r.adopted} 个歌单`, { ok: true })
+        window.setTimeout(() => window.location.reload(), 900)
+      } else {
+        toast(`已同步到云端（${kb} KB）`, { ok: true })
+      }
     } catch (e) {
-      toast(humanizeCloudError(e), { bad: true })
+      toast(humanizeCloudError(e, 'sync'), { bad: true })
     } finally {
       setBusy('')
     }
@@ -134,7 +143,7 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
   const doPull = async () => {
     if (!profile || busy) return
     const okPull = await confirm({
-      title: '用云端的数据覆盖本机？',
+      title: '从云端恢复数据',
       message: '歌单会合并（不会丢本机独有的），设置项以云端为准。',
       confirmText: '恢复',
     })
@@ -142,14 +151,14 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
     setBusy('pull')
     try {
       const r = await syncDown(profile)
-      if (!r) toast('云端还没有备份，先点「立即同步」上传一次', { bad: true })
+      if (!r) toast('云端暂无备份，请先同步一次', { bad: true })
       else {
         setLastSync(Date.now())
-        toast('已从云端恢复，界面马上刷新…', { ok: true })
+        toast('已从云端恢复', { ok: true })
         window.setTimeout(() => window.location.reload(), 900)
       }
     } catch (e) {
-      toast(humanizeCloudError(e), { bad: true })
+      toast(humanizeCloudError(e, 'sync'), { bad: true })
     } finally {
       setBusy('')
     }
@@ -169,7 +178,7 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
         <div className="login-row">
           <input
             className="text-input" type="email" inputMode="email" autoComplete="email"
-            placeholder="邮箱，例如 you@qq.com" maxLength={80}
+            placeholder="邮箱地址" maxLength={80}
             value={email}
             onChange={e => setEmail(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && wait === 0) void doSend() }}
@@ -184,7 +193,7 @@ export function AccountPanel({ onProfile, compact = false }: Props) {
         </div>
         <div className="login-row">
           <input
-            className="text-input" inputMode="numeric" autoComplete="one-time-code" placeholder="邮箱收到的验证码" maxLength={8}
+            className="text-input" inputMode="numeric" autoComplete="one-time-code" placeholder="验证码" maxLength={8}
             value={code}
             onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
             onKeyDown={e => { if (e.key === 'Enter') void doLogin() }}

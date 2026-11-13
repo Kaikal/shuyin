@@ -40,6 +40,14 @@ interface Props {
    * 不用为每种样式各写一套向上/向下的坐标。
    */
   flip?: boolean
+  /**
+   * 这块频谱现在看不看得见。
+   *
+   * 默认 true（贴边光带这类常驻装饰）。传 false 时**整个绘制循环不启动**——
+   * 播放页里那两条频谱是常驻挂载的，页关掉了它照样 33fps 清屏重画，
+   * 主线程和电池都白烧（用户反馈「很多地方的动画还是卡」多半有它一份）。
+   */
+  active?: boolean
 }
 
 /** 40 段对数频段 → 屏幕上 n 根柱子（线性插值，视觉上更细密连贯） */
@@ -88,7 +96,7 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
 
 export function Spectrum({
   playing, height = 64, className, mirrored = false, barWidth, gap = 2, maxBars = 160,
-  variant = 'bars', vertical = false, flip = false,
+  variant = 'bars', vertical = false, flip = false, active = true,
 }: Props) {
   const cvRef = useRef<HTMLCanvasElement>(null)
   const target = useRef<number[]>([])
@@ -97,10 +105,16 @@ export function Spectrum({
   const caps = useRef<Record<string, number[]>>({})
   /** 自动增益用的滑动峰值，避免安静段落整条贴在基线 */
   const peakRef = useRef(0.3)
+  /**
+   * 绘制循环只跑一次（依赖里没有 playing），所以要一个 ref 拿最新值：
+   * 没数据时的「呼吸」只在播放中走，暂停就定格。
+   */
+  const playingRef = useRef(playing)
+  playingRef.current = playing
 
   /* 取数：播放中每 60ms 拉一次；暂停后目标归零，由绘制循环自然衰减 */
   useEffect(() => {
-    if (!playing) {
+    if (!playing || !active) {
       target.current = target.current.map(() => 0)
       return
     }
@@ -113,10 +127,11 @@ export function Spectrum({
     void pull()
     const id = window.setInterval(pull, 60)
     return () => { stopped = true; window.clearInterval(id) }
-  }, [playing])
+  }, [playing, active])
 
   /* 绘制循环 */
   useEffect(() => {
+    if (!active) return
     const cv = cvRef.current
     if (!cv) return
     const ctx = cv.getContext('2d')
@@ -125,6 +140,13 @@ export function Spectrum({
     let raf = 0
     let last = 0
     let ink = readInk()
+    /*
+     * 画布尺寸只在 ResizeObserver 里读，绘制循环里不碰 getBoundingClientRect。
+     * 每帧读一次布局 = 一次强制 reflow；这个循环 33fps 跑着，页面里任何
+     * DOM 改动（进度条、歌词高亮、切页动画）都会被它顶着同步一遍布局。
+     */
+    let cw = 0
+    let ch = 0
 
     // 切主题（style 属性 / class 变化）时立刻换色
     const mo = new MutationObserver(() => { ink = readInk() })
@@ -133,6 +155,8 @@ export function Spectrum({
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2)
       const r = cv.getBoundingClientRect()
+      cw = r.width
+      ch = r.height
       cv.width = Math.max(1, Math.round(r.width * dpr))
       cv.height = Math.max(1, Math.round(r.height * dpr))
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -157,23 +181,41 @@ export function Spectrum({
       return arr
     }
 
+    /** 连续多少帧一条数据都没有（≈ 1.4 秒），判「这台机器没给频谱」 */
+    let idleFrames = 0
+    /**
+     * 兜底用的「呼吸波」。
+     *
+     * 安卓上频谱要 RECORD_AUDIO：权限没给、或这台 ROM 不把输出音频开放给
+     * Visualizer 时，native 恒回 40 个 0——整条频谱贴成一条 2px 的死线，
+     * 用户看到的就是「频谱全是静止的」。真数据一来立刻接管，这里只在
+     * 长时间零数据且正在播放时顶上，节奏固定、幅度小，不会被当成真频谱。
+     */
+    const idleWave = (t: number): number[] => {
+      const a = new Array<number>(40)
+      for (let i = 0; i < 40; i++) {
+        const shape = Math.exp(-Math.pow((i - 7) / 13, 2))
+        a[i] = 0.05 + 0.34 * shape * (0.5 + 0.5 * Math.sin(t / 620 + i * 0.42))
+      }
+      return a
+    }
+
     const draw = (t: number) => {
       raf = requestAnimationFrame(draw)
       if (t - last < 28) return
       last = t
 
-      const r = cv.getBoundingClientRect()
-      // 纵向时不改 CSS 尺寸，只把绘制坐标系转 90°：
-      // 逻辑宽 = 元素高（沿屏幕竖直方向），逻辑高 = 元素宽
-      const W = vertical ? r.height : r.width
-      const H = vertical ? r.width : r.height
+      // 尺寸用 ResizeObserver 缓存下来的 cw/ch；纵向时不改 CSS 尺寸，
+      // 只把绘制坐标系转 90°：逻辑宽 = 元素高（沿屏幕竖直方向），逻辑高 = 元素宽
+      const W = vertical ? ch : cw
+      const H = vertical ? cw : ch
       if (W < 2 || H < 2) return
-      ctx.clearRect(0, 0, r.width, r.height)
+      ctx.clearRect(0, 0, cw, ch)
       const mirroredAxis = vertical || flip
       if (mirroredAxis) {
         ctx.save()
         if (vertical) {
-          ctx.translate(0, r.height)
+          ctx.translate(0, ch)
           ctx.rotate(-Math.PI / 2)
           // 左侧通栏：基线要落在窗口左沿（逻辑 y=0），柱子朝右长
           if (flip) { ctx.translate(0, H); ctx.scale(1, -1) }
@@ -200,10 +242,32 @@ export function Spectrum({
         return Math.min(3.4, 0.92 / Math.max(0.18, peakRef.current))
       }
 
-      const raw = bands(target.current, n)
+      /* 一条数据都没有：播放中改画呼吸波，暂停就让它停在原地 */
+      let rawMax = 0
+      for (let i = 0; i < target.current.length; i++) {
+        const v0 = target.current[i] ?? 0
+        if (v0 > rawMax) rawMax = v0
+      }
+      if (rawMax < 0.005) idleFrames++
+      else idleFrames = 0
+      /*
+       * 暂停、而且数据已经完全衰减：**什么也不画**。
+       *
+       * 每根柱子的高度都有 `Math.max(2, …)` 的下限，没有数据时整条频谱就是
+       * 一排 2px 高的点，等距、齐平——深色主题下它埋在近黑底里看不出来，
+       * 浅色主题下就变成横在白底上的一条「亮蓝虚线」。
+       * 没有声音本来就没有频谱，清屏（上面刚 clearRect 过）比画一条假基线诚实。
+       */
+      if (!playingRef.current && rawMax < 0.005) return
+      const idle = idleFrames > 40 && playingRef.current
+      const src = idle ? idleWave(t) : target.current
+
+      const raw = bands(src, n)
       // 只推进一次平滑：重复调用会让柱子追得更急，视觉上忽快忽慢
       const barsVals = smoothTo('bars', raw)
-      const gain = gainFor(barsVals)
+      /* 兜底的呼吸波幅度已经按「看得出在动、但不像真在放歌」定好了，
+         别再走自动增益把它顶到满格 */
+      const gain = idle ? 1 : gainFor(barsVals)
 
       if (variant === 'bars' || variant === 'meter' || variant === 'mirror') {
         const vals = barsVals
@@ -316,8 +380,8 @@ export function Spectrum({
         const pitchX = Math.max(5.2, Math.min(9, W / 150))
         const dn = Math.max(16, Math.min(280, Math.floor(W / pitchX)))
         const dx = W / dn
-        const vals = smoothTo('dots', bands(target.current, dn), 0.66, 0.84)
-        const g = gainFor(vals)
+        const vals = smoothTo('dots', bands(src, dn), 0.66, 0.84)
+        const g = idle ? 1 : gainFor(vals)
         const pitchY = Math.max(5, Math.min(7.5, unit / 14))
         const radius = Math.max(1.2, Math.min(2.1, pitchY * 0.31))
         const rows = Math.max(5, Math.floor(unit / pitchY))
@@ -401,11 +465,11 @@ export function Spectrum({
           { key: 'rib2', scale: 0.45, top: 0.08, bottom: 0.42, stroke: hexA(ink.soft, 0.6), rise: 0.24, fall: 0.94 },
         ]
         for (const l of layers) {
-          const vals = smoothTo(l.key, bands(target.current, wn), l.rise, l.fall)
+          const vals = smoothTo(l.key, bands(src, wn), l.rise, l.fall)
           fillWave(vals, gain, l.top, l.bottom, l.stroke, 1, l.scale)
         }
       } else {
-        const vals = smoothTo('wave', bands(target.current, wn), 0.5, 0.8)
+        const vals = smoothTo('wave', bands(src, wn), 0.5, 0.8)
         fillWave(vals, gain, 0.02, 0.34, hexA(ink.soft, 0.9), 1.7)
       }
 
@@ -419,7 +483,7 @@ export function Spectrum({
     }
     raf = requestAnimationFrame(draw)
     return () => { cancelAnimationFrame(raf); ro.disconnect(); mo.disconnect() }
-  }, [barWidth, gap, mirrored, maxBars, variant, vertical, flip])
+  }, [barWidth, gap, mirrored, maxBars, variant, vertical, flip, active])
 
   return (
     <div

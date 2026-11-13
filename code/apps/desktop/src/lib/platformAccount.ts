@@ -15,6 +15,7 @@
 import type { PlatformAccountInfo, PlatformSource } from '@shuyin/lx-provider'
 import { useEffect, useState } from 'react'
 import { invoke, isAndroid, isTauri } from './bridge'
+import { onNative } from './native/android'
 import { KEYS, settings } from './settings'
 
 /** 一个平台的登录态。`cookie` 是能直接塞进请求头的整串，含 httpOnly 凭证 */
@@ -191,6 +192,29 @@ async function applyLogin(source: PlatformSource, cookie: string): Promise<'ok' 
 const LOGIN_TIMEOUT = 180_000
 
 /**
+ * 安卓：登录结果除了走命令通道，还会以**原生事件**推过来。
+ *
+ * 两条路都要接。命令通道那条有个天生的脆弱点——它要求「调用返回的那一刻，
+ * 正好有一个 JS 的 await 在等」。singleTask 的假回调、调用超时、页面切换
+ * 都会把这个等待者提前消费掉；之后用户真把登录走完，结果就落进黑洞，
+ * 界面上永远是「没拿到登录凭证」。事件这条路不看有没有人在等。
+ */
+let loginEventWired = false
+function wireLoginEvent(): void {
+  if (!isAndroid || loginEventWired) return
+  loginEventWired = true
+  onNative('platform://login', p => {
+    const r = p as { source?: string; ok?: boolean; cookie?: string } | null
+    if (!r?.ok || !r.cookie || !r.source) return
+    const src = r.source as PlatformSource
+    // 命令通道可能已经把同一份凭证落过盘：值一样就不必再问一次平台
+    if (state[src]?.cookie === r.cookie) return
+    void applyLogin(src, r.cookie)
+  })
+}
+wireLoginEvent()
+
+/**
  * 打开官方登录窗并等结果。
  *
  * 返回 `{ ok:true }` 时 cookie **已经落盘**，调用方直接刷新页面数据即可。
@@ -204,11 +228,60 @@ export async function loginPlatform(source: PlatformSource): Promise<LoginResult
    */
   if (isAndroid) {
     await bootPlatformAccounts()
-    const r = await invoke<{ ok?: boolean; cancel?: boolean; error?: string; cookie?: string }>(
-      'platform_login', { source },
-    )
+    /*
+     * 这次登录开始前的凭证。命令通道回来说「没拿到」的时候，用它判断
+     * 「是不是事件通道已经把同一份凭证落盘了」——见下面的兜底。
+     */
+    const before = state[source]?.cookie
+    type R = { ok?: boolean; cancel?: boolean; error?: string; cookie?: string }
+    /*
+     * 一律带 `force`。
+     *
+     * 以前第一次不带：原生那边的「已有凭证直接放行」会拿 WebView 里残留的
+     * MUSIC_U / qm_keyst 秒返回，前端校验不过 → 再带 force 重开一次。
+     * 但 force 当时在 Bridge→MainActivity 那段被丢了，第二次还是秒返回同一份旧凭证，
+     * 用户看到的就是「跳一下就弹回来，说没拿到登录凭证」。
+     *
+     * 现在：force 会一路传到 Activity，并由它**先把这家平台的凭证 cookie 清掉**
+     * 再打开登录页——否则网易云的登录页读到旧 MUSIC_U 会直接跳回首页，
+     * 用户根本看不到登录表单（「跳转不到登录页面」）。
+     */
+    const call = async (force: boolean): Promise<R> => {
+      try {
+        return await invoke<R>('platform_login', { source, force })
+      } catch (e) {
+        /*
+         * 原生侧没回来（超时 / 桥断了）。以前这里没 catch，异常一路冒到调用方，
+         * 用户只看到「什么都没发生」——比一句明确的失败更糟。
+         */
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+    let r = await call(true)
+    if (r?.ok && r.cookie && (await applyLogin(source, r.cookie)) === 'no') {
+      r = await call(true)
+    }
     if (!r?.ok || !r.cookie) {
-      return { ok: false, cancel: r?.cancel, error: r?.error || '没拿到登录凭证' }
+      /*
+       * 命令通道说没有凭证 —— 但**不一定真没有**。
+       *
+       * 安卓那边登录窗收尾时三条路同时投（进程内直投 / result 通道 / 原生事件），
+       * 其中事件那条不依赖「有没有一个 await 在等」，常常比命令的返回值更早到，
+       * 已经把凭证 applyLogin 落盘了；而命令通道那个等待者可能早被 singleTask 的
+       * 假回调消费掉，回给前端的就是一句空失败。
+       * 用户看到的于是是「明明登上了，却每次都提示没拿到登录凭证」。
+       *
+       * 所以这里**以存档为准**：本次调用期间账号从「没登录」变成「已登录」，
+       * 就是成功，别再报错去覆盖界面上已经正确的状态。
+       */
+      if (!r?.cancel && state[source]?.cookie && state[source]!.cookie !== before) return { ok: true }
+      /*
+       * 「用户自己关掉」和「登完了没认出来」必须分开。
+       * 以前两者都落到「没拿到登录凭证」——用户明明只是点了关闭，
+       * 却被告知登录失败，看起来像功能坏了（实际是他主动放弃的）。
+       */
+      if (r?.cancel) return { ok: false, cancel: true, error: '已取消登录' }
+      return { ok: false, error: r?.error || '没拿到登录凭证' }
     }
     if (await applyLogin(source, r.cookie) === 'no') {
       return { ok: false, error: '登录没生效，再试一次' }
@@ -228,6 +301,9 @@ export async function loginPlatform(source: PlatformSource): Promise<LoginResult
   pending = null
   await bootPlatformAccounts()
   await ensureListener()
+
+  /** 这次开窗前的凭证：窗口里登完后由事件通道落盘时，用它判定「是这次登的」 */
+  const beforeDesk = state[source]?.cookie
 
   const done = new Promise<LoginResult & { cookie?: string }>(resolve => {
     pending = { source, at: Date.now(), resolve }
@@ -249,6 +325,8 @@ export async function loginPlatform(source: PlatformSource): Promise<LoginResult
 
   const res = await Promise.race([done, timeout])
   if (!res.ok || !res.cookie) {
+    // 同上：窗口里的人可能早就登完了，只是没通过命令通道回到这里
+    if (!res.cancel && state[source]?.cookie && state[source]!.cookie !== beforeDesk) return { ok: true }
     return { ok: res.ok, cancel: res.cancel, error: res.ok ? '没拿到登录凭证' : res.error }
   }
 

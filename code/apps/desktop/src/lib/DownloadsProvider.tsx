@@ -18,6 +18,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LocalTrack } from '@shuyin/core'
 import { bridge } from './bridge'
+import { onNative } from './native/android'
 import { settings } from './settings'
 import { resolvePlayUrl, forgetResolved } from './online'
 
@@ -94,6 +95,16 @@ const qualityTag = (r: { quality?: string; qualityLabel?: string }) => {
 const mb = (n: number) => (n / 1048576).toFixed(1)
 
 /**
+ * 拼「目录 + 文件名」。
+ *
+ * Windows 是反斜杠，安卓的公共存储路径是正斜杠——一律用 `\\` 拼的话，
+ * 安卓下载页会显示成 `/storage/emulated/0/Music/疏音\晴天.mp3`，一眼看着就是坏的。
+ * 安卓原生侧只取文件名（真正写哪儿由 MediaStore / SAF 决定），所以这里只影响展示。
+ */
+const joinPath = (dir: string, name: string) =>
+  `${dir.replace(/[\\/]+$/, '')}${bridge.isAndroid ? '/' : '\\'}${name}`
+
+/**
  * 失败原因 → 一句人话。
  *
  * 用户不需要知道「音源」「直链」「HTTP 403」是什么，他只需要知道
@@ -146,6 +157,16 @@ interface Ctx {
   customDir: string
   /** 换目录；传空串恢复默认 */
   setDir(path: string): Promise<void>
+  /**
+   * 换目录（系统选择器）。
+   *
+   * 桌面走 Tauri 的目录对话框、安卓走 SAF（`ACTION_OPEN_DOCUMENT_TREE`），
+   * 两边都由原生弹窗，选完立刻生效。以前设置页只调 Tauri 的 dialog——
+   * 安卓上那个动态 import 直接抛错被 catch 吞掉，点「更改…」**毫无反应**。
+   */
+  pickDir(): Promise<void>
+  /** 系统选择器是否可用（安卓、桌面都可以；网页预览不可以） */
+  canPickDir: boolean
   /** 下载一首在线曲目（已在队列/已完成就不会重复入队） */
   download(track: LocalTrack, quality?: string): void
   /** 导出当前曲目的 .lrc */
@@ -206,6 +227,11 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       dirRef.current = ''
       setCustomDir('')
       await settings.set(DIR_KEY, '')
+      /*
+       * 安卓的自选目录是原生侧持有的一份 SAF 授权：光清 localStorage 不够，
+       * 原生那边还在往旧目录写。让原生一起忘掉，再取回默认的公共目录。
+       */
+      if (bridge.isAndroid) await bridge.downloadsResetDir().catch(() => null)
       await resolveDir()
       return
     }
@@ -217,14 +243,70 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     await settings.set(DIR_KEY, p)
   }, [resolveDir])
 
+  /**
+   * 系统选择器换目录。
+   *
+   * 安卓：原生弹 `ACTION_OPEN_DOCUMENT_TREE`，授权持久化，返回换算好的绝对路径；
+   * 桌面：Tauri 的目录对话框。两条路都只在**真的选了**的时候改状态，
+   * 用户按返回不该把现在的目录弄丢。
+   */
+  const pickDir = useCallback(async () => {
+    if (bridge.isAndroid) {
+      const r = await bridge.downloadsPickDir().catch(() => null)
+      if (!r || r.cancel || !r.dir) return
+      dirRef.current = r.dir
+      setDirState(r.dir)
+      setCustomDir(r.custom ? r.dir : '')
+      await settings.set(DIR_KEY, r.custom ? r.dir : '')
+      return
+    }
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const picked = await open({ directory: true, multiple: false, title: '选择下载目录' })
+      if (typeof picked === 'string' && picked) await setDir(picked)
+    } catch { /* 用户取消 / 网页预览 */ }
+  }, [setDir])
+
+  useEffect(() => {
+    /*
+     * 原生那边选完目录会推一条 `downloads://dir`。
+     *
+     * 为什么不能只靠 `downloadPickDir()` 的返回值：那条命令在原生侧阻塞等用户，
+     * 用户翻得久一点就会超时，而选择其实已经生效了——只信返回值的话，
+     * 界面会一直显示旧路径，往后的下载却写去了新目录（更糟的是相反情况）。
+     */
+    return onNative('downloads://dir', payload => {
+      const r = payload as { dir?: string; custom?: boolean } | null
+      if (!r?.dir) return
+      dirRef.current = r.dir
+      setDirState(r.dir)
+      setCustomDir(r.custom ? r.dir : '')
+      void settings.set(DIR_KEY, r.custom ? r.dir : '')
+    })
+  }, [])
+
   useEffect(() => {
     let alive = true
     void (async () => {
-      const saved = await settings.get<string>(DIR_KEY).catch(() => null)
-      if (saved && alive) {
-        dirRef.current = saved
-        setDirState(saved)
-        setCustomDir(saved)
+      /*
+       * 安卓上**以原生为准**：自选目录是原生侧持有的一份 SAF 授权，
+       * localStorage 只记了个显示用的字符串。用户清过数据、换过手机、
+       * 或授权失效时，两边就对不上——那种「设置里写着 A、文件掉进 B」最难查。
+       */
+      if (bridge.isAndroid) {
+        const st = await bridge.downloadsState().catch(() => null)
+        if (st?.dir && alive) {
+          dirRef.current = st.dir
+          setDirState(st.dir)
+          setCustomDir(st.custom ? st.dir : '')
+        }
+      } else {
+        const saved = await settings.get<string>(DIR_KEY).catch(() => null)
+        if (saved && alive) {
+          dirRef.current = saved
+          setDirState(saved)
+          setCustomDir(saved)
+        }
       }
       await resolveDir()
       // 读回历史任务：download 中的一律转成「已中断」，否则界面永远转圈
@@ -288,9 +370,13 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       if (!dirNow) throw new Error('拿不到下载目录，去「设置 → 下载」选一个')
 
       if (task.kind === 'lyric') {
-        const dest = `${dirNow}\\${fileNameOf(task)}.lrc`
-        await bridge.saveLyricsFile(dest, task.lrc ?? '')
-        patch(id, { status: 'done', path: dest, done: 1, total: 1, qualityLabel: 'LRC 歌词' })
+        const dest = joinPath(dirNow, `${fileNameOf(task)}.lrc`)
+        /*
+         * 原生会回实际路径：安卓上 .lrc 只能落在公共「下载/疏音」
+         * （分区存储不允许往 Music 写非媒体文件），显示成歌曲那个目录就成了谎报。
+         */
+        const real = await bridge.saveLyricsFile(dest, task.lrc ?? '').catch(() => null)
+        patch(id, { status: 'done', path: real || dest, done: 1, total: 1, qualityLabel: 'LRC 歌词' })
         return
       }
 
@@ -321,7 +407,7 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
       const r = await resolvePlayUrl(track, { quality: task.quality })
       /* 文件名带上音质：同一首歌下多个音质时靠它区分，不会互相覆盖。
          用**实际取到的**档位（可能比用户点的低一档），跟下载页显示的一致。 */
-      const dest = `${dirNow}\\${fileNameOf(task)}${qualityTag(r)}${extOf(r.url)}`
+      const dest = joinPath(dirNow, `${fileNameOf(task)}${qualityTag(r)}${extOf(r.url)}`)
       patch(id, {
         status: 'downloading',
         path: dest,
@@ -484,7 +570,10 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
 
   return (
     <DownloadsCtx.Provider
-      value={{ tasks, dir, customDir, setDir, download, downloadLyric, retry, remove, clearFinished, busyOf, taskOf }}
+      value={{
+        tasks, dir, customDir, setDir, pickDir, canPickDir: bridge.isNative,
+        download, downloadLyric, retry, remove, clearFinished, busyOf, taskOf,
+      }}
     >
       {children}
     </DownloadsCtx.Provider>

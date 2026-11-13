@@ -73,6 +73,24 @@ const folia = createPref(KEYS.foliaFx, true)
  */
 const vinyl = createPref(KEYS.vinylView, true)
 
+/**
+ * 手机播放页「左右滑动切换」的提示看过没（默认没看过 → 首次进播放页提示一次）。
+ *
+ * 存成偏好而不是每次进页面都弹：翻页这个手势用户学会一次就够了，
+ * 之后每首歌都飘一句「左滑看歌词」纯属噪音。
+ */
+const swipeHint = createPref(KEYS.swipeHint, false)
+
+/**
+ * 贴边频谱（窗口上下左右那一圈柱子）显示与否，默认开。
+ *
+ * 以前这件事没有开关，频谱常驻：暂停时柱子全归零，只剩 `.sedge::before`
+ * 那层极淡的径向光——在近黑底上看着就是**屏幕下方一条莫名其妙的虚线**，
+ * 用户的第一反应是「这是干嘛的」。
+ * 现在两道闸：暂停时整层淡出（见 App.tsx 的 `idle`），想彻底不要就关掉这个开关。
+ */
+const spectrumOn = createPref(KEYS.spectrumOn, true)
+
 export const getLyricsSolo = solo.get
 export const setLyricsSolo = solo.set
 export const useLyricsSolo = solo.use
@@ -84,3 +102,11 @@ export const useFoliaFx = folia.use
 export const getVinylView = vinyl.get
 export const setVinylView = vinyl.set
 export const useVinylView = vinyl.use
+
+export const getSwipeHint = swipeHint.get
+export const setSwipeHint = swipeHint.set
+export const useSwipeHint = swipeHint.use
+
+export const getSpectrumOn = spectrumOn.get
+export const setSpectrumOn = spectrumOn.set
+export const useSpectrumOn = spectrumOn.use

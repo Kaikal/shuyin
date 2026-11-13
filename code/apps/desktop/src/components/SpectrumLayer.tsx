@@ -12,7 +12,7 @@
  * 辨识度反而下降，边缘位置统一用「柱」最稳。
  */
 import { useEffect, useRef } from 'react'
-import { bridge } from '../lib/bridge'
+import { bridge, isAndroid } from '../lib/bridge'
 import { useSpectrumPos } from '../lib/spectrumPos'
 import type { SpectrumStyle } from '../lib/spectrumStyle'
 import { Spectrum } from './Spectrum'
@@ -21,20 +21,42 @@ import { Spectrum } from './Spectrum'
 /* 贴边                                                               */
 /* ------------------------------------------------------------------ */
 
-export function SpectrumEdges({ playing, variant, imm }: {
+export function SpectrumEdges({ playing, variant, imm, idle }: {
   playing: boolean
   variant: SpectrumStyle
   /** 沉浸式播放页打开时，层级要抬到整屏覆盖层之上，否则看不见 */
   imm?: boolean
+  /**
+   * 没有声音在响（或频谱被关掉）。
+   *
+   * 频谱层是常驻的装饰：暂停之后柱子会自然衰减到 0，可它底下还有一层
+   * `.sedge::before` 的主题色径向光——在近黑底上就是**屏幕下沿一条极淡的虚线**，
+   * 看不出是频谱，只让人觉得「这儿怎么多了一条线」。
+   * 所以没响的时候整层淡出，不是把柱子画成 0 了事。
+   */
+  idle?: boolean
 }) {
   const [pos] = useSpectrumPos()
+  /*
+   * 手机不做贴边光带。用户的模型里「频谱」就是唱片外面那一圈
+   * （开频谱 = 唱片模式 + 黑圈换环，见 ImmersivePlayer 的 specRing）；
+   * 页面上再挂一条贴着屏幕下沿的横条，既重复又挡手。
+   * 顺带把每 70ms 一次的 `bridge.spectrum()` 也省掉——那是一次跨语言 IPC。
+   */
+  if (isAndroid) return null
   if (pos === 'cover') return null
 
   const vertical = pos === 'left' || pos === 'right'
   /* 顶部往下长、左侧往右长；右侧和底部本来就是从边缘朝里长 */
   const flip = pos === 'top' || pos === 'left'
   return (
-    <div className="sedge" data-pos={pos} data-imm={imm ? 'true' : 'false'} aria-hidden="true">
+    <div
+      className="sedge"
+      data-pos={pos}
+      data-imm={imm ? 'true' : 'false'}
+      data-idle={idle ? 'true' : 'false'}
+      aria-hidden="true"
+    >
       <Spectrum
         playing={playing}
         variant={variant}
@@ -208,6 +230,9 @@ export function CoverRing({ playing, pad = 100, className, variant = 'bars' }: {
     let last = 0
     let accent = '#6E8BFF'
     let soft = '#9DB2FF'
+    /** 画布尺寸缓存，见绘制循环里的注释 */
+    let cw = 0
+    let ch = 0
     const readInk = () => {
       const cs = getComputedStyle(document.documentElement)
       accent = cs.getPropertyValue('--sy-accent').trim() || '#6E8BFF'
@@ -220,6 +245,8 @@ export function CoverRing({ playing, pad = 100, className, variant = 'bars' }: {
     const resize = () => {
       const dpr = Math.min(window.devicePixelRatio || 1, 2)
       const r = cv.getBoundingClientRect()
+      cw = r.width
+      ch = r.height
       cv.width = Math.max(1, Math.round(r.width * dpr))
       cv.height = Math.max(1, Math.round(r.height * dpr))
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -233,9 +260,9 @@ export function CoverRing({ playing, pad = 100, className, variant = 'bars' }: {
       if (t - last < 30) return
       last = t
 
-      const r = cv.getBoundingClientRect()
-      const W = r.width
-      const H = r.height
+      /* 尺寸走缓存：每帧 getBoundingClientRect 会强制一次整页 reflow */
+      const W = cw
+      const H = ch
       if (W < 8 || H < 8) return
       ctx.clearRect(0, 0, W, H)
 

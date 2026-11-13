@@ -143,6 +143,13 @@ html[data-shell='phone'] .playbar {
   backdrop-filter: blur(20px) saturate(180%) brightness(1.05);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.10);
   overflow: hidden;
+  /*
+   * 横向留给自己的切歌手势（Shell.tsx 的 barGesture），纵向也别让浏览器
+   * 顺手把页面滚起来——条子贴在屏幕底部，在那儿上下滑本来就什么都看不见。
+   * `pan-y` 而不是 `none`：`none` 会让触摸彻底不发滚动提示，万一哪天条子里
+   * 塞进可滚内容就全死了；`pan-y` 保住纵向原生行为，只把横向让给 JS。
+   */
+  touch-action: pan-y;
 }
 /* 条体点开播放页；文本只留曲名 + 单行歌词（有歌词显歌词，没歌词显歌手） */
 html[data-shell='phone'] .pb-left {
@@ -157,8 +164,14 @@ html[data-shell='phone'] .pb-left {
 }
 html[data-shell='phone'] .pb-left:hover { background: transparent; }
 html[data-shell='phone'] .pb-cover-wrap .cover-art { width: 46px !important; height: 46px !important; }
-html[data-shell='phone'] .pb-name { font-size: 12.5px; font-weight: 500; }
-html[data-shell='phone'] .pb-sub { font-size: 10px; color: var(--sy-text-2); }
+/*
+ * 文字层级反转（用户：「歌词太小了，歌名太大了，应该反过来」）：
+ * 第一行曲名退到次要位（11px / 三级灰），第二行——有歌词时是当前歌词行——
+ * 升为主文案（13px / 一级白）。没有歌词时第二行回落成「歌手 · 专辑」，
+ * 也照这个层级走，整个条子永远只有一行重点。
+ */
+/* 歌名/歌词的字号层级在 handoff.css 末段定义（歌词为主、歌名退后）——
+   这里不写，否则同特异性会被那边按加载顺序盖掉。 */
 /* 桌面那排大控制键整组隐藏（循环/上一首/音量在手机上收进播放页） */
 html[data-shell='phone'] .pb-mid { display: none; }
 html[data-shell='phone'] .pb-right { display: none; }
@@ -174,27 +187,39 @@ html[data-shell='phone'] .pb-mini-acts .icon-btn { width: 40px; height: 40px; }
 html[data-shell='phone'] .pb-mini-acts .play-primary { width: 42px; height: 42px; }
 html[data-shell='phone'] .pb-mini-acts svg { width: 18px; height: 18px; }
 
-/* 进度收成迷你条顶上的一条 2px 细线（Lumen §7.5：左右内缩 12，不放数字）。
-   注意只作用在播放条上——`.progress` 在沉浸式播放页里也有一个（带时间和拖拽点），
-   不加 `.playbar` 前缀会把那边压成 0 高的细线。 */
-html[data-shell='phone'] .playbar .progress {
+/*
+ * 进度条改成**贴着封面外沿的一圈圆角矩形**（用户：「专辑图片是方形，进度条是圆形」）。
+ * 封面 46px 圆角 8，环画在 54px 的盒子里（四周各留 4px），rx 与封面圆角同款。
+ * 进度用 pathLength=100 的百分比表示（Shell.tsx 里写 stroke-dasharray）。
+ * 只指示、不可拖：手机上精确 seek 在播放页的进度条做，迷你条犯不着。
+ * 顶上原来那条 2px 细线被环替代，整个隐藏——同一个进度画两遍只会互相抢视线。
+ */
+html[data-shell='phone'] .playbar .progress { display: none; }
+html[data-shell='phone'] .pb-cover-wrap { position: relative; }
+/* 环盒 = 封面 + 每边 3px（46）。
+   原来是每边 4 的外框，配上 2.5 的描边，在 40px 的封面上像「另一个盒子套在外面」；
+   收成 3 之后描边紧贴封面（内沿只剩 0.5 的缝），才像封面自己的一圈进度。
+   封面 40 见 handoff.css；改动这两个数就要同步 Shell.tsx 的 RING_RECT。 */
+html[data-shell='phone'] .pb-ring {
   position: absolute;
-  left: 12px;
-  right: 12px;
-  top: 0;
-  width: auto;
-  height: 2px;
-  gap: 0;
+  left: -3px;
+  top: -3px;
+  width: 46px;
+  height: 46px;
+  pointer-events: none;
 }
-html[data-shell='phone'] .playbar .progress .time,
-html[data-shell='phone'] .playbar .progress .knob,
-html[data-shell='phone'] .playbar .progress .bubble { display: none; }
-html[data-shell='phone'] .playbar .progress .track {
-  height: 2px;
-  border-radius: 0;
-  background: rgba(255, 255, 255, 0.10);
+html[data-shell='phone'] .pb-ring-bg {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.16);
+  stroke-width: 2.5;
 }
-html[data-shell='phone'] .playbar .progress .fill { border-radius: 0; }
+html[data-shell='phone'] .pb-ring-fg {
+  fill: none;
+  stroke: var(--sy-accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.25s linear;
+}
 
 /* ===== 队列 / 详情：手机上从右侧抽屉改成底部 sheet（Lumen §7.5） ===== */
 /* 队列 sheet：78vh、圆角 24 24 0 0、抓取条、底部留安全区 */
@@ -616,8 +641,16 @@ html[data-shell='phone'] .plp-cbx { display: flex; }
   to { opacity: 1; }
 }
 
-html[data-shell='phone'] .page-keep:not([hidden]) {
-  animation: sy-fade-in 170ms var(--sy-ease-soft) both;
+/*
+ * 手机换页不再有入场动画：页面是横向长条（`.page-track`），位移本身就是切换过程。
+ * 以前这里给 `.page-keep` 挂 220ms 的 `page-enter`，滑动时那 8px 上移 + 淡入
+ * 会和横向位移叠在一起，看起来像「滑到一半闪一下」。
+ *
+ * 二层页面（歌单详情 / 曲库 / 导入）保留推进动画：那是压在上一页上的，
+ * 和横滑不是同一件事。
+ */
+html[data-shell='phone'] .page-keep.push:not([hidden]) {
+  animation: page-push 220ms var(--sy-ease-panel) both;
 }
 
 /* 一层 blur 足够柔，三层滤镜在移动 GPU 上是纯浪费 */
@@ -638,7 +671,7 @@ html[data-shell='phone'] .track-row {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html[data-shell='phone'] .page-keep:not([hidden]) { animation: none; }
+  html[data-shell='phone'] .page-keep.push:not([hidden]) { animation: none; }
 }
 
 /* ==================================================================== */
@@ -1022,3 +1055,65 @@ html[data-shell='tablet'] .search-go {
 /* 只作用于搜索页：首页那排「新建/导入/刷新/登录」保持原样，别被撑成整行 */
 html[data-shell='phone'] .search-page .lib-actions { width: 100%; }
 html[data-shell='phone'] .search-page .search-box { flex: 1; min-width: 0; }
+
+/* ---------- ⑨ 轻提示：手机上改从下方夹在播放条之上 ---------- */
+/*
+ * 桌面放顶部（46px）没问题——那边页头是工具条，压一下不碍事。
+ * 手机上页头顶部就是返回键和歌单标题，提示条压上去像「界面坏了」；
+ * 底部播放条上方那块空白反而一直是空的，也不会挡住任何可点区域。
+ * 140 = 播放条自身 60 + 距底 72 的导航条 + 8 的缝。
+ */
+html[data-shell='phone'] .toast-host {
+  top: auto;
+  bottom: calc(var(--sy-safe-bottom, 0px) + 140px);
+}
+
+/* ---------- 搜索页空态：各平台热搜 ----------
+ * 手机上要**四家都在第一屏里**。
+ *
+ * 原来徽标独占一行（横排会把词云挤成三行），可四家叠起来仍然有 650+，
+ * 而 `.sr-empty` 不会滚（.page 是 overflow:hidden）——第四家「酷狗」整段
+ * 被裁掉，用户以为没有这家。现在两头一起收：徽标回到左边跟着首行、
+ * 徽标缩小、每家只留 6 个词，四家拢共三百多；`.sr-empty` 自己也补上了
+ * `overflow-y:auto`（见 search.css），再长也只多滑一下，不会凭空消失。 */
+html[data-shell='phone'] .sr-hot { margin-top: 12px; }
+html[data-shell='phone'] .sr-hot-row {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 0;
+}
+html[data-shell='phone'] .sr-hot-row .sr-badge {
+  flex: none;
+  margin-top: 6px;
+  height: 18px;
+  padding: 0 7px;
+  font-size: 10px;
+}
+html[data-shell='phone'] .sr-hot-words { gap: 6px; }
+html[data-shell='phone'] .sr-hot-word {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* 最近搜索在手机上只留两条。
+   空态里它排在热搜上面，一条长历史（「Hong Kong (feat. 王菲季候风)」这种）
+   自己就能占掉一整行，四家热搜因此被挤到屏幕外——那正是「看不到酷狗」的
+   另一半原因。两条够点，多了往下滚也还在。 */
+html[data-shell='phone'] .sr-history { padding-top: 10px; }
+html[data-shell='phone'] .sr-history .sr-ghost:nth-of-type(n + 3) { display: none; }
+
+/* 手机上每家只看前 4 个。
+   8 个词里只要掺进一两个长歌名（「연애의 조건 (LOVE OPTIONS) (恋爱的条件)」
+   这种会独占一整行），一家就撑到四行，四家叠起来要翻页——而这块只是空态里
+   的引子，不是榜单本身。4 个的顺序依旧是榜前四，点进去就是搜这首歌。
+   桌面宽度够，仍然给 8 个。 */
+html[data-shell='phone'] .sr-hot-word:nth-child(n + 5) { display: none; }
+
+/* ---------- 搜索联想：手机上加高行、压低面板 ----------
+ * 34px 的行在触屏上太密（手指按不准相邻那条），放到 42 才能一条条点；
+ * 面板高度也要收：手机上它离键盘很近，太长的列表会被键盘顶成一条缝。 */
+html[data-shell='phone'] .sr-sug { max-height: min(46vh, 304px); }
+html[data-shell='phone'] .sr-sug-item { height: 42px; font-size: 13px; }
+html[data-shell='phone'] .sr-sug-sub { max-width: 32%; }

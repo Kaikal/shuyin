@@ -39,8 +39,6 @@ export function SourcesSection() {
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null)
-  const [quality, setQuality] = useState('320k')
-  const [qualitys, setQualitys] = useState<string[]>(FALLBACK_QUALITY)
   const [disabled, setDisabled] = useState<string[]>([])
   /** 导入弹窗：'url' 粘贴链接 / 'code' 粘贴代码 */
   const [importMode, setImportMode] = useState<'url' | 'code' | null>(null)
@@ -49,7 +47,7 @@ export function SourcesSection() {
   const [importCode, setImportCode] = useState('')
   const [importing, setImporting] = useState(false)
 
-  /* 数据目录 / 禁用列表 / 音质：都从存档或应用目录来 */
+  /* 数据目录 / 禁用列表：从存档或应用目录来（音质已挪到「播放」页，见 QualitySection） */
   useEffect(() => {
     ;(async () => {
       let dd = ''
@@ -57,7 +55,6 @@ export function SourcesSection() {
       setDataDir(dd)
       const off = await settings.get<string[]>(KEYS.sourcesOff)
       if (off) { setDisabled(off); sourceManager.setDisabled(off) }
-      setQuality(await getPreferredQuality())
     })()
   }, [])
 
@@ -65,9 +62,6 @@ export function SourcesSection() {
   useEffect(() => sourceManager.subscribe(s => {
     setSources(s.sources)
     setLoading(s.loading)
-    const set = new Set<string>()
-    for (const p of ALL_PLATFORMS) for (const q of sourceManager.qualitysFor(p)) set.add(q)
-    if (set.size) setQualitys([...set])
   }), [])
 
   const reloadAll = useCallback(async (target?: string) => {
@@ -161,23 +155,77 @@ export function SourcesSection() {
     })
   }, [])
 
-  const changeQuality = useCallback((q: string) => {
-    setQuality(q)
-    void setPreferredQuality(q)
-  }, [])
+  /*
+   * 批量开关。
+   *
+   * 音源出问题时，用户能干的第一件事就是「关掉可疑的那个」。四五个音源逐个点
+   * 太笨，加一对「全部停用 / 全部启用」：排查完一键恢复，比记住原来哪几个是开的省事。
+   * 只是把 id 列表整体写一遍，`sourceManager.setDisabled` 本来就是这个语义。
+   */
+  const knownIds = sources.map(s => s.id)
+  const offIds = disabled.filter(id => knownIds.includes(id))
+  const allOff = knownIds.length > 0 && offIds.length === knownIds.length
+  const setAll = useCallback((on: boolean) => {
+    const next = on ? [] : sources.map(s => s.id)
+    setDisabled(next)
+    sourceManager.setDisabled(next)
+    void settings.set(KEYS.sourcesOff, next)
+  }, [sources])
+
+  /** 概览那三个数：可用 = 装好了且没被停用；故障单列，别混进「可用」里充数 */
+  const stat = {
+    ready: sources.filter(s => s.status === 'ready' && !offIds.includes(s.id)).length,
+    off: offIds.length,
+    bad: sources.filter(s => s.status === 'error').length,
+    loading: sources.filter(s => s.status === 'loading').length,
+  }
 
   return (
-    <section className="set-group">
+    <section className="set-group" data-pane="source" data-sec="sources">
       <h3>在线音源</h3>
 
-      {/* 这一行右侧是四个按钮，手机上必须换行排（见 mobile.css 的 .set-row-stack） */}
+      {/*
+       * 概览：先给结论，再给操作。
+       *
+       * 原来这一页一进来就是「导入音源 + 四个按钮 + 一条路径 + 音质」，全是操作项，
+       * 用户读完不知道自己现在到底能不能放歌。三个数字排在最上面，
+       * 「有没有音源、坏没坏」一眼就有答案。
+       */}
+      <div className="src-stat" data-empty={sources.length === 0 ? 'true' : undefined}>
+        <div className="src-stat-cells">
+          <div className="src-stat-cell" data-kind="ready">
+            <b className="num">{stat.ready}</b>
+            <span>可用</span>
+          </div>
+          <div className="src-stat-cell" data-kind="off">
+            <b className="num">{stat.off}</b>
+            <span>{stat.loading > 0 ? `加载中 ${stat.loading}` : '已停用'}</span>
+          </div>
+          <div className="src-stat-cell" data-kind="bad" data-active={stat.bad > 0 ? 'true' : undefined}>
+            <b className="num">{stat.bad}</b>
+            <span>加载失败</span>
+          </div>
+        </div>
+        <p className="src-stat-note">
+          {sources.length === 0
+            ? '还没导入音源：搜索、歌单、歌词照常可用，点播放时才需要它'
+            : stat.ready === 0
+              ? '当前没有可用音源，在线歌曲点播放会提示'
+              : '音源只负责取播放直链，搜索 / 歌单 / 歌词走平台官方接口'}
+        </p>
+      </div>
+
+      {/* 这一行右侧只放三个导入入口（手机上一行刚好放得下，见 mobile.css 的 .set-row-stack） */}
       <div className="set-row set-row-stack">
         <span className="set-label">
-          导入音源
+          音源脚本
+          <HelpTip
+            width={340}
+            text={'音源存在应用数据目录的 sources.json 清单里，只认下面三个导入入口。\n直接往文件夹里放 .js、或改动里面的文件都不会生效——防止脚本被悄悄换掉。\n同名重新导入 = 更新这一条；列表里删除 = 从清单移除。'}
+          />
           <span className="set-sub">
-            洛雪音乐格式的音源脚本。它只负责一件事：把「搜到的歌」换成能播的直链。
-            搜索、歌单、歌词都走各平台官方接口，<b>不导入音源也能用</b>；没有音源时，在线歌曲搜得到、点播放会提示。
-            脚本会主动联网，请只导入你信任的来源。
+            洛雪音乐格式，只负责把「搜到的歌」换成能播的直链。脚本会主动联网，
+            请只导入你信任的来源。
           </span>
         </span>
         <div className="src-dir-actions">
@@ -190,39 +238,33 @@ export function SourcesSection() {
           <button className="ghost-btn" onClick={() => { setImportName(''); setImportCode(''); setImportMode('code') }}>
             粘贴代码
           </button>
-          <button className="ghost-btn" disabled={!dataDir || loading} onClick={() => void reloadAll()}>
-            <IconRefresh width={13} height={13} /> 重新加载
-          </button>
         </div>
       </div>
 
-      <div className="src-dir" title={dataDir}>
-        <IconFolder width={13} height={13} />
-        <span className="src-dir-text">音源数据：{dataDir || '—'}</span>
-        <HelpTip
-          width={330}
-          text={'音源存在这个目录的 sources.json 清单里，只认上面三个导入入口。\n直接往文件夹里放 .js、或改动里面的文件都不会生效——防止脚本被悄悄换掉。\n同名重新导入 = 更新这一条；列表里删除 = 从清单移除。'}
-        />
-        <button className="link-btn" disabled={!dataDir} onClick={() => void bridge.revealInFolder(dataDir)}>打开</button>
-      </div>
-
+      {/*
+       * 维护行：重新加载 + 批量开关。
+       * 重新加载原本挤在导入按钮里，390 宽下会掉到第二行右对齐，看着像漏了一颗；
+       * 它和「全部停用」一样是维护动作，放一行更顺。
+       */}
       <div className="set-row">
         <span className="set-label">
-          优先音质
+          维护
           <span className="set-sub">
-            取不到会自动降档、再不行换平台找同一首歌；实际生效的档位在播放条上写着
+            {sources.length > 1
+              ? '脚本改动后点重新加载生效；音源出问题时先全关，再逐个打开定位'
+              : '改过脚本后点重新加载生效'}
           </span>
         </span>
-        <ChipMenu
-          label="音质"
-          value={qualitys.includes(quality) ? `${qualityLabel(quality)}` : quality}
-          activeId={quality}
-          alignEnd
-          width={220}
-          title="优先音质：取不到就自动降档 / 换平台，不用手动切"
-          options={qualitys.map(q => ({ id: q, name: qualityLabel(q), note: q }))}
-          onPick={changeQuality}
-        />
+        <span className="set-ctl src-maint">
+          <button className="ghost-btn" disabled={!dataDir || loading} onClick={() => void reloadAll()}>
+            <IconRefresh width={13} height={13} /> 重新加载
+          </button>
+          {sources.length > 1 && (
+            <button className="link-btn" onClick={() => setAll(allOff)}>
+              {allOff ? '全部启用' : '全部停用'}
+            </button>
+          )}
+        </span>
       </div>
 
       {msg && <div className={'src-msg' + (msg.bad ? ' bad' : '')}>{msg.text}</div>}
@@ -328,6 +370,90 @@ export function SourcesSection() {
           )}
         </div>
       </Modal>
+    </section>
+  )
+}
+
+/*
+ * 下面两块是从「音源」页拆出来的。
+ *
+ * 音源页原来把「装脚本」和「放歌用什么码率」「文件存在哪」混在一起，
+ * 后半截全是路径和技术细节，看着又乱又满，而真正要操作的「导入」被挤在中间。
+ * 现在各归各位：音质属于「播放」，目录属于「存储」，音源页只管脚本本身。
+ */
+
+/** 设置 · 播放 · 优先音质 */
+export function QualitySection() {
+  const [quality, setQuality] = useState('320k')
+  const [qualitys, setQualitys] = useState<string[]>(FALLBACK_QUALITY)
+
+  useEffect(() => {
+    void getPreferredQuality().then(setQuality).catch(() => {})
+    /* 档位由「当前装载的音源声明了什么」决定：没装音源时只留三档通用值，
+       装完 flac 音源刷新一下就能选 flac 了 */
+    const collect = () => {
+      const set = new Set<string>()
+      for (const p of ALL_PLATFORMS) for (const q of sourceManager.qualitysFor(p)) set.add(q)
+      if (set.size) setQualitys([...set])
+    }
+    collect()
+    return sourceManager.subscribe(collect)
+  }, [])
+
+  return (
+    <section className="set-group" data-pane="play" data-sec="quality">
+      <h3>音质</h3>
+      <div className="set-row">
+        <span className="set-label">
+          优先音质
+          <span className="set-sub">
+            取不到会自动降档、再不行换平台找同一首歌；实际生效的档位在播放条上写着。
+            可选项来自当前装载的音源声明
+          </span>
+        </span>
+        <ChipMenu
+          label="音质"
+          value={qualitys.includes(quality) ? qualityLabel(quality) : quality}
+          activeId={quality}
+          alignEnd
+          width={220}
+          title="优先音质：取不到就自动降档 / 换平台，不用手动切"
+          options={qualitys.map(q => ({ id: q, name: qualityLabel(q), note: q }))}
+          onPick={q => { setQuality(q); void setPreferredQuality(q) }}
+        />
+      </div>
+    </section>
+  )
+}
+
+/** 设置 · 存储 · 音源文件目录 */
+export function SourcesDirSection() {
+  const [dir, setDir] = useState('')
+  useEffect(() => {
+    void bridge.sourcesDefaultDir().then(d => setDir(d ?? '')).catch(() => {})
+  }, [])
+
+  return (
+    <section className="set-group" data-pane="storage" data-sec="sources-dir">
+      <h3>音源文件</h3>
+      <div className="set-row">
+        <span className="set-label">
+          音源数据目录
+          <span className="set-sub">
+            导入的脚本以清单形式存在这里。别手动往里丢 .js——只认音源页那三个导入入口，
+            直接改文件不会生效（防止脚本被悄悄换掉）
+          </span>
+        </span>
+        <span className="set-ctl">
+          <button className="ghost-btn" disabled={!dir} onClick={() => void bridge.revealInFolder(dir)}>
+            {bridge.isAndroid ? '复制路径' : '打开'}
+          </button>
+        </span>
+      </div>
+      <div className="src-dir" title={dir}>
+        <IconFolder width={13} height={13} />
+        <span className="src-dir-text">{dir || '—'}</span>
+      </div>
     </section>
   )
 }

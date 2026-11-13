@@ -7,6 +7,17 @@ import { bridge } from './bridge'
 
 const cache = new Map<string, LyricsDoc>()
 const inflight = new Map<string, Promise<LyricsDoc>>()
+/**
+ * 「这首确实没有歌词」的记录 + 时间戳。
+ *
+ * 和 `cache` 分开存：命中 `cache` 就彻底不再问了，但空结果不能这样——
+ * 本地没 .lrc、lrclib 也没有，可能只是这一下没连上。以前空结果也进 `cache`，
+ * 一旦写进去，重试也只会立刻拿回同一份空文档，界面上就永远「暂无歌词」。
+ * 现在空结果只记 60s：这段时间内不重复打接口，过了就允许再查一次。
+ */
+const miss = new Map<string, number>()
+const MISS_TTL = 60_000
+const EMPTY: LyricsDoc = { source: 'none', lines: [], plain: '' }
 
 function fromText(text: string, source: LyricsDoc['source']): LyricsDoc {
   const lines = parseLrc(text)
@@ -50,13 +61,35 @@ export async function searchOnlineLyrics(
     }
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 6000)
-    const res = await fetch('https://lrclib.net/api/get?' + params.toString(), {
-      signal: ctrl.signal,
-      headers: { accept: 'application/json' },
-    })
-    clearTimeout(timer)
-    if (!res.ok) return null
-    const data = await res.json() as { syncedLyrics?: string | null; plainLyrics?: string | null }
+    /*
+     * 安卓不能走 fetch：页面挂在虚拟域 `appassets.androidplatform.net` 上，
+     * 跨域请求 lrclib 会被 WebView 判 CORS（真机日志里就是
+     * "blocked by CORS policy: No 'Access-Control-Allow-Origin'"），
+     * 安卓那台从头到尾拿不到在线歌词。改走原生 `net_request`（Kotlin Http，无同源限制）。
+     */
+    const data = await (async () => {
+      if (bridge.isNative) {
+        const r = await bridge.invoke<{ status: number; body: string }>('net_request', {
+          req: {
+            url: 'https://lrclib.net/api/get?' + params.toString(),
+            method: 'GET',
+            headers: { accept: 'application/json' },
+            timeout: 6000,
+          },
+        })
+        clearTimeout(timer)
+        if (!r || r.status >= 400) return null
+        return JSON.parse(r.body) as { syncedLyrics?: string | null; plainLyrics?: string | null }
+      }
+      const res = await fetch('https://lrclib.net/api/get?' + params.toString(), {
+        signal: ctrl.signal,
+        headers: { accept: 'application/json' },
+      })
+      clearTimeout(timer)
+      if (!res.ok) return null
+      return await res.json() as { syncedLyrics?: string | null; plainLyrics?: string | null }
+    })()
+    if (!data) return null
     const text = data.syncedLyrics || data.plainLyrics || ''
     if (!text.trim()) return null
     const doc: LyricsDoc = {
@@ -77,19 +110,36 @@ export async function searchOnlineLyrics(
  * 统一入口：本地优先，miss 后尝试在线。
  * 结果按曲目缓存；同一曲目并发请求去重。
  */
-export function loadLyrics(track: LocalTrack, opts: { online?: boolean } = {}): Promise<LyricsDoc> {
+/**
+ * 统一入口：本地优先，miss 后尝试在线。
+ * 结果按曲目缓存；同一曲目并发请求去重。
+ *
+ * `retry` 是给「播放器自动重试」用的：重试就是要重新打一次接口，
+ * 不能被上面那条 60s 的空结果记录挡住。
+ */
+export function loadLyrics(
+  track: LocalTrack,
+  opts: { online?: boolean; retry?: boolean } = {},
+): Promise<LyricsDoc> {
   const hit = cache.get(track.id)
   if (hit) return Promise.resolve(hit)
+  const missed = miss.get(track.id)
+  if (!opts.retry && missed && Date.now() - missed < MISS_TTL) return Promise.resolve(EMPTY)
   const running = inflight.get(track.id)
   if (running) return running
 
   const p = (async () => {
-    let doc = await loadLocalLyrics(track).catch(() => ({ source: 'none', lines: [], plain: '' } as LyricsDoc))
+    let doc = await loadLocalLyrics(track).catch(() => EMPTY)
     if ((!doc.lines.length) && (opts.online !== false)) {
       const online = await searchOnlineLyrics(track)
       if (online) doc = online
     }
-    cache.set(track.id, doc)
+    if (doc.lines.length || doc.plain.trim()) {
+      cache.set(track.id, doc)
+      miss.delete(track.id)
+    } else {
+      miss.set(track.id, Date.now())
+    }
     inflight.delete(track.id)
     return doc
   })()
@@ -103,8 +153,14 @@ export async function forceOnlineLyrics(
   q?: { title?: string; artist?: string },
 ): Promise<LyricsDoc> {
   const online = await searchOnlineLyrics(track, q)
-  const doc = online ?? { source: 'none', lines: [], plain: '' }
-  cache.set(track.id, doc)
+  const doc = online ?? EMPTY
+  // 手动搜索拿到歌词就立刻生效，把「这首没歌词」的记录清掉
+  if (doc.lines.length || doc.plain.trim()) {
+    cache.set(track.id, doc)
+    miss.delete(track.id)
+  } else {
+    miss.set(track.id, Date.now())
+  }
   return doc
 }
 

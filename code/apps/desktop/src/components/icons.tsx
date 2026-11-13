@@ -19,7 +19,13 @@ export const IconNext = wrap(<><path d="M4 4.2v9.6L11.6 9 4 4.2Z" fill="currentC
 export const IconPlay = wrap(<path d="M5.2 2.4 15 9 5.2 15.6V2.4Z" fill="currentColor" stroke="none" />, '0 0 18 18')
 export const IconPause = wrap(<><rect x="4" y="3" width="3.6" height="12" rx="1.2" fill="currentColor" stroke="none" /><rect x="10.4" y="3" width="3.6" height="12" rx="1.2" fill="currentColor" stroke="none" /></>, '0 0 18 18')
 export const IconShuffle = wrap(<><path d="M2.6 4.8h2.3l6.3 6.5h2.2M2.6 11.3h2.3l6.3-6.5h2.2" /><path d="M12.2 2.9l1.9 1.9-1.9 1.9M12.2 9.4l1.9 1.9-1.9 1.9" /></>, '0 0 16 16')
-export const IconRepeat = wrap(<><path d="M3 6.4A4 4 0 0 1 7 2.6h4.2M13 9.6a4 4 0 0 1-4 3.8H4.8" /><path d="M9.6 1.2 11.4 2.9 9.6 4.6M6.4 11.4 4.6 13.1l1.8 1.7" /><text x="8" y="10.6" fontSize="5.4" textAnchor="middle" fill="currentColor" stroke="none" fontFamily="Inter">1</text></>, '0 0 16 16')
+/*
+ * 单曲循环：箭头中间那个 "1" 用 **path 画**，不用 `<text>`。
+ * `<text fontSize="5.4">` 在 18px 的图标里只剩 3px 高，屏幕上一团墨点，
+ * 看着既不像 1 也不像循环（用户原话「单曲播放的图标看起来好丑」）。
+ * 两笔 path 的粗细和箭头一致，缩到 16px 依然清楚。
+ */
+export const IconRepeat = wrap(<><path d="M3 6.4A4 4 0 0 1 7 2.6h4.2M13 9.6a4 4 0 0 1-4 3.8H4.8" /><path d="M9.6 1.2 11.4 2.9 9.6 4.6M6.4 11.4 4.6 13.1l1.8 1.7" /><path d="M6.6 6.2 8.5 5v5.4" /></>, '0 0 16 16')
 export const IconRepeatAll = wrap(<><path d="M3 6.4A4 4 0 0 1 7 2.6h4.2M13 9.6a4 4 0 0 1-4 3.8H4.8" /><path d="M9.6 1.2 11.4 2.9 9.6 4.6M6.4 11.4 4.6 13.1l1.8 1.7" /></>, '0 0 16 16')
 export const IconSequence = wrap(<><path d="M3 4.5h10M3 8.5h7M3 12.5h4" /><path d="M13.5 11v4M13.5 15l-1.8-1.8M13.5 15l1.8-1.8" transform="translate(0,-2)" /></>, '0 0 16 16')
 export const IconQueue = wrap(<><path d="M2.6 4.4h12.8M2.6 9h8.7M2.6 13.6h6.3" /><path d="M12.3 10.2 16.1 13 12.3 15.8V10.2Z" /></>, '0 0 18 18')
@@ -41,7 +47,17 @@ export const IconMore = wrap(
   '0 0 18 18',
 )
 export const IconFolder = wrap(<><path d="M2.5 5.2A1.7 1.7 0 0 1 4.2 3.5h2.4l1.7 1.7h7.5A1.7 1.7 0 0 1 17.5 7v7.3a1.7 1.7 0 0 1-1.7 1.7H4.2a1.7 1.7 0 0 1-1.7-1.7V5.2Z" /></>, '0 0 20 20')
-export const IconRefresh = wrap(<><path d="M13.8 3.7v3.5h-3.5" /><path d="M2.9 8.3A5.6 5.6 0 0 1 13.4 6l.4 1.2" /><path d="M2.2 12.3v-3.5h3.5" transform="translate(0.7 0)" /><path d="M13.1 7.7A5.6 5.6 0 0 1 2.6 10l-.4-1.2" transform="translate(0 4.3) scale(0.94)" /></>, '0 0 16 16')
+/** 刷新：单环 + 一个箭头。旧版是四段拼接弧线、其中两段还带 transform 偏移，
+ *  缩到 13~20px 就成了一团碎线（用户：「刷新按钮图标有点奇怪」）。
+ *  现在是「从右侧开口顺时针绕一圈」的闭环：起点 (14,8) 绕 3/4 圈到顶，
+ *  贝塞尔收口接箭头，箭头尖在 (14,5.33) 指向顺时针方向。 */
+export const IconRefresh = wrap(
+  <>
+    <path d="M14 8a6 6 0 1 1-6-6c1.68 0 3.287.667 4.493 1.827L14 5.333" />
+    <path d="M14 2v3.333h-3.333" />
+  </>,
+  '0 0 16 16',
+)
 export const IconDownload = wrap(<><path d="M8 2.5v8M4.8 7.6 8 10.8l3.2-3.2" /><path d="M2.8 13.5h10.4" /></>, '0 0 16 16')
 /** 导航「下载」：箭头落进托盘（与「导入」的箭头落进文件区分开） */
 export const IconDownloads = wrap(
@@ -125,6 +141,12 @@ export const IconSparkle = wrap(
 
 /* ---- 沉浸式播放 / 桌面歌词 ---- */
 export const IconChevronUp = wrap(<path d="M4 11.5 9 6.5l5 5" />, '0 0 18 18')
+/** 返回上一级（设计稿 07 队列页左上角那颗 ‹） */
+export const IconChevronLeft = wrap(<path d="M11.5 4 6.5 9l5 5" />, '0 0 18 18')
+/** 进入下一级（卡片右侧那颗 ›） */
+export const IconChevronRight = wrap(<path d="M6.5 4 11.5 9l-5 5" />, '0 0 18 18')
+/** 队列排序手柄（设计稿 07）：三条横线，六个点那版留给桌面 */
+export const IconGripLines = wrap(<path d="M3.6 5.4h10.8M3.6 9h10.8M3.6 12.6h10.8" />, '0 0 18 18')
 export const IconChevronDown = wrap(<path d="M4 6.5 9 11.5l5-5" />, '0 0 18 18')
 export const IconInfo = wrap(<><circle cx="9" cy="9" r="6.6" /><path d="M9 8.2v4.4M9 5.9v.01" /></>, '0 0 18 18')
 /** 桌面歌词：气泡 + 两行字 */
@@ -199,4 +221,97 @@ export const IconFullscreen = wrap(
 export const IconFullscreenExit = wrap(
   <path d="M6 2.4V6H2.4M13.6 6H10V2.4M10 13.6V10h3.6M2.4 10H6v3.6" />,
   '0 0 16 16',
+)
+
+/* ---------- 设计交付包（Android/design-handoff/icons）对应图标 ---------- */
+
+/** 收藏：心形（描边 → 选中时 CSS 填强调色） */
+export const IconHeart = wrap(
+  <path d="M9 15.2S2.4 11.2 2.4 6.9a3.7 3.7 0 0 1 6.6-2.3 3.7 3.7 0 0 1 6.6 2.3c0 4.3-6.6 8.3-6.6 8.3Z" />,
+  '0 0 18 18',
+)
+/** 收藏（已收藏）：同一颗心形填满——只换颜色在深色底上太难分辨 */
+export const IconHeartFilled = wrap(
+  <path d="M9 15.2S2.4 11.2 2.4 6.9a3.7 3.7 0 0 1 6.6-2.3 3.7 3.7 0 0 1 6.6 2.3c0 4.3-6.6 8.3-6.6 8.3Z"
+    fill="currentColor" stroke="none" />,
+  '0 0 18 18',
+)
+/** 唱片视图：同心圆纹路 + 中心孔（页头上切「封面 / 唱片」用） */
+export const IconDisc = wrap(
+  <>
+    <circle cx="9" cy="9" r="7.2" />
+    <circle cx="9" cy="9" r="2.1" />
+    <path d="M9 1.8a7.2 7.2 0 0 1 7.2 7.2" opacity=".55" />
+  </>,
+  '0 0 18 18',
+)
+/** 评论：对话气泡 */
+export const IconComment = wrap(
+  <>
+    <path d="M15 10.6a2 2 0 0 1-2 2H6.2L2.8 15.4V4.4a2 2 0 0 1 2-2h8.2a2 2 0 0 1 2 2Z" />
+  </>,
+  '0 0 18 18',
+)
+/** 分享：从方框里出去的箭头 */
+export const IconShare = wrap(
+  <>
+    <path d="M7 3.2H4.4a1.8 1.8 0 0 0-1.8 1.8v8.2a1.8 1.8 0 0 0 1.8 1.8h8.2a1.8 1.8 0 0 0 1.8-1.8V10" />
+    <path d="M10.6 2.8h4.2v4.2" />
+    <path d="M8.6 8.8 14.6 2.8" />
+  </>,
+  '0 0 18 18',
+)
+/** 拖动排序手柄：三条横线（设计稿 20×20，命中区扩到 44） */
+export const IconHandle = wrap(
+  <path d="M3 5.4h12M3 9h12M3 12.6h12" />,
+  '0 0 18 18',
+)
+/** 正在播放指示：四根高低柱（设计稿波形） */
+export const IconWaveform = wrap(
+  <g fill="currentColor" stroke="none">
+    <rect x="2.2" y="7" width="1.9" height="4" rx=".95" />
+    <rect x="5.4" y="4.4" width="1.9" height="9.2" rx=".95" />
+    <rect x="8.6" y="2.4" width="1.9" height="13.2" rx=".95" />
+    <rect x="11.8" y="5.6" width="1.9" height="6.8" rx=".95" />
+    <rect x="15" y="7.6" width="1.9" height="2.8" rx=".95" />
+  </g>,
+  '0 0 19 18',
+)
+/** 音质胶囊左侧的小喇叭（设计稿 ic-speaker 12） */
+export const IconSpeaker = wrap(
+  <>
+    <path d="M6.2 3.6 3.4 6H1.6v4h1.8l2.8 2.4V3.6Z" fill="currentColor" stroke="none" />
+    <path d="M8.2 5.8a3 3 0 0 1 0 4.4" />
+  </>,
+  '0 0 12 12',
+)
+/** 队列/列表（设计稿 ic-queue：三行 + 三角） */
+export const IconQueueLines = wrap(
+  <>
+    <path d="M2.6 4.4h9M2.6 9h6.4M2.6 13.4h4.6" />
+    <path d="M12.2 9.6 15.6 12l-3.4 2.4V9.6Z" />
+  </>,
+  '0 0 18 18',
+)
+
+/** 视图切换：卡片/网格（四宫格） */
+export const IconGrid = wrap(
+  <>
+    <rect x="2.6" y="2.6" width="5.2" height="5.2" rx="1.3" />
+    <rect x="10.2" y="2.6" width="5.2" height="5.2" rx="1.3" />
+    <rect x="2.6" y="10.2" width="5.2" height="5.2" rx="1.3" />
+    <rect x="10.2" y="10.2" width="5.2" height="5.2" rx="1.3" />
+  </>,
+  '0 0 18 18',
+)
+
+/** 视图切换：列表（封面 + 两行字） */
+export const IconRows = wrap(
+  <>
+    <rect x="2.6" y="3.4" width="3.6" height="3.6" rx="1" />
+    <path d="M8.2 4.2h7.2M8.2 6.2h4.6" />
+    <rect x="2.6" y="11" width="3.6" height="3.6" rx="1" />
+    <path d="M8.2 11.8h7.2M8.2 13.8h4.6" />
+  </>,
+  '0 0 18 18',
 )

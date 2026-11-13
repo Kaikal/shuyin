@@ -38,8 +38,13 @@ const SEARCH_CP = 'https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp'
 const https = (u?: string) => (u ? String(u).replace(/^http:\/\//, 'https://') : undefined)
 
 /** 用 album.mid 拼封面，300×300 */
+/**
+ * 封面：QQ 的图床把尺寸写在路径里，**只有 300 / 500 / 800 三档**
+ * （600 会 404，1000 也 404，实测）。这里取 500 当基线——列表小图够清楚，
+ * 播放页那种大封面由 `coverUrlOf` 按需要升到 800，见 `lib/coverUrl.ts`。
+ */
 const coverUrl = (albumMid?: string) =>
-  albumMid ? `https://y.qq.com/music/photo_new/T002R300x300M000${albumMid}.jpg` : undefined
+  albumMid ? `https://y.qq.com/music/photo_new/T002R500x500M000${albumMid}.jpg` : undefined
 
 /**
  * 这首歌真实可用的档位。
@@ -280,38 +285,78 @@ function authComm(a: { uin: string; key: string }) {
 }
 
 /**
+ * 「今天」在哪儿：上海当天 0 点的 Unix 秒（`get_recommend_feed` 的 `time` 是秒级）。
+ *
+ * 上海是 UTC+8 且没有夏令时，所以把时间整体往前推 8 小时后对一天取整，
+ * 再退回来就行——比按本地时区算稳（安卓机的时区可能是任何地方）。
+ */
+function shanghaiDayStart(nowSec = Math.floor(Date.now() / 1000)): number {
+  return nowSec - ((nowSec + 8 * 3600) % 86400)
+}
+
+/** 一张日推卡：`disstid` + 它的发布时间（秒，拿不到就是 0） */
+interface DailyCard {
+  id: string
+  time: number
+}
+
+/** 卡片上可能叫这几个名字，按顺序取第一个能解析成数字的 */
+const cardTime = (node: any): number => {
+  for (const k of ['time', 'ctime', 'create_time', 'publish_time', 'start_time']) {
+    const v = Number(node?.[k])
+    if (Number.isFinite(v) && v > 0) return v
+  }
+  return 0
+}
+
+/**
+ * 递归收集所有 `subtype === 510` 的卡片。
+ *
+ * 不能见到第一张就返回：同一屏 feed 里可能同时有昨天那张和今天新生成的，
+ * 顺序不保证，只有把它们都收齐才能挑出今天的。
+ */
+function collectDailyCards(node: any, out: DailyCard[], depth = 0): void {
+  if (!node || typeof node !== 'object' || depth > 9) return
+  if (Array.isArray(node)) {
+    for (const x of node) collectDailyCards(x, out, depth + 1)
+    return
+  }
+  if (Number(node.subtype ?? node.sub_type ?? node.SubType ?? 0) === 510) {
+    const direct = [node.disstid, node.id, node.content_id, node.tid]
+      .map(v => String(v ?? ''))
+      .find(v => /^\d{6,}$/.test(v))
+    if (direct) {
+      out.push({ id: direct, time: cardTime(node) })
+    } else {
+      const jump = String(node.jump_url ?? node.jumpUrl ?? node.scheme ?? '')
+      const m = jump.match(/(?:disstid=|\/playlist\/)(\d{5,})/)
+      if (m) out.push({ id: m[1], time: cardTime(node) })
+    }
+  }
+  for (const v of Object.values(node)) {
+    if (v && typeof v === 'object') collectDailyCards(v, out, depth + 1)
+  }
+}
+
+/**
  * 从推荐 feed 里挑出「每日 30 首」那张卡片的 id。
  *
  * feed 是「货架 → 卡位 → 卡片」三层，字段名在不同版本里飘过，所以按语义找：
  * `subtype === 510` 就是日推卡，id 是纯数字，或者藏在 `jump_url` 的
  * `disstid=` / `/playlist/` 后面。找不到就回 null——宁可这一块不显示，
  * 也不要拿别的卡片（比如「猜你喜欢」）冒充每日推荐。
+ *
+ * **必须校验 `time`**：客户端会缓存上一屏 feed，隔夜时那张 510 卡还是昨天的，
+ * 而 disstid 每天换一个——直接取第一张就是把昨天的 30 首当成今天的。
+ * 一张当天的都没有时退回第一张（有昨天那份也比整块消失强，且这是接口真的没生成）。
  */
-function pickDailyId(node: any, depth = 0): string | null {
-  if (!node || typeof node !== 'object' || depth > 9) return null
-  if (Array.isArray(node)) {
-    for (const x of node) {
-      const hit = pickDailyId(x, depth + 1)
-      if (hit) return hit
-    }
-    return null
-  }
-  if (Number(node.subtype ?? node.sub_type ?? node.SubType ?? 0) === 510) {
-    const direct = [node.disstid, node.id, node.content_id, node.tid]
-      .map(v => String(v ?? ''))
-      .find(v => /^\d{6,}$/.test(v))
-    if (direct) return direct
-    const jump = String(node.jump_url ?? node.jumpUrl ?? node.scheme ?? '')
-    const m = jump.match(/(?:disstid=|\/playlist\/)(\d{5,})/)
-    if (m) return m[1]
-  }
-  for (const v of Object.values(node)) {
-    if (v && typeof v === 'object') {
-      const hit = pickDailyId(v, depth + 1)
-      if (hit) return hit
-    }
-  }
-  return null
+function pickDailyId(node: any): string | null {
+  const cards: DailyCard[] = []
+  collectDailyCards(node, cards, 0)
+  if (!cards.length) return null
+  const dayStart = shanghaiDayStart()
+  const fresh = cards.find(c => c.time >= dayStart)
+  return (fresh ?? cards[0]).id
 }
 
 export function createTxApi(client: HttpClient): PlatformApi {
@@ -422,6 +467,48 @@ export function createTxApi(client: HttpClient): PlatformApi {
     },
 
     /**
+     * 当前登录的账号。
+     *
+     * 走网页版资料页 `fcg_get_profile_homepage`——**不用 `musicu`**：
+     * `musicu` 的 `GetLoginUserInfo` 拿到的 `info.nick` 是同一份，但那个域名
+     * 匿名态限流极狠（见文件头注释），而资料卡是每次进「我的」都刷的，
+     * 不该去挤那条已经被搜索占着的道。
+     *
+     * `cid=205360838` 是 QQ 空间资料的固定站点号，`g_tk` 用票据算，和列歌单同一套。
+     */
+    async getAccount() {
+      const a = authOf(client)
+      if (!a) return null
+      const j = await getJson(client,
+        `https://c.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg?cid=205360838`
+        + `&userid=${a.uin}&reqfrom=1&g_tk=${gtkOf(a.key)}&format=json`,
+        { headers: HEADERS, retry: 0 })
+      const c = j?.data?.creator
+      /*
+       * `code !== 0` 是**接口层面**的问题（票据过期 / 风控 / 域名抽风），
+       * 不是「没登录」——这种时候必须抛出去，让上层记成 `unknown`。
+       * 直接 `return null` 会被当成「平台说没登录」，把人家的登录态清掉。
+       */
+      if (Number(j?.code ?? -1) !== 0) throw new Error(`QQ 资料接口 code=${j?.code ?? '?'}`)
+      if (!c) return null
+      /*
+       * 昵称**照平台原样给**。
+       *
+       * 有人就是故意把昵称设成全透明字符（`ㅤ` / `U+3164`，本机这个号就是），
+       * 在 QQ 音乐里看上去就是一片空白。以前这里走 `nicknameText()` 把不可见字符
+       * 全剔掉，于是回落成「QQ音乐用户 541540」这种编出来的名字——用户一对
+       * 客户端就以为「你登错号了」。所以这里只做 `clean()`（去转义、收空白），
+       * 不可见字符留着；只有真的一个字都没有（空串）才走兜底。
+       */
+      const nick = clean(c.nick) || clean(c.name)
+      return {
+        userId: a.uin,
+        nickname: nick || `QQ音乐用户 ${a.uin.slice(-6)}`,
+        avatar: https(c.headpic),
+      }
+    },
+
+    /**
      * 我的歌单（登录态）。
      *
      * 走网页版「我的歌单」那条老接口 `fcg_user_created_diss`：按 uin 直接列，
@@ -489,7 +576,12 @@ export function createTxApi(client: HttpClient): PlatformApi {
         req_0: {
           module: 'music.srfDissInfo.DissInfo',
           method: 'CgiGetDiss',
-          param: { disstid: id, dirid: 0, tag: true, song_begin: 0, song_num: 100, userinfo: true, orderlist: true },
+          /*
+           * `disstid` 必须是**数字**，传字符串会回 `code:10004`（参数错误），
+           * 一首歌都拿不到。`pickDailyId` 是拿 `String()` 拼出来的（判断纯数字用的），
+           * 这里必须转回 Number——实测传 "6918995849" 失败、传 6918995849 拿到 30 首。
+           */
+          param: { disstid: Number(id), dirid: 0, tag: true, song_begin: 0, song_num: 100, userinfo: true, orderlist: true },
         },
       }, { headers: HEADERS })
       const d = j?.req_0?.data

@@ -1,7 +1,8 @@
 {
   "name": "shuyin-desktop",
   "private": true,
-  "version": "0.5.11",
+  "license": "Apache-2.0",
+  "version": "0.5.25",
   "type": "module",
   "scripts": {
     "dev": "vite",

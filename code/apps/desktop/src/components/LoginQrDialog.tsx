@@ -115,7 +115,7 @@ export function LoginQrDialog({ open, source, onClose, onLogged }: Props) {
                 toast(`已登录${platformName(session.source)}`, { ok: true })
                 cb.current.onLogged()
               } else if (!res.cancel) {
-                toast(res.error || '登录没成功', { bad: true })
+                toast(res.error || '登录失败', { bad: true })
               }
             })
           }, 1200)
@@ -162,7 +162,7 @@ export function LoginQrDialog({ open, source, onClose, onLogged }: Props) {
                   toast(`已登录${platformName(source)}`, { ok: true })
                   cb.current.onLogged()
                 } else if (!r.cancel) {
-                  toast(r.error || '登录没成功', { bad: true })
+                  toast(r.error || '登录失败', { bad: true })
                 }
               })
             }}

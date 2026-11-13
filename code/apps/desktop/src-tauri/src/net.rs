@@ -41,9 +41,58 @@ pub struct NetResponse {
     /// key 统一小写，前端按 `content-type` 这种写法取
     pub headers: HashMap<String, String>,
     pub body: String,
+    /// 原始字节的 base64。
+    ///
+    /// `body` 是「按文本解一遍」的结果，给普通接口用；文件下载（云同步的 JSON、
+    /// 图片、附件）必须认这串——文本解码在二进制上是有损的（UTF-8 替换符、
+    /// GB18030 兜底都会改写字节），拿它当文件内容等于把文件弄坏。
+    #[serde(rename = "bodyB64")]
+    pub body_b64: String,
 }
 
-fn collect(resp: ureq::Response) -> Result<NetResponse, String> {
+/// 标准 base64。手写这两段不引 crate：只有云同步的请求/响应各一处要用，
+/// 拉一个依赖进 Cargo.lock 不划算。
+fn b64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for c in bytes.chunks(3) {
+        let b0 = c[0] as u32;
+        let b1 = *c.get(1).unwrap_or(&0) as u32;
+        let b2 = *c.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        s.push(T[(n >> 18) as usize & 63] as char);
+        s.push(T[(n >> 12) as usize & 63] as char);
+        s.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    s
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for b in s.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\r' | b'\n' => continue,
+            _ => return None,
+        } as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn collect(resp: ureq::Response, want_b64: bool) -> Result<NetResponse, String> {
     let status = resp.status();
     let mut headers = HashMap::new();
     for name in resp.headers_names() {
@@ -56,8 +105,20 @@ fn collect(resp: ureq::Response) -> Result<NetResponse, String> {
         }
         headers.insert(name.to_ascii_lowercase(), vals.join("\n"));
     }
-    let body = resp.into_string().map_err(|e| format!("读取响应失败：{e}"))?;
-    Ok(NetResponse { status, headers, body })
+    // 先取字节：有损文本解码只用于 `body`，`bodyB64` 保持字节原样
+    let mut bytes: Vec<u8> = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    let body = String::from_utf8_lossy(&bytes).to_string();
+    Ok(NetResponse {
+        status,
+        headers,
+        body,
+        // 只有调用方明确要字节时才编码：这是全应用共用的出网口子，
+        // 每一条普通 JSON 响应都白做一次 base64 不值（音源接口载荷可不小）
+        body_b64: if want_b64 { b64_encode(&bytes) } else { String::new() },
+    })
 }
 
 /// 同步发一次请求。4xx/5xx **不当作错误**——平台接口的风控信息就在 body 里，
@@ -67,6 +128,8 @@ pub fn request(
     url: &str,
     headers: &HashMap<String, String>,
     body: Option<&str>,
+    body_b64: Option<&str>,
+    want_b64: bool,
     timeout_ms: u64,
 ) -> Result<NetResponse, String> {
     let a = agent();
@@ -82,14 +145,19 @@ pub fn request(
     }
     req = req.timeout(Duration::from_millis(timeout_ms.clamp(1_000, 60_000)));
 
-    let out = match body {
-        Some(b) if has_body => req.send_string(b),
+    let out = match (body_b64, body) {
+        // multipart / 二进制：按原始字节发，别过一遍 UTF-8
+        (Some(b), _) if has_body => {
+            let bytes = b64_decode(b).ok_or_else(|| "请求体 base64 解析失败".to_string())?;
+            req.send_bytes(&bytes)
+        }
+        (_, Some(b)) if has_body => req.send_string(b),
         _ => req.call(),
     };
     match out {
-        Ok(r) => collect(r),
+        Ok(r) => collect(r, want_b64),
         // 有状态码的失败也把响应读出来（body 里往往是业务错误信息）
-        Err(ureq::Error::Status(_, r)) => collect(r),
+        Err(ureq::Error::Status(_, r)) => collect(r, want_b64),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -776,6 +844,10 @@ pub struct ProbeAudio {
     pub status: u16,
     /// 从文件头解析出的真实时长（秒）；0 = 这个格式/这段数据里读不出来
     pub duration: f64,
+    /// 音频文件自己写的标题（Vorbis 注释 / ID3 TIT2）；读不到是空串
+    pub title: String,
+    /// 音频文件自己写的歌手；读不到是空串
+    pub artist: String,
 }
 
 /* ------------------------------------------------------------------ */
@@ -971,6 +1043,145 @@ pub fn sniff_duration(h: &[u8], total: i64, content_type: &str) -> f64 {
     }
 }
 
+/// 从文件头里读「这个文件自己说自己是谁」（标题 / 歌手）。
+///
+/// 为什么非读不可：时长只能挡住「差十几秒」的错歌。实测栽过一次——
+/// 播《孤勇者》（256 秒），某个音源给的是邓紫棋《唯一》（253.7 秒），
+/// 差 2.3 秒、稳稳落在容差里，校验一路绿灯，可耳机里唱的根本不是这首歌；
+/// 更早那次《花海》也是同一件事（253.7 秒）。
+/// 这种情况下唯一还讲得上证据的，就是音频文件自己带的标签。
+///
+/// 认三种最常见的封装，**读不出来就当没有标签**（前端跳过校验，不影响播放）：
+///   · FLAC / Ogg —— VORBIS_COMMENT，`TITLE=` / `ARTIST=` 明文，直接扫
+///   · MP3        —— ID3v2 头 + TIT2 / TPE1 帧，四种编码都解
+///   · M4A        —— ilst 在 moov 里位置不固定，这里不做
+#[derive(Default, Debug)]
+pub struct AudioTags {
+    pub title: String,
+    pub artist: String,
+}
+
+/// 在头部字节里找一个 `KEY=value`（Vorbis 注释的样子），大小写都认。
+fn vorbis_field(buf: &[u8], key: &str) -> String {
+    let upper = key.to_ascii_uppercase();
+    for k in [upper.clone(), key.to_ascii_lowercase()] {
+        let needle = k.as_bytes();
+        let mut i = 0usize;
+        while i + needle.len() + 1 < buf.len() {
+            if &buf[i..i + needle.len()] == needle && buf[i + needle.len()] == b'=' {
+                // 只认「字段边界上的」KEY=：前面一个字节得是块边界或分隔符，
+                // 否则音频数据里凑巧出现的 `TITLE=` 也会被当成标签
+                let boundary = i == 0 || buf[i - 1] <= 0x20 || buf[i - 1] >= 0x7f;
+                let start = i + needle.len() + 1;
+                let end = buf[start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|p| start + p)
+                    .unwrap_or(buf.len())
+                    .min(start + 120);
+                if boundary && end > start {
+                    let s = String::from_utf8_lossy(&buf[start..end]).trim().to_string();
+                    if !s.is_empty() {
+                        return s;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    String::new()
+}
+
+/// ID3v2 帧正文 → 字符串。开头那个字节是编码：0=Latin1、1=UTF-16(带 BOM)、2=UTF-16BE、3=UTF-8。
+fn id3_text(body: &[u8]) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+    let enc = body[0];
+    let rest = &body[1..];
+    let s = match enc {
+        0 => rest.iter().map(|&b| b as char).collect::<String>(),
+        1 | 2 => {
+            let (le, data) = if rest.len() >= 2 && rest[0] == 0xFF && rest[1] == 0xFE {
+                (true, &rest[2..])
+            } else if rest.len() >= 2 && rest[0] == 0xFE && rest[1] == 0xFF {
+                (false, &rest[2..])
+            } else {
+                (enc == 1, rest)
+            };
+            let units: Vec<u16> = data
+                .chunks(2)
+                .filter(|c| c.len() == 2)
+                .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => String::from_utf8_lossy(rest).to_string(),
+    };
+    s.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string()
+}
+
+/// 扫 ID3v2 头，取 TIT2（标题）/ TPE1（歌手）。
+fn id3_tags(h: &[u8]) -> AudioTags {
+    let mut out = AudioTags::default();
+    if h.len() < 10 || &h[0..3] != b"ID3" {
+        return out;
+    }
+    // 大小 = 4 个字节，每个字节只用低 7 位（syncsafe）
+    let size = ((h[6] as usize & 0x7f) << 21)
+        | ((h[7] as usize & 0x7f) << 14)
+        | ((h[8] as usize & 0x7f) << 7)
+        | (h[9] as usize & 0x7f);
+    let end = (10 + size).min(h.len());
+    let mut i = 10usize;
+    while i + 10 <= end {
+        let id = &h[i..i + 4];
+        if id[0] == 0 {
+            break; // padding
+        }
+        let fsz = ((h[i + 4] as usize) << 24)
+            | ((h[i + 5] as usize) << 16)
+            | ((h[i + 6] as usize) << 8)
+            | (h[i + 7] as usize);
+        let body_start = i + 10;
+        let body_end = (body_start + fsz).min(end);
+        if fsz == 0 || body_end <= body_start {
+            break;
+        }
+        match id {
+            b"TIT2" if out.title.is_empty() => out.title = id3_text(&h[body_start..body_end]),
+            b"TPE1" if out.artist.is_empty() => out.artist = id3_text(&h[body_start..body_end]),
+            _ => {}
+        }
+        i = body_end;
+    }
+    out
+}
+
+/// 从文件头读标签。读不到就返回空（前端把空当「没标签」）。
+pub fn sniff_tags(h: &[u8], content_type: &str) -> AudioTags {
+    // 整个 16KB 都扫：FLAC 的 VORBIS_COMMENT 常常排在几百 KB 的封面后面，
+    // 8KB 窗口会整块跳过（实测那份 fLaC 就是这样）
+    let head = if h.len() > 16384 { &h[..16384] } else { h };
+    if head.len() > 3 && &head[0..3] == b"ID3" {
+        return id3_tags(head);
+    }
+    let is_ogg = head.len() > 4 && &head[0..4] == b"OggS";
+    let is_flac = head.len() > 4 && &head[0..4] == b"fLaC";
+    if is_ogg
+        || is_flac
+        || content_type.contains("ogg")
+        || content_type.contains("flac")
+        || content_type.contains("opus")
+    {
+        return AudioTags {
+            title: vorbis_field(head, "TITLE"),
+            artist: vorbis_field(head, "ARTIST"),
+        };
+    }
+    AudioTags::default()
+}
+
 pub fn probe_audio(url: &str) -> Result<ProbeAudio, String> {
     let a = agent();
     let resp = a
@@ -1021,12 +1232,15 @@ pub fn probe_audio(url: &str) -> Result<ProbeAudio, String> {
         return Err("直链返回了空内容".to_string());
     }
     let duration = sniff_duration(&head, total, &content_type);
+    let tags = sniff_tags(&head, &content_type);
     Ok(ProbeAudio {
         got: head.len() as u64,
         total,
         content_type,
         status,
         duration,
+        title: tags.title.chars().take(80).collect(),
+        artist: tags.artist.chars().take(80).collect(),
     })
 }
 
@@ -1041,6 +1255,30 @@ pub fn local_duration(path: &str) -> Result<f64, String> {
     let probe = lofty::probe::Probe::open(p).map_err(|e| format!("读不出音频信息：{e}"))?;
     let f: lofty::file::TaggedFile = probe.read().map_err(|e| format!("读不出音频信息：{e}"))?;
     Ok(f.properties().duration().as_secs_f64())
+}
+
+/// 本地音频文件自己写的标题 / 歌手（读不到是空串）。
+///
+/// 给**缓存**用：缓存是按「曲目 id」存的，一旦某次拿到的是另一首歌，这份错文件
+/// 从此就跟着这个 id 定居，之后每次点它都命中缓存、根本不出网，`verify` 一次都不跑。
+/// 只有把文件本体的标签读出来，才知道硬盘上那份到底是谁。
+pub fn local_tags(path: &str) -> Result<(String, String), String> {
+    use lofty::file::AudioFile;
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::Accessor;
+    let p = std::path::Path::new(path);
+    let probe = lofty::probe::Probe::open(p).map_err(|e| format!("读不出音频信息：{e}"))?;
+    let f: lofty::file::TaggedFile = probe.read().map_err(|e| format!("读不出音频信息：{e}"))?;
+    let _ = f.properties();
+    let tag = f.primary_tag().or_else(|| f.first_tag());
+    let (title, artist) = match tag {
+        Some(t) => (
+            t.title().map(|s| s.to_string()).unwrap_or_default(),
+            t.artist().map(|s| s.to_string()).unwrap_or_default(),
+        ),
+        None => (String::new(), String::new()),
+    };
+    Ok((title.chars().take(80).collect(), artist.chars().take(80).collect()))
 }
 
 /* ------------------------------------------------------------------ */
@@ -1067,6 +1305,8 @@ mod tests {
             "https://music.163.com/api/v6/playlist/detail?id=3778678&n=3",
             &h,
             None,
+            None,
+            false,
             10_000,
         )
         .expect("请求失败");

@@ -249,8 +249,15 @@ export function nextIndex(s: QueueState, auto: boolean): number | null {
     return indexOfId(s, s.order[pos + 1])
   }
   if (s.index >= n - 1) {
-    if (s.repeat === 'sequence' && auto) return null // 顺序播完 → 停
-    return 0 // 列表循环 / 手动下一首回到开头
+    /*
+     * 最后一首放完回到第一首（列表循环）。
+     *
+     * 以前这里对 `sequence` 返回 null 表示「播完就停」，但界面上这个状态的图标
+     * 一直是「列表循环」（IconRepeatAll）——图标说不循环、实际却停了，用户只会
+     * 觉得「播完最后一首就停了，是个 bug」。现在三个模式语义写死：列表循环 /
+     * 单曲循环 / 随机，都循环。要「一遍过」等以后真的加第四档再说。
+     */
+    return 0
   }
   return s.index + 1
 }
@@ -287,6 +294,17 @@ export function skipPrev(s: QueueState): QueueState & { event: PlayerEvent } | n
 
 /** 自动推进（曲终）：单曲循环由播放器层处理，这里只处理跨曲 */
 export function advance(s: QueueState): QueueState & { event: PlayerEvent } | null {
+  /*
+   * 单曲循环只影响「这一首自然播完」，不影响手动下一首（那走 skipNext）。
+   *
+   * 以前这里压根不看 repeat：UI 上图标已经切到「单曲循环」了，歌一放完还是
+   * 往下走一首——用户看到的就是「显示单曲播放，为什么会切到下一首」。
+   * 返回同 index 是刻意的：调用方拿到结果后照样重新 startLoad 一遍，
+   * index 不变，队列状态也不用动。
+   */
+  if (s.repeat === 'one') {
+    return { ...s, event: { type: 'track-changed', queue: s.queue, index: s.index } }
+  }
   const i = nextIndex(s, true)
   if (i == null) return null
   return { ...s, index: i, event: { type: 'track-changed', queue: s.queue, index: i } }
@@ -353,12 +371,41 @@ export function clearQueue(s: QueueState): QueueState {
 /** 曲目加入队列尾部/下一首播放 */
 export function enqueue(s: QueueState, track: LocalTrack, position: 'end' | 'next'): QueueState {
   const exists = s.queue.some(t => t.id === track.id)
-  const queue = exists ? s.queue : (
-    position === 'end'
-      ? [...s.queue, track]
-      : [...s.queue.slice(0, s.index + 1), track, ...s.queue.slice(s.index + 1)]
-  )
-  const order = exists || s.repeat !== 'shuffle' ? queue.map(t => t.id) : [...s.order, track.id]
+
+  /*
+   * 已经在队列里的歌点「下一首播放」= **把它挪到当前曲后面**。
+   *
+   * 以前这里对已存在的曲目直接原样返回（去重思路），于是「下一首播放」在
+   * 已经入过队的歌上完全没反应——用户点了按钮，下一首还是原来那首，
+   * 看起来就是「这个按钮坏了」。去重仍然要，但只对「加入队列（尾部）」成立。
+   */
+  if (exists) {
+    if (position !== 'next') return s
+    const curId = s.queue[s.index]?.id ?? null
+    /* 正在播的这一首没有「下一首」可言 */
+    if (track.id === curId) return s
+    const rest = s.queue.filter(t => t.id !== track.id)
+    const curAt = curId ? rest.findIndex(t => t.id === curId) : -1
+    const at = curAt >= 0 ? curAt + 1 : rest.length
+    const queue = [...rest.slice(0, at), track, ...rest.slice(at)]
+    const index = curId ? Math.max(0, queue.findIndex(t => t.id === curId)) : s.index
+    /* 随机模式：顺序表按 id 同步挪一次，别把这首歌甩到随机序的尾巴上 */
+    let order: string[]
+    if (s.repeat === 'shuffle') {
+      const o = s.order.filter(id => id !== track.id)
+      const oAt = curId ? o.indexOf(curId) : -1
+      order = oAt >= 0 ? [...o.slice(0, oAt + 1), track.id, ...o.slice(oAt + 1)] : [...o, track.id]
+      if (order.length !== queue.length) order = queue.map(t => t.id)
+    } else {
+      order = queue.map(t => t.id)
+    }
+    return { ...s, queue, index, order }
+  }
+
+  const queue = position === 'end'
+    ? [...s.queue, track]
+    : [...s.queue.slice(0, s.index + 1), track, ...s.queue.slice(s.index + 1)]
+  const order = s.repeat !== 'shuffle' ? queue.map(t => t.id) : [...s.order, track.id]
   return { ...s, queue, order: order.length === queue.length ? order : queue.map(t => t.id) }
 }
 

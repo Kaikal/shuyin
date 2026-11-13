@@ -130,6 +130,22 @@ export function clean(s: unknown): string {
 }
 
 /**
+ * 昵称的「看起来是不是空的」判定。
+ *
+ * 有一批字符**视觉上什么都不显示**，但 `trim()` 认为它不是空白：
+ * `U+3164` 谚文填充符（QQ/微信上极常见的占位昵称，本机这个 QQ 号就是 `ㅤ`）、
+ * `U+115F` / `U+1160` 谚文字母填充符、`U+2800` 盲文空白、`U+FFA0` 半角谚文填充。
+ * 不剔掉的话，「我的」页会显示成一块莫名其妙的空白，还是看不出登的是谁。
+ *
+ * 返回值已经过 `clean()`；判定为空由调用方决定兜底文案。
+ */
+export function nicknameText(s: unknown): string {
+  return clean(s)
+    .replace(/[\u115f\u1160\u3164\uffa0\u2800\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, '')
+    .trim()
+}
+
+/**
  * 「酷我」的 r.s 接口返回的是 **JS 字面量**：单引号包裹、key 不加引号、
  * 部分字段（MINFO）里还夹着 `level:p,bitrate:192` 这种伪 key。
  *

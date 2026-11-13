@@ -92,7 +92,7 @@ export interface ApplyReport {
 }
 
 /** 合并两个歌单数组：同 id 的以新的为准，其余追加（不覆盖对方独有的歌单） */
-function mergeLists<T extends { id?: string; key?: string; name?: string }>(oldV: unknown, newV: unknown): T[] {
+export function mergeLists<T extends { id?: string; key?: string; name?: string }>(oldV: unknown, newV: unknown): T[] {
   const a = Array.isArray(oldV) ? (oldV as T[]) : []
   const b = Array.isArray(newV) ? (newV as T[]) : []
   const out = [...a]

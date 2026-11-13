@@ -23,6 +23,7 @@ import {
   b64decodeUtf8, clean, cnTimeToSec, commentText, emojiCode, getJson, getText, imageUrlsOf, lrcTime,
   lenientJson, toSeconds,
 } from '../http'
+import { md5Hex } from '../md5'
 import { asRankId, isRankId, rankRawId } from '../types'
 import type {
   CommentPage, HotPlaylistItem, HotPlaylistResult, HttpClient, PlatformApi, PlaylistDetail,
@@ -40,6 +41,29 @@ const SEARCH = 'http://search.kuwo.cn/r.s'
 /** 出网层注入的账号 cookie（未登录时是空串） */
 const cookieFor = (client: HttpClient, url: string): string => client.cookieFor?.(url) ?? ''
 
+/** cookie 串 → Map（登录凭证都是分号串，昵称/头像也要按名取，统一走这里） */
+function cookieJar(raw?: string): Map<string, string> {
+  const jar = new Map<string, string>()
+  for (const seg of (raw ?? '').split(';')) {
+    const s = seg.trim()
+    const i = s.indexOf('=')
+    if (i > 0) jar.set(s.slice(0, i).trim(), s.slice(i + 1).trim())
+  }
+  return jar
+}
+
+/**
+ * 酷我把昵称和头像写在 cookie 里（`uname3` / `pic3`），而且是**两层编码**：
+ * 先 URL 编码一次（`%25u53E3…`），解出来还是 `%u53E3…` 这种 unicode-escape。
+ * 只 `decodeURIComponent` 会得到一串 `%uXXXX`，只按 `%u` 解又留着 `%25`。
+ */
+function cookieText(v?: string): string {
+  if (!v) return ''
+  let s = v
+  try { s = decodeURIComponent(s) } catch { /* 没编码就原样用 */ }
+  return s.replace(/%u([0-9a-fA-F]{4})/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16)))
+}
+
 /**
  * 从登录 cookie 里挖出 uid。
  *
@@ -49,12 +73,7 @@ const cookieFor = (client: HttpClient, url: string): string => client.cookieFor?
  */
 function uidOfCookie(raw?: string): string {
   if (!raw) return ''
-  const jar = new Map<string, string>()
-  for (const seg of raw.split(';')) {
-    const s = seg.trim()
-    const i = s.indexOf('=')
-    if (i > 0) jar.set(s.slice(0, i).trim(), s.slice(i + 1).trim())
-  }
+  const jar = cookieJar(raw)
   for (const k of ['userid', 'uid', 'kw_userid', 'userId']) {
     const v = jar.get(k)
     if (v && /^\d+$/.test(v) && v !== '0') return v
@@ -132,7 +151,7 @@ function normalize(s: any): SearchSong {
     songmid: rid,
     source: 'kw',
     name: clean(s.SONGNAME ?? s.NAME),
-    singer: clean(s.ARTIST ?? s.AARTIST).split('&').map(x => x.trim()).filter(Boolean),
+    singer: clean(s.ARTIST ?? s.AARTIST).split(/[\\&、]/).map(x => x.trim()).filter(Boolean),
     albumName: clean(s.ALBUM),
     albumId: s.ALBUMID != null ? String(s.ALBUMID) : undefined,
     interval: toSeconds(s.DURATION),
@@ -153,15 +172,27 @@ function normalize(s: any): SearchSong {
 function normalizeDetailSong(s: any): SearchSong {
   const rid = String(s?.id ?? s?.rid ?? '')
   const pic = String(s?.albumpic ?? s?.musicPic ?? '')
+  /*
+   * 时长必须优先取 `song_duration`。
+   *
+   * 榜单接口（`kbangserver/ksong.s`）给两个时长：
+   *   · `duration`      = **这次能放多长**。会员 / 版权受限曲目只给试听片段，
+   *     实测酷我热歌榜 300 首里 292 首是 93~144 秒的片段；
+   *   · `song_duration` = 整首歌的真实长度（同一首是 209 秒）。
+   * 拿片段长度当 `interval`，下游全跟着错：跨平台兜底按「差 ≥ 40 秒」判错歌、
+   * 试听检测（real < expect × 0.6）永远不触发、进度归一也按 93 秒算。
+   */
+  const full = Number(s?.song_duration ?? 0) || 0
+  const frag = Number(s?.duration ?? 0) || 0
   return {
     id: rid,
     songmid: rid,
     source: 'kw',
     name: clean(s?.name ?? s?.songname),
-    singer: clean(s?.artist ?? s?.AARTIST).split(/[&、]/).map((x: string) => x.trim()).filter(Boolean),
+    singer: clean(s?.artist ?? s?.AARTIST).split(/[\\&、]/).map((x: string) => x.trim()).filter(Boolean),
     albumName: clean(s?.album ?? s?.albumname),
     albumId: s?.albumid != null ? String(s.albumid) : undefined,
-    interval: Number(s?.duration ?? 0) || 0,
+    interval: Math.max(full, frag),
     img: pic
       ? pic.replace(/^http:\/\//, 'https://').replace(/\/120\//, '/500/')
       : undefined,
@@ -194,6 +225,57 @@ function kwCommentOf(c: any): SongComment {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* 按天洗牌（每日推荐用）                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 酷我飙升榜在 `wapi/pc/bang/list` 里的 `sourceid`（官方榜组，2026-10 实测）。
+ * `kbangserver/ksong.s` 只认这个 id，参考 fnos_music_ext 的 `_KW_BANG_ID`。
+ */
+const KW_BANG_RISE_ID = '93'
+
+/** FNV-1a 32 位：字符串 → 稳定整数种子 */
+function fnv1a(s: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h >>> 0
+}
+
+/** mulberry32：极小的确定性 PRNG，同种子同序列（够洗牌用，不搞加密） */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** Fisher-Yates 确定性洗牌：不改动入参，返回打乱后的新数组 */
+function shuffleSeeded<T>(arr: readonly T[], seed: number): T[] {
+  const out = arr.slice()
+  const rnd = mulberry32(seed)
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1))
+    const tmp = out[i]
+    out[i] = out[j]
+    out[j] = tmp
+  }
+  return out
+}
+
+/** 每日推荐洗牌种子：当天日期 + 登录 uid（未登录空串）。当天恒定，隔天即换 */
+function dailySeed(uid: string): number {
+  const d = new Date()
+  const day = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+  return fnv1a(`${day}|${uid}`)
+}
+
 /**
  * 榜单详情：`kbangserver.kuwo.cn/ksong.s`。
  *
@@ -217,15 +299,33 @@ async function rankSongs(
     { headers: { ...HEADERS, Referer: 'http://www.kuwo.cn/' } })
   const raw = j?.musiclist
   if (!Array.isArray(raw)) throw new Error('这个榜取不到内容，稍后再试')
-  const songs: SearchSong[] = raw.map(normalizeDetailSong)
+  /*
+   * 丢掉「明确不能在线播放」的条目（`payInfo.cannotOnlinePlay=1`，多为无版权）。
+   * 留着它们只会让用户点进去听一段杂音然后报错。
+   *
+   * **不过滤 `listen_fragment=1`**：那是「只有试听片段」，酷我热歌榜 300 首里
+   * 有 292 首是这种（前沿新歌基本都在会员池）——全滤掉榜单就空了。
+   * 这类条目靠下游兜底：时长已按 `song_duration` 报整首，播放器拿到片段后
+   * 会触发「real 时长明显短于预期」→ 跨平台重搜换一家能放整首的。
+   */
+  const songs: SearchSong[] = raw
+    .map(normalizeDetailSong)
+    .filter((s: SearchSong) => String((s.raw as any)?.payInfo?.cannotOnlinePlay ?? '0') !== '1')
   const total = Number(j?.num ?? 0) || songs.length
   /*
    * `pic` 是 60×60 的榜单缩略图（`.../BangPic/small/…`，实测只有 2KB），
    * 撑到详情页那块方形封面上会糊成一片马赛克。这种小图干脆不返回，
    * 让调用方用它手上那张大图（广场的榜单卡有）；实在没有就走文字占位。
+   *
+   * 还有一种更坑的：`pic` 只给了目录、没给文件名——
+   * `http://img1.kuwo.cn/star/mboxAlbum/BangPic/`。它不是空串，所以天真的
+   * `pic ? … : undefined` 会把它当成可用封面返回出去，前端照着画一张
+   * `url(...BangPic/)` 的**空白方框**（热榜 / 飙升榜 / 新歌榜三个榜都是这样）。
+   * 判定改成「最后一段得像个文件名」，没有就当作没给。
    */
-  const pic = String(j?.pic ?? '')
-  const cover = pic && !/\/BangPic\/small\//.test(pic)
+  const pic = String(j?.pic ?? '').trim()
+  const hasFile = /\/[^/?#]+$/.test(pic)
+  const cover = pic && hasFile && !/\/BangPic\/small\//.test(pic)
     ? pic.replace(/^http:\/\//, 'https://')
     : undefined
   return {
@@ -237,6 +337,151 @@ async function rankSongs(
     songs,
     total,
     hasMore: pn * limit + songs.length < total,
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 每日推荐（波点 App 的「潮趣日推」，30 首）                          */
+/*                                                                    */
+/* 【2026-10 停用】下面这组 bodian* 代码保留备查（酷我若开放合作方       */
+/* AppId 可直接复用），但 getDailyRecommend 已改走「飙升榜+按天洗牌」：  */
+/* 波点接口只按 uid 出公共池、不校验 token，和手机 App 账号那份永远      */
+/* 对不上（`aiPlaylistDetail` 返回不变，逐组试过），此路不通。           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 酷我的「每日推荐」不在老的 web 接口里，只在**波点（BoDian）App 的
+ * `bd-api.kuwo.cn`** 上有。2026-10 实网打通，链路三段：
+ *
+ *   GET /api/service/home/module?moduleId=1   → `songList[]`，4 组预览各 3 首
+ *   GET /api/service/home/aiPlaylistDetail?index=<日推那组的下标>
+ *                                            → `musicList[]`，**一次 30 首**
+ *
+ * `index` 就是该组在 `songList` 里的位置（实测 0=潮趣日推、1=新歌大赏、
+ * 2=排行榜、3=百万收藏），所以必须**先取 module 再算下标**，不能写死 0。
+ *
+ * 几个踩过的点：
+ *   · 签名用的是**绝对路径**（含 `/api`），少了直接 `code=439 sign invalid`；
+ *   · `sign = md5("kuwotest" + 归一化query + bodyHash + path)`，query 要
+ *     **去掉所有非字母数字字符后逐字符排序**，不是按 key 排序；
+ *   · `payload` 头（base64(xor(设备 JSON))）**缺了回 402**；`client` / `api-ver`
+ *     反而不需要；UA 要像个客户端，只发 `Mozilla/5.0` 也会 402；
+ *   · 这个接口**只认 uid**：`token` 查询参数随便填都出同样结果（实测），
+ *     所以登录态只要 cookie 里有 `userid` 就够；但**整条 cookie 必须一起发**，
+ *     只带 uid 参数时服务端按「匿名」处理、回的是 uid=-1 那份公共日推，
+ *     第一首永远和手机上看到的不一样（2026-10 用户反馈「日推第一首不对」就是这个）。
+ */
+const BODIAN_BASE = 'https://bd-api.kuwo.cn/api/'
+const BODIAN_VER = '5.9.1'
+/** 签名固定盐，注意是 `kuwotest` 不是 `kuwo` */
+const BODIAN_SALT = 'kuwotest'
+/** payload 头与手机号加密共用的异或密钥 */
+const BODIAN_XOR = 'bd2025@'
+/** 设备 id 固定即可，服务端不校验 */
+const BODIAN_DEVICE = 'e3b0c44298fc1c149afbf4c8996fb924'
+
+/** 字符串 → utf8 字节 → 逐字节异或 → base64（payload 头的算法） */
+function bodianPayload(): string {
+  const enc = new TextEncoder()
+  const raw = enc.encode(JSON.stringify({
+    devId: BODIAN_DEVICE,
+    ver: BODIAN_VER,
+    plat: 'ar',
+    net: 'wifi',
+    channel: 'wenyu',
+    qimei36: '',
+    ultraHD: 0,
+    h265supported: 0,
+    svrVer: 50,
+    currentOsVersion: 35,
+  }))
+  const key = enc.encode(BODIAN_XOR)
+  let bin = ''
+  for (let i = 0; i < raw.length; i++) bin += String.fromCharCode(raw[i] ^ key[i % key.length])
+  return btoa(bin)
+}
+
+/**
+ * 参数编码要对齐 Python 的 `quote(safe='')`：`encodeURIComponent` 会放过
+ * `!*'()`，而那四个字符在签名归一化里会被剥掉、保留下来就是不同的 sign。
+ */
+const bodianQuote = (v: string) =>
+  encodeURIComponent(v).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+
+/** `sign = md5("kuwotest" + 归一化query + "" + "/api/<path>")` */
+function bodianSign(query: string, path: string): string {
+  const normalized = query.replace(/[^a-zA-Z0-9]/g, '').split('').sort().join('')
+  return md5Hex(`${BODIAN_SALT}${normalized}${''}/api/${path}`)
+}
+
+async function bodianGet(
+  client: HttpClient,
+  path: string,
+  params: Record<string, string>,
+  uid: string,
+  token: string,
+): Promise<any> {
+  /*
+   * **必须把真 cookie 一起发过去。**
+   *
+   * 只带 `uid` / `token` 查询参数时，服务端认得出「有个 uid」，但拿不到会话，
+   * 回的是**公共日推**（和 uid=-1 那份一模一样）——表现就是「每日推荐能打开、
+   * 但第一首永远不是手机上看到的那首」。参数上的 token 我们是从 cookie 里
+   * 硬挖出来的一段，格式对不上它的校验，等于没登录。
+   * 官方客户端每一条请求都带完整 cookie，这里照做即可。
+   */
+  const cookie = cookieFor(client, BODIAN_BASE)
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) q.set(k, v)
+  q.set('uid', uid)
+  q.set('token', token)
+  q.set('timestamp', String(Math.floor(Date.now() / 1000)))
+  const query = [...q.entries()]
+    .map(([k, v]) => `${bodianQuote(k)}=${bodianQuote(v)}`)
+    .join('&')
+  const url = `${BODIAN_BASE}${path}?${query}&sign=${bodianSign(query, path)}`
+  const j = await getJson(client, url, {
+    headers: {
+      Accept: 'application/json',
+      client: 'android',
+      'X-Requested-With': 'cn.wenyu.bodian',
+      'api-ver': '2',
+      payload: bodianPayload(),
+      'User-Agent': `BoDianMusic/${BODIAN_VER} (Android; cn.wenyu.bodian)`,
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+  })
+  if (Number(j?.code) !== 200) {
+    throw new Error(`酷我每日推荐没拿到（code=${j?.code} ${j?.msg ?? ''}）`.trim())
+  }
+  return j?.data ?? {}
+}
+
+/** 波点歌曲对象（小写字段）→ SearchSong */
+function normalizeBodian(s: any): SearchSong {
+  const rid = String(s?.id ?? '')
+  const audios: any[] = Array.isArray(s?.audios) ? s.audios : []
+  const q: string[] = []
+  // 按 format 判，不按 level：`mflac`/`mgg` 是加密封装，我们的音源取不了
+  if (audios.some(a => String(a?.format) === 'flac')) q.push('flac')
+  if (audios.some(a => String(a?.format) === 'ogg' && Number(a?.bitrate) >= 300)) q.push('320k')
+  if (audios.some(a => String(a?.format) === 'ogg')) q.push('128k')
+  const pic = String(s?.albumPic ?? s?.albumPic120 ?? '')
+  const singers: string[] = Array.isArray(s?.artists)
+    ? s.artists.map((x: any) => clean(x?.name)).filter(Boolean)
+    : []
+  return {
+    id: rid,
+    songmid: rid,
+    source: 'kw',
+    name: clean(s?.name),
+    singer: singers.length ? singers : clean(s?.artist).split(/[\\&、]/).map(x => x.trim()).filter(Boolean),
+    albumName: clean(s?.album),
+    albumId: s?.albumId != null ? String(s.albumId) : undefined,
+    interval: Number(s?.duration ?? 0) || 0,
+    img: pic ? pic.replace(/^http:\/\//, 'https://') : undefined,
+    qualities: q.length ? q : undefined,
+    raw: { ...s, songmid: rid, songId: rid, rid },
   }
 }
 
@@ -344,8 +589,97 @@ export function createKwApi(client: HttpClient): PlatformApi {
      * 服务端只回标题和总数，列表是空的。补齐之后一次能给整份歌单（实测 121/121 首）。
      * 所以 `supportsPlaylistDetail` 现在是 true，酷我的歌单卡可以点进去了。
      */
+    // 酷我的日推是免登录榜单池洗出来的（见 getDailyRecommend），前端据此放行未登录用户
+    dailyWithoutLogin: true,
+
     /**
-     * 我的歌单：`nplserver.kuwo.cn/pl.svc?op=getuserlist`（老接口，免签名、免 csrf）。
+     * 每日推荐：**酷我飙升榜 + 按天洗牌**（免登录可用）。
+     *
+     * 波点 App 那条真日推链路（`bd-api.kuwo.cn`，见上方协议注释）2026-10 已停用：
+     * 它只认合作方 AppId，`token`/`sid` 都不校验、只按 uid 出**公共池**，
+     * 和手机 App 每个人自己的那份永远对不上——「第一首不是大天蓬」就是它，
+     * 换 cookie、加签名、对 `service/home/module` 逐组试都没用，这条路到头了
+     * （同款结论见 fnos_music_ext：它也没调官方日推，用免登录榜单兜的）。
+     *
+     * 现在的方案（诚实版日推）：
+     *   · 主池 = **酷我飙升榜**（官方榜 `sourceid=93`，kbangserver 免签老接口，
+     *     复用 `rankSongs`；实测 rn=120 过滤后约 39 首可完整播，凑 30 够用）；
+     *   · 过滤 `payInfo.cannotOnlinePlay=1`（无版权）与 `listen_fragment=1`
+     *     （只有试听片段——实测占 62%，放出去就是「放到一半没了」，宁缺毋滥）；
+     *   · **按天洗牌**：`seed = fnv1a(YYYYMMDD + '|' + uid)`，Fisher-Yates 确定性
+     *     打乱后取 30 首——当天内刷新不变、隔天换一批、登录后带 uid 各不相同；
+     *   · 名字写明「每日推荐 · 酷我飙升榜」，不冒充官方 App 那一份；
+     *     未登录也能看（`dailyWithoutLogin: true`，前端据此放行）。
+     */
+    async getDailyRecommend(): Promise<PlaylistDetail> {
+      const uid = uidOfCookie(cookieFor(client, BODIAN_BASE))
+      // ① 大池子：飙升榜前 120（rankSongs 的 pn 从 0 起，这里 page 传 1）
+      const pool = await rankSongs(client, KW_BANG_RISE_ID, 1, 120)
+      const usable = pool.songs.filter(s => {
+        const pay = (s.raw as any)?.payInfo
+        if (!pay) return true
+        return String(pay.cannotOnlinePlay ?? '0') !== '1'
+          && String(pay.listen_fragment ?? '0') !== '1'
+      })
+      if (usable.length < 5) throw new Error('酷我飙升榜今天取不到足够内容，稍后再试')
+      // ② 按天洗牌，取 30
+      const picked = shuffleSeeded(usable, dailySeed(uid)).slice(0, Math.min(30, usable.length))
+      // ③ 封面：榜单自己的 `pic` 是 2KB 小图（rankSongs 已滤掉），这里用
+      //    bang/list 里飙升榜的 `pic2` 方形大海报；失败就空着走前端占位。
+      let cover: string | undefined
+      try {
+        const j = await getJson(client, 'http://wapi.kuwo.cn/api/pc/bang/list', {
+          headers: { ...HEADERS, Referer: 'http://www.kuwo.cn/' },
+        })
+        outer: for (const g of j?.child ?? []) {
+          for (const b of g?.child ?? []) {
+            if (String(b?.sourceid) === KW_BANG_RISE_ID) {
+              const pic = imgUrl(b.pic2 ?? b.pic5 ?? b.pic)
+              if (pic && !/\/BangPic\/small\//.test(pic)) cover = pic
+              break outer
+            }
+          }
+        }
+      } catch { /* 封面是锦上添花，拿不到不挡内容 */ }
+      return {
+        id: 'daily:kw',
+        source: 'kw',
+        name: '每日推荐 · 酷我飙升榜',
+        cover,
+        songCount: picked.length,
+        songs: picked,
+        total: picked.length,
+        hasMore: false,
+      }
+    },
+
+    /**
+     * 当前登录的账号。
+     *
+     * 酷我没有免签的「拿资料」接口（`wapi`/`bd-api` 那几条都要 csrf 或签名），
+     * 但昵称、头像、uid 本来就在登录 cookie 里，直接解出来就行。
+     *
+     * **这不是可有可无的装饰**：「每日推荐」这类内容是**按账号算**的，
+     * 账号登错的时候怎么调接口都对不上手机 App（2026-10 用户反馈日推第一首
+     * 永远不对，最后查到是本机登着一个几乎没听过歌的空号）。界面上至少得让人
+     * 一眼看出自己登的是谁。
+     */
+    async getAccount() {
+      const raw = cookieFor(client, 'https://www.kuwo.cn/')
+      const jar = cookieJar(raw)
+      const uid = uidOfCookie(raw)
+      if (!uid) return null
+      const name = clean(cookieText(jar.get('uname3') ?? jar.get('uname')))
+      return {
+        userId: uid,
+        // 有些登录方式（扫码、车机）不写 uname3，给个能区分人的兜底，别留空
+        nickname: name || `酷我用户 ${uid.slice(-6)}`,
+        avatar: imgUrl(cookieText(jar.get('pic3') ?? jar.get('pic'))),
+      }
+    },
+
+    /**
+     * 我的歌单：`nplserver.kuwo.cn/pl.svc?op=getuserlist`（老接口、免签名、免 csrf）。
      *
      * 返回固定结构 `{total, plist:[{id,title,musicnum,pic,type,...}]}`；
      * 里面混着几条**系统歌单**（`PC_DEFAULT` / `MOBI_DEFAULT` / `MYFAVORITE`），
@@ -445,6 +779,37 @@ export function createKwApi(client: HttpClient): PlatformApi {
         .map(r => `${lrcTime(Number(r.time))}${clean(r.lineLyric)}`)
         .join('\n')
       return { lyric }
+    },
+
+    /**
+     * 单曲封面：`artistpicserver` 的老接口（免签名、免 cookie）。
+     *
+     * 榜单详情（`kbangserver/ksong.s`）整份**没有任何封面字段**——300 条里 0 条带
+     * `albumpic / musicPic`，于是热歌榜 / 飙升榜 / 新歌榜的歌曲列表全是空封面，
+     * 而下面「热门歌单」走 `pl.svc`，那边有 `albumpic`，所以那一块是好的。
+     *
+     * 能按 rid 换到封面图只有这一条路：它**回的不是图片，而是一行 URL 文本**
+     * （69 字节，`http://img1.kwcdn.kuwo.cn/star/albumcover/500/s4s17/95/1740093141.jpg`），
+     * 认不出来的就回 `Wrong`。所以这里要判一眼再返回，别把 `Wrong` 当图片地址塞给 <img>。
+     *
+     * 注意域名：`img1.kwcdn.kuwo.cn` **没有自己的证书**（见 `imgUrl` 上面那段），
+     * 拼好的地址必须保持 `http://`，升 https 会整片空白。
+     */
+    async getPic(song) {
+      if (song.img) return song.img
+      const rid = String(song.id || song.songmid || '').trim()
+      if (!/^\d+$/.test(rid)) return ''
+      try {
+        const txt = clean(await getText(client,
+          'http://artistpicserver.kuwo.cn/pic.web'
+          + `?corp=kuwo&type=rid_pic&pictype=500&size=500&rid=${rid}`,
+          { headers: HEADERS }))
+        if (!/^https?:\/\/\S+\.(jpe?g|png|webp)$/i.test(txt)) return ''
+        return imgUrl(txt) ?? txt
+      } catch {
+        /* 换不到就空手回去，列表照常渲染占位 */
+        return ''
+      }
     },
   }
 }

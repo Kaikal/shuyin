@@ -24,7 +24,7 @@ import { useAccount } from '../lib/platformAccount'
 import { usePlaylists } from '../lib/localPlaylists'
 import { KEYS, settings } from '../lib/settings'
 import { toast } from '../lib/toast'
-import { IconRefresh, IconStar, IconUpload } from '../components/icons'
+import { IconChevronRight, IconRefresh, IconStar, IconUpload } from '../components/icons'
 
 /** 一页取多少：正好铺满一屏多两行的网格，翻页时不会「只冒出来一条」 */
 const PAGE_SIZE = 24
@@ -55,7 +55,7 @@ const HOT_PLATFORMS: PlatformSource[] = (['wy', 'tx', 'kw', 'kg'] as PlatformSou
   .filter(s => !!apiFor(s)?.getHotPlaylists)
 
 /**
- * 一张歌单卡。「热门歌单」和登录后的「为你推荐」共用同一套——
+ * 一张歌单卡。「热门歌单」用它，首页「我的 · 为你推荐」也是同一套——
  * 两处各写一份的话，收藏按钮的状态和样式迟早会走偏。
  */
 function PlaylistCard({ item, faved, onOpen, onFav }: {
@@ -114,7 +114,7 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
    * 当前平台的登录态。
    *
    * 登录入口不在这页（在「我的」）：广场是「看别人」的地方，
-   * 登录之后才长的「每日推荐 / 为你推荐」本来就属于「我的」。
+   * 登录之后才长的「每日推荐」本来就属于「我的」；「为你推荐」只在「我的」页。
    * 这里只读登录态，用来决定这两段显示还是不显示。
    */
   const account = useAccount(platform)
@@ -130,10 +130,21 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
   /** 每日推荐：每个平台一份，跟着平台走（懒加载，失败就整段不显示） */
   const [daily, setDaily] = useState<PlaylistDetail | null>(null)
   const [dailyLoad, setDailyLoad] = useState(false)
-  /** 「为你推荐」歌单：只有登录后才有内容，未登录这一段整块不出现 */
-  const [forYou, setForYou] = useState<HotPlaylistItem[]>([])
   /** 每次请求一个序号：切平台那一下后发的请求可能先回来，旧结果不能盖新平台 */
   const req = useRef(0)
+  /**
+   * 已经收进列表的 `source:id`。
+   *
+   * 翻页到后面，平台经常整页都是前面见过的条目（网易云、QQ 都这样）。
+   * 原来只按「hasMore」判断还有没有下一页，于是：
+   * 触底 → 请求 → 全是重复 → 列表长度没变 → 还停在底部 → 再触底 → …
+   * 底部那句「正在加载更多…」跟着 setMore(true/false) 来回闪，
+   * 用户看到的就是「滑到最下面一直一闪一闪」。
+   * 现在去重后**新增为 0 就收尾**，翻页只发一次。
+   */
+  const seen = useRef<Set<string>>(new Set())
+  /** 分页请求在飞的同步闸：`more` 是 state，同一帧里连发几次 scroll 拦不住 */
+  const moreBusy = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   /** 读上次选的平台（没选过就网易云——推荐位最稳，不用登录也有内容） */
@@ -150,26 +161,38 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
       setLoading(false)
       return
     }
+    if (append && moreBusy.current) return
     const id = ++req.current
-    if (append) setMore(true)
-    else {
+    if (append) {
+      moreBusy.current = true
+      setMore(true)
+    } else {
       setLoading(true)
       setErr('')
       setHasMore(true)
       setList([])
+      seen.current = new Set()
     }
     try {
       const r = await api.getHotPlaylists(next, PAGE_SIZE)
       if (id !== req.current) return
-      setList(prev => {
-        if (!append) return r.list
+      if (append) {
         // 平台翻页偶尔给重复条目（QQ 的 sin/ein 是闭区间、酷我最后一页会给满），
         // 按 source+id 去重，否则滚到底会看到同一张卡出现两次
-        const seen = new Set(prev.map(x => `${x.source}:${x.id}`))
-        return prev.concat(r.list.filter(x => !seen.has(`${x.source}:${x.id}`)))
-      })
+        const add = r.list.filter(x => !seen.current.has(`${x.source}:${x.id}`))
+        for (const x of add) seen.current.add(`${x.source}:${x.id}`)
+        if (add.length) setList(prev => prev.concat(add))
+        /*
+         * 新增为 0 就当作到结尾：`r.hasMore` 有时还在 true（平台按原始条数算），
+         * 继续翻只会拿到同一批，底部那句「正在加载更多…」就会一直闪。
+         */
+        setHasMore(r.hasMore && add.length > 0)
+      } else {
+        seen.current = new Set(r.list.map(x => `${x.source}:${x.id}`))
+        setList(r.list)
+        setHasMore(r.hasMore && r.list.length > 0)
+      }
       setPage(next)
-      setHasMore(r.hasMore && r.list.length > 0)
     } catch (e) {
       if (id !== req.current) return
       if (e instanceof PlatformBusyError) {
@@ -179,6 +202,7 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
       }
       if (!append) setList([])
     } finally {
+      moreBusy.current = false
       if (id === req.current) {
         setLoading(false)
         setMore(false)
@@ -205,12 +229,16 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
     return () => { dead = true }
   }, [platform])
 
-  /* 每日推荐：**登录之后才有，没登录和平台不支持时整块不出现**。
+  /* 每日推荐：默认**登录之后才有**，没登录和平台不支持时整块不出现。
      手机 App 里不登录就没有每日推荐，这边拿公共推荐流顶替只会让人
-     拿它跟 App 逐首对照。哪些平台真有这个接口，看 `getDailyRecommend`。 */
+     拿它跟 App 逐首对照。例外是酷我（`dailyWithoutLogin: true`）：
+     它的日推是免登录榜单池洗出来的，不登录也放行。 */
   useEffect(() => {
     setDaily(null)
-    if (!account?.cookie || !apiFor(platform)?.getDailyRecommend) { setDailyLoad(false); return }
+    const api = apiFor(platform)
+    const okDaily = !!api?.getDailyRecommend
+      && (!!account?.cookie || api.dailyWithoutLogin === true)
+    if (!okDaily) { setDailyLoad(false); return }
     setDailyLoad(true)
     let dead = false
     dailyRecommend(platform)
@@ -220,17 +248,14 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
     return () => { dead = true }
   }, [platform, account?.cookie])
 
-  /* 为你推荐：登录后才有。未登录直接不发请求（平台会回 301，平白多一条错误日志） */
-  useEffect(() => {
-    setForYou([])
-    const api = apiFor(platform)
-    if (!api?.getForYouPlaylists || !account?.cookie) return
-    let dead = false
-    api.getForYouPlaylists()
-      .then(r => { if (!dead && r) setForYou(r.list) })
-      .catch(() => { /* 拿不到就整段不显示，不打扰 */ })
-    return () => { dead = true }
-  }, [platform, account?.cookie])
+  /*
+   * 「为你推荐」这一段已经从**歌单广场**撤掉。
+   *
+   * 它和首页「我的 · 为你推荐」是同一件事（按口味推歌单），放在广场里
+   * 只是把 11 张卡又铺一遍——而且和下面「热门歌单」内容大面积重合
+   * （同一批「私人雷达」「烟嗓男声」），一屏里看到两遍。
+   * 广场只留「每日推荐 + 排行榜 + 热门歌单」，个人向内容归「我的」。
+   */
 
   const pick = useCallback((s: PlatformSource) => {
     if (s === platform) return
@@ -253,7 +278,23 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
         <div className="lib-head-left">
           <h1>歌单广场</h1>
           <span className="sub">
-            {HOT_PLATFORMS.map(s => platformName(s)).join(' · ')} 的排行榜与热门歌单
+            {/*
+             * 分成两段，好让手机上只留后半句。
+             *
+             * 手机上页头是「副标题在左、导入歌单在右」一行，副标题只剩 232 宽：
+             * 整句 26 个字塞不下，浏览器会在任意字之间断开——实测断成
+             * 「…的排行 / 榜与热门歌单」，一个词被劈成两半。
+             * 更关键的是前半句那四个平台名在下面平台胶囊里已经有了（还能点），
+             * 在这儿再列一遍只是挤掉宽度。所以手机只显示「排行榜与热门歌单」，
+             * 桌面（宽）两句照样连成一行。
+             */}
+            <span className="sub-sq-head">{HOT_PLATFORMS.map(s => platformName(s)).join(' · ')}</span>
+            {' '}
+            <span className="sub-sq-tail">
+              {/* 这个「的」是给「……酷狗 的排行榜与热门歌单」连读用的；
+                  手机上后半句独占一行（下一段 CSS 会把它藏掉）。 */}
+              <span className="sub-sq-de">的</span>排行榜与热门歌单
+            </span>
           </span>
         </div>
         <div className="lib-actions">
@@ -284,57 +325,35 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
       </div>
 
       <div className="sq-scroll" ref={scrollRef} onScroll={onScroll}>
-        {account && !!apiFor(platform)?.getDailyRecommend && (dailyLoad || daily) && (
-          <section className="sq-sec">
-            <div className="sq-sec-head">
-              <h2>每日推荐</h2>
-              <span className="sq-sec-n">
-                {daily ? `${daily.songs.length} 首 · 每天换一批` : '正在取…'}
-              </span>
-            </div>
-            <button
-              className={'sq-daily' + (daily ? '' : ' is-loading')}
-              disabled={!daily}
-              onClick={() => daily && onOpenPlaylist({
-                source: platform, id: `daily:${platform}`, name: '每日推荐', cover: daily.cover,
-              })}
+        {/* 酷我的日推免登录可用（dailyWithoutLogin），其余平台仍要登录。
+            这一块**不套分节标题**：横带自己就写着「每日推荐」，
+            再加一行 h2 就是同一个词并排两遍，也是它看着别扭的一半原因。 */}
+        {(account || apiFor(platform)?.dailyWithoutLogin === true)
+          && !!apiFor(platform)?.getDailyRecommend && (dailyLoad || daily) && (
+          <button
+            className={'sq-daily' + (daily ? '' : ' is-loading')}
+            disabled={!daily}
+            title={daily ? '打开今天的推荐' : '正在取今天的推荐…'}
+            onClick={() => daily && onOpenPlaylist({
+              source: platform, id: `daily:${platform}`, name: '每日推荐', cover: daily.cover,
+            })}
+          >
+            <span
+              className="sq-daily-art"
+              style={daily?.cover ? { backgroundImage: `url(${daily.cover})` } : undefined}
             >
-              <span
-                className="sq-daily-art"
-                style={daily?.cover ? { backgroundImage: `url(${daily.cover})` } : undefined}
-              />
-              <span className="sq-daily-txt">
-                <span className="sq-daily-name">每日推荐</span>
-                <span className="sq-daily-sub">{daily?.name || '正在取今天的推荐…'}</span>
+              {!daily?.cover && <span className="sq-daily-ph" aria-hidden="true" />}
+            </span>
+            <span className="sq-daily-txt">
+              <span className="sq-daily-name">每日推荐</span>
+              <span className="sq-daily-sub">
+                {daily ? `${daily.songs.length} 首 · 每天更新` : '正在取今天的推荐…'}
               </span>
-            </button>
-          </section>
-        )}
-
-        {forYou.length > 0 && (
-          <section className="sq-sec">
-            <div className="sq-sec-head">
-              <h2>为你推荐</h2>
-              <span className="sq-sec-n">{forYou.length} 个 · 按你的口味</span>
-            </div>
-            <div className="sq-grid">
-              {forYou.map(item => (
-                <PlaylistCard
-                  key={`foryou:${item.source}:${item.id}`}
-                  item={item}
-                  faved={bookmarks.isFav(item.source, item.id)}
-                  onOpen={() => onOpenPlaylist({ source: item.source, id: item.id, name: item.name, cover: item.cover })}
-                  onFav={() => {
-                    const on = bookmarks.toggleFav({
-                      source: item.source, id: item.id, name: item.name,
-                      cover: item.cover, songCount: item.songCount,
-                    })
-                    toast(on ? `已收藏「${item.name}」` : `已取消收藏「${item.name}」`, { ok: on })
-                  }}
-                />
-              ))}
-            </div>
-          </section>
+            </span>
+            <span className="sq-daily-go" aria-hidden="true">
+              <IconChevronRight width={14} height={14} />
+            </span>
+          </button>
         )}
 
         {ranks.length > 0 && (
@@ -431,9 +450,18 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
           </div>
         )}
 
-        {more && <div className="sq-more">正在加载更多…</div>}
-        {!loading && !more && !err && list.length > 0 && !hasMore && (
-          <div className="sq-end">— 就到这儿了 · 共 {list.length} 个歌单 —</div>
+        {/*
+         * 底部这一行**常驻**，只换文字。
+         * 原来「正在加载更多…」和「— 就到这儿了 —」是两块分开的条件渲染：
+         * 每翻一页都先长出来、再撤掉，页面高度跟着弹一下——
+         * 和上面「去重后还继续翻」叠在一起，就是用户说的「一闪一闪」。
+         */}
+        {!loading && !err && list.length > 0 && (
+          <div className="sq-end">
+            {more
+              ? '正在加载更多…'
+              : !hasMore ? `— 就到这儿了 · 共 ${list.length} 个歌单 —` : ''}
+          </div>
         )}
       </div>
     </div>

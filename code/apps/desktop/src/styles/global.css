@@ -33,14 +33,49 @@
   --sy-glass-saturate: 1.8;
   --sy-dur-fast: 120ms;
   --sy-dur-panel: 280ms;
+  /*
+   * 动效分级（2026-11-02）。
+   *
+   * 用户的原话是「很多弹窗和画面切换没有动画，看着很僵硬」，同时给了尺度：
+   * 「打开播放页这种大切换时间长一点，弹出歌曲卡片这种短一点」。
+   * 所以时长不是一个数，而是按**这次变化挪动了多少画面**分四档：
+   *   pop    小浮层：右键菜单、下拉芯片、时间气泡——手指刚松就要到位，久了就黏
+   *   modal  弹窗 / 底部面板：卡片本身有体积，需要一点「浮起来」的时间
+   *   panel  抽屉 / 侧栏这类贴边的整块
+   *   page   整页切换、播放页开合：跨的是整个视口，太快像闪屏
+   * 缓动沿用两套：位移用 --sy-ease-panel（前快后缓，停得干净），
+   * 纯透明度用 --sy-ease-soft。
+   */
+  --sy-dur-pop: 150ms;
+  --sy-dur-modal: 220ms;
+  --sy-dur-page: 320ms;
   --sy-ease-soft: cubic-bezier(0.2, 0.8, 0.2, 1);
   --sy-ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
   --sy-error: #E08A72;
+  /*
+   * 芯片 / 小浮层的底板（音质、频谱、位置这些下拉芯片，以及它们弹出来的列表）。
+   *
+   * 原来这些地方写的是 `var(--sy-bg-2, #14161d)`，而 `--sy-bg-2` **从来没有被
+   * 定义过**——等于永远取 fallback 那个近黑。于是浅色主题下设置页里
+   * 「音质 · 高品质」是一块深灰胶囊，和整页白底完全不在一个色系。
+   *
+   * 这里按明暗给两档中性玻璃色：深色是近黑玻璃、浅色是白玻璃，
+   * 由 `html[data-dark]` 切换；手机播放页固定深色那一套在 handoff.css 里覆盖。
+   * 默认给深色（`:root` 本来就是深色基线，ThemeProvider 一挂上就会改掉 data-dark）。
+   */
+  --sy-chip-bg: rgba(20, 22, 28, 0.76);
+  --sy-chip-bg-hover: rgba(28, 31, 38, 0.92);
   --sy-shadow-card-hover: 0 16px 38px rgba(0, 0, 0, 0.55);
   --sy-shadow-cover: 0 24px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.14);
   --sy-font-cn: 'Noto Sans SC', 'HarmonyOS Sans SC', 'MiSans', 'PingFang SC', 'Microsoft YaHei UI', system-ui, sans-serif;
   --sy-font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', serif;
   --sy-font-num: 'Inter', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+}
+
+/* 浅色主题：芯片底板换成白玻璃 */
+html[data-dark='false'] {
+  --sy-chip-bg: rgba(255, 255, 255, 0.62);
+  --sy-chip-bg-hover: rgba(255, 255, 255, 0.86);
 }
 
 * { box-sizing: border-box; }
@@ -111,7 +146,7 @@ html.theme-anim .themed {
     box-shadow 200ms var(--sy-ease-soft) !important;
 }
 
-/* 减弱动效：全部过渡降为 100ms 淡入淡出 */
+/* 减弱动效：过渡 / 一次性进场动画压到 100ms（等于「别慢慢演，直接到位」） */
 html[data-reduced-motion='true'] *,
 html[data-reduced-motion='true'] *::before,
 html[data-reduced-motion='true'] *::after {
@@ -125,6 +160,54 @@ html[data-reduced-motion='true'] *::after {
     animation-duration: 100ms !important;
   }
 }
+/*
+ * 上面那条**不能套到无限循环的动画上**。
+ *
+ * 100ms 一条命是「快」，对循环动画就是「快 7 倍 / 快 260 倍」：
+ * 加载环 720ms 一圈被压成 0.1s，看着是狂转；黑胶 26s 一圈压成 0.1s，
+ * 唱片模式直接疯转（用户报的两条都是这个）。减弱动效的本意是**少动**，
+ * 不是加速——所以循环指示器恢复各自的节奏，纯装饰的循环干脆停掉。
+ *
+ * 放在这条规则之后、用同样的 `!important` + 更高的选择器权重覆盖，
+ * 顺序不能反（反了就被上面那条压回去，这正是以前的写法没生效的原因：
+ * 下面 `.spin-ring` 那条本来就在，只是少了 `!important`）。
+ */
+html[data-reduced-motion='true'] .spin-ring { animation-duration: 1.4s !important; }
+html[data-reduced-motion='true'] .home-refresh.busy svg { animation-duration: 1.6s !important; }
+html[data-reduced-motion='true'] .sr-ring > i:nth-child(1) { animation-duration: 1.4s !important; }
+html[data-reduced-motion='true'] .sr-ring > i:nth-child(2) { animation-duration: 2s !important; }
+html[data-reduced-motion='true'] .sr-ring > i:nth-child(3) { animation-duration: 2.6s !important; }
+/* 黑胶转不转是「在放还是暂停」的信号，不能停；恢复成慢转 */
+html[data-reduced-motion='true'] .imm-disc-spin { animation-duration: 26s !important; }
+/* 骨架屏 / 装饰性呼吸：停掉，留一个静态的暗色块 */
+html[data-reduced-motion='true'] .skeleton,
+html[data-reduced-motion='true'] .sq-sk-cover,
+html[data-reduced-motion='true'] .sq-sk-line,
+html[data-reduced-motion='true'] .sr-skel-art,
+html[data-reduced-motion='true'] .sr-skel-lines > i,
+html[data-reduced-motion='true'] .hk-rec,
+html[data-reduced-motion='true'] .fl-breath,
+html[data-reduced-motion='true'] .folia-blob,
+html[data-reduced-motion='true'] .qr-shimmer,
+html[data-reduced-motion='true'] .qr-wrap[data-phase='waiting'] .qr-dot { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .spin-ring { animation-duration: 1.4s !important; }
+  .home-refresh.busy svg { animation-duration: 1.6s !important; }
+  .sr-ring > i:nth-child(1) { animation-duration: 1.4s !important; }
+  .sr-ring > i:nth-child(2) { animation-duration: 2s !important; }
+  .sr-ring > i:nth-child(3) { animation-duration: 2.6s !important; }
+  .imm-disc-spin { animation-duration: 26s !important; }
+  .skeleton,
+  .sq-sk-cover,
+  .sq-sk-line,
+  .sr-skel-art,
+  .sr-skel-lines > i,
+  .hk-rec,
+  .fl-breath,
+  .folia-blob,
+  .qr-shimmer,
+  .qr-wrap[data-phase='waiting'] .qr-dot { animation: none !important; }
+}
 
 /* ---------- 液态玻璃（三层：折射 / 高光 / 实体感） ---------- */
 .glass {
@@ -137,6 +220,15 @@ html[data-reduced-motion='true'] *::after {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 .glass .on-glass { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); }
+/*
+ * 浅色主题下这圈黑影必须摘掉。
+ *
+ * `.on-glass` 的阴影是给「玻璃下面是封面彩色图」准备的：深色玻璃上白字加一层
+ * 暗晕才立得住。浅色主题的玻璃是白底，字本身已经是近黑，再压 50% 的黑阴影
+ * 就是在字形周围糊一圈灰——迷你播放条的歌名看上去像被描了边（用户：
+ * 「迷你播放栏上面的字体怎么有阴影」）。
+ */
+html[data-dark='false'] .glass .on-glass { text-shadow: none; }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .glass { -webkit-backdrop-filter: none; backdrop-filter: none; }
@@ -190,6 +282,12 @@ html[data-reduced-motion='true'] *::after {
   font: 400 11.5px/1 var(--sy-font-cn);
   color: var(--sy-text-2);
   transition: color var(--sy-dur-fast) var(--sy-ease-soft);
+  /*
+   * 路径那一行里它和一段可收缩的路径并排：不写这两条，窄屏（手机上「复制路径」
+   * 四个字）会被压成两行——「复制路 / 径」。
+   */
+  flex: none;
+  white-space: nowrap;
 }
 .link-btn:hover { color: var(--sy-text-1); }
 .link-btn.danger:hover { color: var(--sy-error); }
@@ -221,13 +319,27 @@ html[data-reduced-motion='true'] *::after {
   width: 15px;
   height: 15px;
   border-radius: 999px;
+  /*
+   * 先给一条**实色**轨道，再让 color-mix 覆盖。
+   *
+   * 老 WebView（小米真机 104）不认 `color-mix()`，整条 `border` 声明会被丢弃 ——
+   * 于是 `border-style` / `border-width` 一起没了，只剩下面那句 `border-top-color`，
+   * 画出来是**空的**：用户看到的就是「加载动画显示不出来」（小米上出现、华为上正常）。
+   * 兜底轨道用半透明白：播放按钮和刷新钮都在深色底上，浅色底下也还有 currentColor
+   * 那一段弧在转，不会变成隐形。
+   */
+  border: 2px solid rgba(255, 255, 255, 0.24);
   border: 2px solid color-mix(in srgb, currentColor 26%, transparent);
   border-top-color: currentColor;
   animation: spin-ring 720ms linear infinite;
 }
 .spin-ring.sm { width: 13px; height: 13px; border-width: 1.6px; }
 @keyframes spin-ring { to { transform: rotate(360deg); } }
-html[data-reduced-motion='true'] .spin-ring { animation-duration: 1.6s; }
+/* 减弱动效下的时长见文件上方「循环动画」那一段（那里带 !important，能压住
+   全局 100ms 那条；写在这里的老版本没带 !important，等于从来没生效过） */
+
+/* 「我的」页的刷新钮：之前点下去只是变灰，看不出在干活。让图标自己转 */
+.home-refresh.busy svg { animation: spin-ring 900ms linear infinite; }
 
 .text-input {
   appearance: none;
@@ -345,7 +457,13 @@ html[data-reduced-motion='true'] .spin-ring { animation-duration: 1.6s; }
   appearance: none;
   height: 4px;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  /*
+   * 轨道用中性灰的实色，**不能用 color-mix()**：
+   * 真机 WebView 104 不认这个函数，整条声明失效 → 轨道变成透明，
+   * 界面上只剩一个白圆点悬在空中（均衡器推子尤其明显）。
+   * 中性灰在明暗两套主题下都看得见，也不必跟主题变量走。
+   */
+  background: rgba(128, 128, 128, 0.32);
   cursor: pointer;
   outline-offset: 4px;
 }
@@ -358,6 +476,15 @@ html[data-reduced-motion='true'] .spin-ring { animation-duration: 1.6s; }
   background: var(--sy-text-1);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
   transition: transform var(--sy-dur-fast) var(--sy-ease-soft);
+  /*
+   * 滑块头必须自己往上提半个差值，Chromium **不会**自动居中。
+   *
+   * 规范里 thumb 是「相对轨道盒顶边」定位的：轨道 4px、thumb 12px 时，
+   * 圆点的顶边贴着轨道顶边，圆心整整低 4px——看上去就是「滑杆是歪的、
+   * 圆球挂在线的下方」。`(轨道 4 − 圆点 12) / 2 = −4`，这一行就是全部原因。
+   * 所有用到 `.slider` 的地方（播放条音量 / 播放页音量 / 设置页各条）共用。
+   */
+  margin-top: -4px;
 }
 .slider:hover::-webkit-slider-thumb { transform: scale(1.15); }
 
@@ -475,3 +602,12 @@ html[data-reduced-motion='true'] .skeleton { animation: none; opacity: 0.55; }
   font: 400 12.5px/1.7 var(--sy-font-cn);
   color: var(--sy-text-3);
 }
+/*
+ * 整理态的抖动是**装饰性**的：减弱动效下直接停掉。
+ *
+ * 上面那条兜底规则会把 animation-duration 压成 100ms，套在无限循环上就是
+ * 「每秒抖十下」——比正常播放还晃眼（转圈、黑胶都踩过这个坑）。
+ * 这里写 `animation: none !important`，不是改时长：不抖也就没有「以为在抽风」。
+ * 静止的卡片照样点得开、拖得动，只是不再晃。
+ */
+html[data-reduced-motion='true'] .home-page[data-edit='true'] .home-card[data-skey] { animation: none !important; }

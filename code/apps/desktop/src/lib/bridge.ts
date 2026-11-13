@@ -11,6 +11,7 @@
  */
 import type { LocalTrack, ScanResult } from '@shuyin/core'
 import { androidInvoke, isAndroid, lastKnownPlayerState, onNative } from './native/android'
+import { toast } from './toast'
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 export { isAndroid }
@@ -29,6 +30,25 @@ export interface ProbeAudioInfo {
   status: number
   /** 秒；0 = 这个封装里读不出来（m4a 的 moov 在尾部、或者数据不够） */
   duration: number
+  /** 音频文件自己写的标题；空串 = 这个封装里没有标签（跳过名字校验） */
+  title: string
+  /** 音频文件自己写的歌手；空串同上 */
+  artist: string
+}
+
+/**
+ * 「其他应用打开」送进来的文件（安卓 `intent://VIEW|SEND`）。
+ * 原生已经把它拷进 `cache/inbox`，`path` 可以直接读。
+ */
+export interface IncomingFile {
+  /** 原生生成的去重号：同一个文件可能既被「取」到又被「推」过来 */
+  id: string
+  path: string
+  /** 原始文件名（带后缀），拿来当音源名 */
+  name: string
+  size: number
+  /** 内容里能不能找到洛雪脚本的痕迹（`@name` / `module.exports` / `musicUrl`） */
+  source: boolean
 }
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -213,7 +233,23 @@ export const bridge = {
     return invoke<string | null>('pick_music_folder')
   },
   async playerState(): Promise<PlayerStateSnapshot> {
-    return invoke<PlayerStateSnapshot>('player_state')
+    /*
+     * 字段名归一化。
+     *
+     * 桌面 Rust 回的是 camelCase（`trackPath`），安卓 `Bridge.kt` 直接把
+     * `PlaybackService.snapshot` 那个 JSONObject 原样吐出来——里面是
+     * `track_path` / `track_url`。以前没人读这个字段所以没露馅，但
+     * 「原生是不是还挂着一个活的音源」正是靠它判断（见 PlayerProvider 的
+     * 会话接管），不归一化就等于安卓上永远判「没有」。
+     */
+    const raw = await invoke<PlayerStateSnapshot & {
+      track_path?: string | null
+      track_url?: string | null
+    }>('player_state')
+    return {
+      ...raw,
+      trackPath: raw.trackPath ?? raw.track_path ?? raw.track_url ?? null,
+    }
   },
   /**
    * 加载并播放某首。
@@ -266,8 +302,7 @@ export const bridge = {
    * 返回里带 `total`（整首字节数），用来反算平均码率、判断「这个文件是不是这首歌」。
    * 浏览器预览版没有网络代理，按「能播」返回、`total=0` 让上层跳过校验。
    */
-  async probeAudioInfo(url: string): Promise<ProbeAudioInfo> {
-    if (!isNative) return { got: 1, total: 0, contentType: '', status: 200, duration: 0 }
+  async probeAudioInfo(url: string): Promise<ProbeAudioInfo> {    if (!isNative) return { got: 1, total: 0, contentType: '', status: 200, duration: 0, title: '', artist: '' }
     return invoke<ProbeAudioInfo>('probe_audio_url', { url })
   },
 
@@ -275,6 +310,20 @@ export const bridge = {
   async localAudioDuration(path: string): Promise<number> {
     if (!isNative) return 0
     return invoke<number>('local_audio_duration', { path }).catch(() => 0)
+  },
+
+  /**
+   * 本地音频文件自己写的标题/歌手。安卓侧没有对应命令（要 MediaMetadataRetriever，
+   * 而缓存校验在手机上不划算）——读不到就返回空，调用方跳过名字校验。
+   */
+  async localAudioTags(path: string): Promise<{ title: string; artist: string }> {
+    if (!isTauri) return { title: '', artist: '' }
+    try {
+      const r = await invoke<[string, string]>('local_audio_tags', { path })
+      return { title: r?.[0] || '', artist: r?.[1] || '' }
+    } catch {
+      return { title: '', artist: '' }
+    }
   },
 
   /* ---- 音源脚本导入（只此一个入口：清单式存储，改文件夹不认） ---- */
@@ -311,6 +360,26 @@ export const bridge = {
   async downloadsDir(dir?: string): Promise<string> {
     if (!isNative) return ''
     return invoke<string>('downloads_dir', { dir: dir ?? null })
+  },
+  /**
+   * 安卓：拉起系统文件夹选择器换下载目录（SAF 授权会持久化）。
+   *
+   * 桌面返回 null——那边走 Tauri 的目录对话框，不经过这里。
+   * 返回值里 `cancel=true` 表示用户按了返回、没选。
+   */
+  async downloadsPickDir(): Promise<{ dir: string; custom: boolean; cancel: boolean } | null> {
+    if (!isAndroid) return null
+    return invoke<{ dir: string; custom: boolean; cancel: boolean }>('download_pick_dir')
+  },
+  /** 安卓：清掉自选目录，回到公共「音乐/疏音」。桌面返回 null（前端自己处理默认） */
+  async downloadsResetDir(): Promise<string | null> {
+    if (!isAndroid) return null
+    return invoke<string>('downloads_reset_dir')
+  },
+  /** 安卓：当前目录 + 是不是自选的。启动时以原生为准，避免 localStorage 里的旧路径带偏 */
+  async downloadsState(): Promise<{ dir: string; custom: boolean } | null> {
+    if (!isAndroid) return null
+    return invoke<{ dir: string; custom: boolean }>('downloads_state')
   },
   /** 下载在线曲目到 dest（分段并发）。返回写入字节数 */
   async downloadTrack(url: string, dest: string): Promise<number> {
@@ -350,6 +419,24 @@ export const bridge = {
     return invoke<number>('cache_clear')
   },
   /**
+   * 旧版本缓存误落到公共音乐目录的副本：[个数, 字节数]。
+   *
+   * 0.6.96 及更早，缓存下载复用了「下载」那条命令，文件被发布成
+   * `Music/疏音/online_*.mp3`（缓存目录一直是空的）。新版本不再生成，
+   * 但已经躺下的那些要能让用户自己收掉。
+   */
+  async cacheCopies(): Promise<[number, number]> {
+    if (!isAndroid) return [0, 0]
+    const r = await invoke<{ count: number; bytes: number }>('cache_orphans', {}).catch(() => null)
+    return r ? [Number(r.count) || 0, Number(r.bytes) || 0] : [0, 0]
+  },
+  /** 删掉上面那些副本（只认 `online_` 前缀，不会碰到用户自己下载的歌） */
+  async purgeCacheCopies(): Promise<[number, number]> {
+    if (!isAndroid) return [0, 0]
+    const r = await invoke<{ count: number; bytes: number }>('cache_orphans_clean', {}).catch(() => null)
+    return r ? [Number(r.count) || 0, Number(r.bytes) || 0] : [0, 0]
+  },
+  /**
    * 当前缓存目录 + 是不是用户自选的（设置页据此显示「恢复默认」）。
    * 默认 = 数据目录下的 cache\audio，和音源清单同一个家。
    */
@@ -359,7 +446,12 @@ export const bridge = {
   },
   /** 换缓存目录；传空恢复默认。已有缓存会一起搬过去，返回新目录 + 搬迁统计 */
   async cacheSetDir(dir: string | null): Promise<{ dir: string; custom: boolean; moved: number; failed: number }> {
-    if (!isNative) return { dir: '', custom: false, moved: 0, failed: 0 }
+    /*
+     * 只有桌面能换。安卓的缓存目录是应用私有目录（系统不让普通应用往任意路径
+     * 写缓存），命令表里那条 `cache_set_dir` 也只是个占位；网页预览更没有落盘。
+     * 这里直接说人话，别再让上层去撞底层实现。
+     */
+    if (!isTauri) throw new Error(isAndroid ? '手机上不支持更换缓存目录' : '网页预览版不支持更换缓存目录')
     return invoke<{ dir: string; custom: boolean; moved: number; failed: number }>(
       'cache_set_dir',
       { dir: dir && dir.trim() ? dir.trim() : null },
@@ -376,16 +468,41 @@ export const bridge = {
     return invoke('write_text_abs', { path, text })
   },
 
-  async saveLyricsFile(path: string, text: string): Promise<void> {
+  /**
+   * 写 .lrc。返回**实际写到的路径**（安卓上歌词落在「下载/疏音」，
+   * 和歌曲不在同一个目录，见 `DownloadStore.textDir`；桌面端就写 `dest`）。
+   */
+  async saveLyricsFile(path: string, text: string): Promise<string | null> {
     if (!isNative) throw new Error('网页预览版不能保存，请用桌面端')
-    return invoke('save_lyrics_file', { path, text })
+    return invoke<string | null>('save_lyrics_file', { path, text })
   },
 
-  /** 在资源管理器中定位文件 */
+  /**
+   * 在资源管理器中定位文件。
+   *
+   * 安卓上没有这个能力（见 `Paths.kt`）：能映射成 document uri 的就交给文件管理器，
+   * 不能的（私有目录、Android/data）把路径写进剪贴板。前端按返回结果给提示——
+   * 点了没反应比"打不开"更让人摸不着头脑。
+   */
   async revealInFolder(path: string): Promise<void> {
-    if (!isTauri) return
-    const { revealItemInDir } = await import('@tauri-apps/plugin-opener')
-    await revealItemInDir(path)
+    if (isTauri) {
+      const { revealItemInDir } = await import('@tauri-apps/plugin-opener')
+      await revealItemInDir(path)
+      return
+    }
+    if (!isAndroid) return
+    if (!path || !path.trim()) {
+      toast('还没有选择路径', { bad: true })
+      return
+    }
+    try {
+      const r = await invoke<{ opened: boolean; copied: boolean }>('reveal_path', { path })
+      if (r?.opened) toast('已在文件管理器中打开', { ok: true })
+      else if (r?.copied) toast('已复制路径', { ok: true })
+      else toast('无法打开该路径', { bad: true })
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '无法打开该路径', { bad: true })
+    }
   },
 
   /** 订阅播放状态事件 */
@@ -416,6 +533,46 @@ export const bridge = {
       })
     })
     return () => { disposed = true; unlisten?.() }
+  },
+
+  /* ---- 系统分享（安卓）---- */
+
+  /**
+   * 拉起系统分享面板。
+   *
+   * 以前前端直接 `navigator.share(...)`：那是 **Google Chrome 浏览器**的 API，
+   * WebView 里根本没有这个对象，于是每次都掉到「复制文本」的兜底上——
+   * 用户点了分享，界面一动不动，看起来就是「按钮点不了」。
+   * 这里改成走原生的 `Intent.ACTION_SEND` + 选择器，微信 / QQ / 短信都在里面。
+   *
+   * 返回 false 表示这个宿主没有系统分享（桌面），调用方自己退回复制文本。
+   */
+  async shareText(opts: { text: string; title?: string; chooser?: string }): Promise<boolean> {
+    if (!isAndroid) return false
+    await invoke<boolean>('share_text', {
+      text: opts.text,
+      title: opts.title ?? '',
+      chooser: opts.chooser ?? '分享到',
+    })
+    return true
+  },
+
+  /* ---- 其他应用「打开方式」送进来的文件（安卓）---- */
+
+  /** 取一次冷启动时收到的文件（取走即清空）；没有就 null */
+  async takeOpenFile(): Promise<IncomingFile | null> {
+    if (!isAndroid) return null
+    try {
+      return await invoke<IncomingFile | null>('take_open_file')
+    } catch {
+      return null
+    }
+  },
+
+  /** 把暂存的音源脚本导入清单，返回最终落下的名字 */
+  async importSourceStaged(path: string, name?: string): Promise<string> {
+    if (!isAndroid) throw new Error('只有安卓端能从「其他应用打开」导入')
+    return invoke<string>('import_source_staged', { path, name: name ?? '' })
   },
 
   /** 订阅扫描进度事件 */

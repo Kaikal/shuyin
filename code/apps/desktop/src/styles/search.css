@@ -29,6 +29,93 @@
 .search-page .search-box input::placeholder { color: var(--sy-text-4); }
 .search-page .search-box .icon-btn { width: 22px; height: 22px; font-size: 14px; line-height: 1; }
 
+/* ---------- 搜索联想（输入框下拉） ----------
+ * 挂在页头操作区上、贴着输入框下沿；桌面和手机同一套，手机单独调高度。
+ * 底板用 `--sy-chip-bg`（明暗两档的中性玻璃）——`--sy-surface` 只有 2.8% 白，
+ * 当浮层会透出底下的歌名。 */
+.search-page .lib-actions { position: relative; }
+
+.sr-sug {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--sy-surface-border);
+  background: var(--sy-chip-bg);
+  -webkit-backdrop-filter: blur(var(--sy-glass-blur)) saturate(var(--sy-glass-saturate));
+  backdrop-filter: blur(var(--sy-glass-blur)) saturate(var(--sy-glass-saturate));
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.42);
+  max-height: min(52vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: sr-sug-in var(--sy-dur-pop) var(--sy-ease-soft);
+}
+@keyframes sr-sug-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.sr-sug-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sy-text-1);
+  font: 400 12.5px/1 var(--sy-font-cn);
+  text-align: left;
+  cursor: pointer;
+}
+.sr-sug-item.is-hi { background: var(--sy-row-hover); }
+.sr-sug-ico { flex: none; display: grid; place-items: center; width: 14px; color: var(--sy-text-4); }
+.sr-sug-t {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sr-sug-t b { font-weight: 600; color: var(--sy-accent-soft); }
+/* 歌手名跟在歌名后面，宽度先让它缩——歌名才是这一行要认的东西 */
+.sr-sug-sub {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--sy-text-3);
+}
+.sr-sug-k {
+  flex: none;
+  margin-left: auto;
+  padding: 0 6px;
+  height: 16px;
+  border-radius: 5px;
+  background: var(--sy-surface);
+  color: var(--sy-text-4);
+  font-size: 10px;
+  line-height: 16px;
+}
+.sr-sug-item .sr-badge.sm { flex: none; margin-left: auto; }
+/* 「歌手」标签和平台徽标都在行尾时，只让第一个吃到 margin-left:auto */
+.sr-sug-item .sr-badge.sm + .sr-sug-k { margin-left: 4px; }
+.sr-sug-wait { padding: 9px 10px; color: var(--sy-text-4); font-size: 12px; }
+/* 最后那行「搜索『q』」：上面是联想、它才是「照我打的这串搜」，用一条细线隔开 */
+.sr-sug-go {
+  margin-top: 3px;
+  border-top: 1px solid var(--sy-line);
+  border-radius: 0 0 8px 8px;
+}
+.sr-sug-go .sr-sug-t { color: var(--sy-text-2); }
+
 /* ---------- Tab + 平台筛选 ---------- */
 .sr-bar {
   display: flex;
@@ -100,6 +187,61 @@
 }
 .sr-ghost:hover { color: var(--sy-text-1); background: var(--sy-row-hover); }
 
+/* ---------- 空态：各平台热搜 ----------
+ * 关键词为空时这块才是页面主体。以前只有一个「最近搜索」，
+ * 没有历史的情况下整页就是空白——看着像没加载出来。
+ * 一家一段：平台徽标 + 一排可点的歌名（来源是各平台热歌榜，见 lib/hotSearch.ts）。
+ *
+ * **必须自己能滚**：`.page` 是 flex 列 + `overflow:hidden`，这一块比可视区高时
+ * （四家热搜叠起来很容易超）以前是直接裁掉——第四家整段看不见，用户报的
+ * 「没有酷狗的热搜」就是这么来的。其余兄弟（`.sr-list` / `.sr-grid`）都是
+ * `flex:1 + overflow-y:auto`，这里漏了这一句。 */
+.sr-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 24px;
+  overscroll-behavior: contain;
+}
+
+.sr-hot { margin-top: 20px; }
+.sr-hot-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--sy-line);
+}
+.sr-hot-title { font-size: 12.5px; font-weight: 600; color: var(--sy-text-2); letter-spacing: 0.02em; }
+.sr-hot-sub { font-size: 11px; color: var(--sy-text-4); }
+/* 还没回来时只占一行，不做骨架屏：这块是可选的，闪一下骨架反而更吵 */
+.sr-hot-wait { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+.sr-hot-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; }
+.sr-hot-row .sr-badge { margin-top: 5px; }
+.sr-hot-words { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; flex: 1; }
+.sr-hot-word {
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--sy-surface-border);
+  border-radius: var(--sy-radius-pill);
+  background: transparent;
+  color: var(--sy-text-2);
+  font: 400 12px/1 var(--sy-font-cn);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--sy-dur-fast) var(--sy-ease-soft), background var(--sy-dur-fast) var(--sy-ease-soft),
+              border-color var(--sy-dur-fast) var(--sy-ease-soft);
+}
+.sr-hot-word:hover {
+  color: var(--sy-text-1);
+  background: var(--sy-row-hover);
+  border-color: color-mix(in srgb, var(--sy-text-1) 20%, transparent);
+}
+
 .sr-hint { padding: 26px 0; font-size: 12px; color: var(--sy-text-3); }
 
 /* ---------- 搜索中的等待态 ----------
@@ -148,6 +290,53 @@
 .sr-ring.sm > i:nth-child(3) { inset: 8px; }
 
 .sr-loading-t { font-size: 13px; color: var(--sy-text-2); }
+
+/* ====================================================================
+ * 歌单详情骨架屏
+ * --------------------------------------------------------------------
+ * 这个页面要等平台接口 1~3 秒（酷我榜单还得分页翻）。以前加载期间内容区
+ * 只有一行灰字「正在读取歌单…」，看起来像没反应；而且上一页残留的行还在
+ * 手指下面，一滑一松就误点进去。
+ *
+ * 骨架**和真实行同高**（62）、同缩进，出数据时是「填进去」而不是「整块跳
+ * 一下长出来」——这是骨架屏唯一的价值，尺寸对不上还不如转圈。
+ *
+ * 配色用 `currentColor` 调透明度：深色主题是浅灰条、浅色主题是深灰条，
+ * 不用为两套主题各写一份，也避开 `color-mix()`（安卓 WebView 104 不认，
+ * 整条声明作废、块就变透明了）。
+ * ==================================================================== */
+.sr-skel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0 12px;
+  color: var(--sy-text-1);
+  animation: sr-fade-in 180ms var(--sy-ease-soft) both;
+}
+.sr-skel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 10px;
+  font-size: 12.5px;
+  color: var(--sy-text-3);
+}
+.sr-skel-row { display: flex; align-items: center; gap: 12px; height: 62px; padding: 0 10px; }
+.sr-skel-art { flex: none; width: 44px; height: 44px; border-radius: 10px; }
+.sr-skel-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+.sr-skel-lines > i { display: block; height: 11px; border-radius: 6px; }
+.sr-skel-lines > i:first-child { width: 40%; }
+.sr-skel-lines > i:last-child { width: 22%; height: 9px; }
+.sr-skel-art,
+.sr-skel-lines > i {
+  background: currentColor;
+  opacity: 0.07;
+  animation: sr-skel-pulse 1.3s ease-in-out infinite;
+}
+@keyframes sr-skel-pulse {
+  0%, 100% { opacity: 0.055; }
+  50% { opacity: 0.13; }
+}
 .sr-loading-s { font-size: 11px; color: var(--sy-text-4); letter-spacing: 0.01em; }
 
 .sr-errors { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 0 0; }
@@ -205,6 +394,41 @@
 .sr-badge[data-src='kw'] { background: #C8892B; }
 .sr-badge[data-src='kg'] { background: #3B7FC4; }
 .sr-badge[data-src='mg'] { background: #8A5BC4; }
+
+/*
+ * 行内平台标识（混排列表用）。
+ *
+ * 和上面那颗实心胶囊是两套东西：`.sr-badge` 是行尾独立一列，手机上直接隐藏；
+ * 这个塞在「歌手」前面，两端都看得见，所以做得更轻——一个小色点 + 平台名，
+ * 不再抢歌名的主次。
+ *
+ * 只给文字上色、不铺底：真机 WebView 104 没有 `color-mix()`，半透明底色
+ * 只能写死 rgba，而深色/浅色两套主题对同一个 rgba 的反应完全不同，容易糊掉。
+ */
+.sr-src {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+}
+.sr-src::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.sr-src[data-src='wy'] { color: #C1443C; }
+.sr-src[data-src='tx'] { color: #2E9B6B; }
+.sr-src[data-src='kw'] { color: #C8892B; }
+.sr-src[data-src='kg'] { color: #3B7FC4; }
+.sr-src[data-src='mg'] { color: #8A5BC4; }
 
 .sr-row {
   display: flex;
@@ -401,6 +625,10 @@
    ================================================================== */
 
 .src-dir-actions { display: flex; gap: 8px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+/* 维护行：重新加载 + 批量开关并排，垂直居中 */
+.src-maint { display: flex; gap: 10px; align-items: center; flex: none; }
+.src-maint .ghost-btn { height: 30px; padding: 0 11px; font-size: 11.5px; }
+.src-maint svg { margin-right: 5px; }
 .src-dir-actions svg { margin-right: 5px; }
 .src-dir-actions .primary-btn { height: 30px; padding: 0 12px; font-size: 11.5px; }
 .src-dir-actions .ghost-btn { height: 30px; padding: 0 11px; font-size: 11.5px; }
@@ -426,6 +654,47 @@
   font: 400 12px/1 var(--sy-font-cn);
   outline: none;
 }
+/*
+ * 音源概览（设置 · 音源页顶部）。
+ *
+ * 三个数字 + 一句话：先回答「我现在能不能放歌」，再去说怎么导入。
+ * 只给「可用」上绿色，其余保持中性——失败那格只在真有失败时才变红，
+ * 否则三格全彩反而看不出重点。
+ */
+.src-stat {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-bottom: 12px;
+  padding: 13px 14px;
+  border-radius: var(--sy-radius-small);
+  background: var(--sy-surface);
+  border: 1px solid var(--sy-surface-border);
+}
+.src-stat-cells { display: flex; gap: 20px; flex: none; }
+.src-stat-cell { display: flex; flex-direction: column; gap: 3px; min-width: 40px; }
+.src-stat-cell b {
+  font: 600 19px/1 var(--sy-font-num);
+  color: var(--sy-text-1);
+  font-variant-numeric: tabular-nums;
+}
+.src-stat-cell span { font-size: 10.5px; color: var(--sy-text-3); white-space: nowrap; }
+.src-stat-cell[data-kind='ready'] b { color: #4CC38A; }
+.src-stat-cell[data-kind='off'] b { color: var(--sy-text-3); }
+.src-stat-cell[data-kind='bad'] b { color: var(--sy-text-3); }
+/* 有失败才点亮：0 个失败的时候那格不该抢眼 */
+.src-stat-cell[data-kind='bad'][data-active] b { color: var(--sy-error); }
+.src-stat-note {
+  flex: 1 1 180px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--sy-text-3);
+}
+/* 一个音源都没导入时，整块压成一句提示，别让三个 0 占着一大块 */
+.src-stat[data-empty] .src-stat-cells { display: none; }
+
 .src-msg {
   font-size: 11.5px;
   color: var(--sy-text-2);
@@ -535,7 +804,7 @@
 }
 .pb-q:hover:not(:disabled) { color: var(--sy-text-1); border-color: var(--sy-surface-border-strong, var(--sy-surface-border)); }
 .pb-q:disabled { opacity: 0.45; cursor: default; }
-.pb-q option { background: var(--sy-bg-2, #14161d); color: var(--sy-text-1); }
+.pb-q option { background: var(--sy-chip-bg-hover); color: var(--sy-text-1); }
 .pb-q option:disabled { color: var(--sy-text-4); }
 
 /* ---------- 歌单卡片：右上角收藏星（v0.5） ---------- */

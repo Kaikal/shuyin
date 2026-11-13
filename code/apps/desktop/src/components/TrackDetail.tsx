@@ -10,7 +10,7 @@ import { Cover } from './Cover'
 import { bridge } from '../lib/bridge'
 import { usePlayer } from '../lib/PlayerProvider'
 import { qualityLabel } from '../lib/online'
-import { IconClose, IconFolder, IconNext, IconPlay } from './icons'
+import { IconClose, IconFolder, IconNext, IconPause, IconPlay } from './icons'
 
 interface Props {
   track: LocalTrack | null
@@ -80,11 +80,37 @@ export function TrackDetail({ track, onClose, onPlay, onQueueNext }: Props) {
             </div>
 
             <div className="detail-actions">
-              <button className="primary-btn" onClick={() => onPlay(track)}><IconPlay width={14} height={14} /> 播放</button>
-              <button className="ghost-btn" onClick={() => onQueueNext(track)}><IconNext width={13} height={13} /> 下一首播放</button>
+              {/*
+                * 正在播的这一首，按钮要跟着变：
+                *   · 「播放」→「暂停 / 继续播放」（点它当然还是这首歌，没必要重头再来一遍）
+                *   · 「下一首播放」→ 一颗禁用的状态键「正在播放」
+                *
+                * 以前两个按钮是写死的：详情里明明写着这首正在放，下面还给一颗
+                * 「下一首播放」——用户的原话是「明明已经在播放当前歌曲了，
+                * 怎么还会有下一曲播放呢」。语义上讲不通，就把状态说出来。
+                */}
+              {isCurrent ? (
+                <button className="primary-btn" onClick={p.togglePlay}>
+                  {p.snapshot.playing
+                    ? <><IconPause width={14} height={14} /> 暂停</>
+                    : <><IconPlay width={14} height={14} /> 继续播放</>}
+                </button>
+              ) : (
+                <button className="primary-btn" onClick={() => onPlay(track)}>
+                  <IconPlay width={14} height={14} /> 播放
+                </button>
+              )}
+              <button
+                className={'ghost-btn' + (isCurrent ? ' is-current' : '')}
+                onClick={() => onQueueNext(track)}
+                disabled={isCurrent}
+                title={isCurrent ? '这首正在播，不需要排到下一首' : '插到当前曲后面播放'}
+              >
+                <IconNext width={13} height={13} /> {isCurrent ? '正在播放' : '下一首播放'}
+              </button>
               {!online && (
                 <button className="ghost-btn" onClick={() => void bridge.revealInFolder(track.path)}>
-                  <IconFolder width={14} height={14} /> 在文件夹中显示
+                  <IconFolder width={14} height={14} /> {bridge.isAndroid ? '复制路径' : '在文件夹中显示'}
                 </button>
               )}
             </div>

@@ -1,12 +1,20 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
+
+// 版本号只在 package.json 里写一次，构建时注入到界面（以前「关于」里手写 v0.5.x，
+// 每次发版都得记着改第四处，必然漏）
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string }
 
 // Tauri 期望固定端口，失败则退出而不是换端口
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@shuyin/core': fileURLToPath(new URL('../../packages/core/src/index.ts', import.meta.url)),

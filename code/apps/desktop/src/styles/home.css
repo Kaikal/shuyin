@@ -136,6 +136,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 长/短两版文案：桌面把平台名都列出来，手机换成首数（handoff.css 里切换） */
+.hm-short { display: none; }
 .home-band-acts { display: flex; align-items: center; gap: 12px; flex: none; }
 .home-band-play {
   display: inline-flex;
@@ -156,6 +158,152 @@
 .home-band-more { font-size: 11px; color: var(--sy-text-3); white-space: nowrap; }
 .home-band:hover .home-band-more { color: var(--sy-accent-soft); }
 
+/*
+ * 推荐条右侧的两颗小图标：换一批 / 调权重。
+ *
+ * 不做成文字按钮：手机上一行已经有「播放」，再来两个标签会把
+ * 「按你的口味 · N 首」挤没（那行是这条卡唯一的信息）。
+ */
+.home-band-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--sy-text-2);
+  cursor: pointer;
+  transition: color var(--sy-dur-fast), background var(--sy-dur-fast);
+}
+.home-band-icon:hover { color: var(--sy-accent); background: var(--sy-chip-bg); }
+/* 换批期间转一圈：日推已缓存，通常几十毫秒，转起来才看得出「点到了」 */
+.home-band-icon.is-busy svg { animation: spin-ring 900ms linear infinite; }
+
+/* ---------- 「推荐来源」配比滑块 ---------- */
+.reco-w { display: flex; flex-direction: column; gap: 12px; }
+/*
+ * 一根条分成几块（登录了几家就几块），块宽 = 这家出几首。
+ * 拖动块与块之间的竖线，左边多一首右边就少一首，总首数恒定。
+ */
+.reco-sl {
+  position: relative;
+  display: flex;
+  height: 64px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--sy-chip-bg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 面板打开时焦点落在这条上（`data-modal-focus`）：它是容器不是控件，不要焦点环 */
+.reco-sl:focus { outline: none; }
+.reco-sl-seg {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 12px;
+  overflow: hidden;
+  background: var(--sy-accent-a15);
+}
+.reco-sl-name {
+  font-size: 11px;
+  color: var(--sy-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reco-sl-n {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--sy-text-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.reco-sl-n::after { content: ' 首'; font-size: 10.5px; font-weight: 500; color: var(--sy-text-3); }
+/* 把手：视觉只有 3px 竖线，命中区 30px（手机上按得到，也不会挡住段的文字） */
+.reco-sl-h {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  margin-left: -15px;
+  padding: 0;
+  border: 0;
+  background: none;
+  /* 这一下是「拖分界线」，不是滚弹窗——不许浏览器接管 */
+  touch-action: none;
+  cursor: ew-resize;
+  z-index: 2;
+}
+.reco-sl-h i {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: var(--sy-accent);
+  transition: width var(--sy-dur-fast), margin var(--sy-dur-fast);
+}
+.reco-sl-h:hover i,
+.reco-sl-h:active i { width: 5px; margin-left: -2.5px; }
+.reco-sl-h:focus-visible { outline: none; }
+.reco-sl-h:focus-visible i { box-shadow: 0 0 0 3px var(--sy-accent-a26); }
+.reco-w-hint { font-size: 11px; line-height: 1.65; color: var(--sy-text-3); margin: 0; }
+.reco-w-total { font-size: 11.5px; color: var(--sy-text-3); }
+
+/* ---------- 为你推荐：和本地音乐同一条横带，换一种色调区分 ---------- */
+/*
+ * 底色用 rgba 令牌而不是 color-mix：真机 WebView 104 不认 color-mix，
+ * 整条声明会作废，卡片会退回透明（`.home-band` 自己那条也是这样）。
+ */
+.home-reco {
+  background: linear-gradient(100deg, var(--sy-accent-a15) 0%, var(--sy-surface) 62%);
+  border-color: var(--sy-accent-a26);
+  /* 左边一条强调色：两张横带结构一样，只靠底色区分不够一眼看出来 */
+  box-shadow: inset 3px 0 0 var(--sy-accent);
+}
+.home-reco:hover {
+  border-color: var(--sy-accent-a42);
+  /* 别把上面那条 inset 弄丢：`.home-band:hover` 会整条覆盖 box-shadow */
+  box-shadow: inset 3px 0 0 var(--sy-accent), var(--sy-shadow-card-hover);
+}
+.home-reco-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ---------- 「这个平台的歌单取不到」 ---------- */
+.home-plat-err {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: var(--sy-radius-card);
+  border: 1px dashed var(--sy-surface-border);
+  background: var(--sy-surface);
+}
+.home-plat-err-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.home-plat-err-txt b { font-size: 12.5px; font-weight: 600; color: var(--sy-text-1); }
+.home-plat-err-txt span { font-size: 11.5px; color: var(--sy-text-3); line-height: 1.5; }
+
 /* 曲库子页左上角的返回 */
 .lib-back { align-self: flex-start; margin-bottom: 8px; flex: none; }
 .home-sec { margin-bottom: 22px; }
@@ -168,6 +316,175 @@
 }
 .home-sec-head h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--sy-text-1); white-space: nowrap; }
 .home-sec-sub { font-size: 10.5px; color: var(--sy-text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/*
+ * 「我的歌单」里的分组（本地 / 各家平台）。
+ *
+ * 登录四个平台之后歌单会到十几二十个，平铺时只能靠卡片角标那行小字分是谁家的。
+ * 分组标题给一层「次级标题」的层级：比 h2（我的歌单）小一号、颜色退到 text-2，
+ * 数量跟在后面用计数色 —— 眼睛扫下来是「类别 → 卡」两层，不是一堆同权重的卡。
+ */
+.home-group + .home-group { margin-top: 18px; }
+.home-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+.home-group-head h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sy-text-2);
+  white-space: nowrap;
+}
+.home-group-n { font-size: 10.5px; color: var(--sy-text-3); }
+
+/*
+ * 分组标题就是折叠开关。
+ *
+ * 只包「箭头 + 名字 + 数量」这一小段按钮，不是整行——右边整理态还有三颗
+ * （↑ ↓ 六点），套进 button 里浏览器会把 DOM 拆开，箭头点了没反应。
+ * 视觉上保持原来的间距：按钮本身清零背景和边框，字号继承 h3 那套。
+ */
+.hg-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: -4px 0;
+  padding: 4px 6px 4px 2px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  /* 手机点起来别有一整块高亮，靠箭头转的那一下给反馈 */
+  -webkit-tap-highlight-color: transparent;
+}
+.hg-toggle:hover .hg-name { color: var(--sy-text-1); }
+.hg-toggle:active { background: var(--sy-chip-bg); }
+.hg-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sy-text-2);
+  white-space: nowrap;
+}
+/*
+ * 小箭头：收起时朝右（▸），展开时朝下（▾）。
+ * 零尺寸 + 左边框实色的经典三角，border-left 实色画出来指向**右**。
+ */
+.hg-chev {
+  width: 0;
+  height: 0;
+  flex: none;
+  align-self: center;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  color: var(--sy-text-3);
+  transform: rotate(0deg);
+  transition: transform var(--sy-dur-pop, 150ms) ease;
+}
+.hg-chev[data-open='true'] { transform: rotate(90deg); }
+/* 收起后这一组只剩一行标题：名字退一级、和下一组之间别留大缝 */
+.home-group[data-shut] .hg-name { color: var(--sy-text-3); }
+.home-group[data-shut] + .home-group { margin-top: 14px; }
+
+/* ---------- 分组整组排序（整理态，拖组头右边的六点） ---------- */
+/*
+ * 平台组各成一堆，「我常用的那家」不该永远排在最后。
+ * 容器本身不加任何视觉：组的间距还是靠 `.home-group + .home-group` 的 18px，
+ * 包一层之后相邻关系没变（同一个父元素）。
+ */
+.home-groups { display: block; }
+/*
+ * 组间距在包了一层之后要重新说一遍：
+ * `.home-group + .home-group` 只认**同一个父**的相邻兄弟，本地那组在容器外面，
+ * 所以原来那个选择器跨不过去——第一组和「本地」之间会贴上。
+ */
+.home-groups > .home-group { margin-top: 0; }
+.home-groups > .home-group + .home-group { margin-top: 18px; }
+.home-groups:not(:first-child) { margin-top: 18px; }
+/* 没有任何平台歌单时容器是空的：别让它的上边距在页面上留一条缝 */
+.home-groups:empty { display: none; }
+/* 拖起来的那一组必须盖在别的组上面，否则卡片会穿到下一组底下 */
+.home-groups > .home-group.is-dragging { position: relative; z-index: 4; }
+.home-groups > .home-group.is-armed .home-group-head .hg-name,
+.home-groups > .home-group.is-dragging .home-group-head .hg-name { color: var(--sy-accent); }
+
+.home-group-grip {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sy-text-3);
+  cursor: grab;
+  position: relative;
+  /*
+   * 手柄上不许浏览器接管手势：这一下就是「拖组」，不是滚页面。
+   * 组外区域照旧能滚（组多了要靠它翻）。
+   */
+  touch-action: none;
+}
+/* 六点只有 16px，四周补一圈看不见的命中区（手机上按得到） */
+.home-group-grip::after { content: ''; position: absolute; inset: -7px -8px; }
+.home-group-grip:hover,
+.home-group-grip:active { color: var(--sy-accent); background: var(--sy-chip-bg); }
+.home-groups > .home-group.is-dragging .home-group-grip { cursor: grabbing; }
+
+/*
+ * 组头右侧的三颗（↑ / ↓ / 六点）。
+ *
+ * 组可能几百像素高，单靠拖太难跨组——箭头一步一格是手机上的主通道，
+ * 拖动留给鼠标和短距离微调。三颗并排、给一点底，别和左边标题混成一串。
+ */
+.home-group-move {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+.home-group-move .home-group-arrow,
+.home-group-move .home-group-grip {
+  margin-left: 0;
+  width: 28px;
+  height: 26px;
+  border-radius: 8px;
+  /*
+   * 底色用强调色的 15% 透明，不用 `--sy-chip-bg`：
+   * 那个令牌在深色主题下几乎是黑的，压在近黑背景上等于没有底，
+   * 三颗按钮看着像三根裸线条，完全看不出「可以点」。
+   */
+  background: var(--sy-accent-a15, var(--sy-chip-bg));
+  color: var(--sy-accent-soft);
+}
+.home-group-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+}
+.home-group-arrow:hover:not(:disabled) { color: var(--sy-accent); }
+.home-group-move .home-group-grip:hover,
+.home-group-move .home-group-grip:active {
+  background: var(--sy-accent-a26, var(--sy-chip-bg));
+  color: #fff;
+}
+.home-group-arrow:disabled { opacity: .3; cursor: default; }
+.home-group-move .home-group-grip::after { inset: -2px; }
 
 .home-msg,
 .lib-toast {
@@ -250,6 +567,20 @@
 .home-mosaic.n4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
 .home-mosaic img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .home-fav-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+/*
+ * 有图的时候，图片必须**盖住**底下那层音符占位。
+ *
+ * `.home-cover-blank` 是 `position: absolute`，而图片原来是普通流里的块——
+ * 定位元素永远画在普通流内容之上，于是每张歌单卡的封面上都透出一个音符图标
+ * （用户：「歌单上面总会有一个图标在封面上，有图片时就不要」）。
+ * 把图片也变成定位元素，DOM 里它排在占位之后，层级自然正确；
+ * 图裂了 `display:none` 之后占位照样露得出来。
+ */
+.home-cover > .home-mosaic,
+.home-cover > .home-fav-cover {
+  position: absolute;
+  inset: 0;
+}
 
 .home-badge {
   position: absolute;
@@ -626,7 +957,15 @@
   flex-direction: column;
   gap: 6px;
   align-items: center;
-  max-width: min(560px, 82vw);
+  /*
+   * 这里必须是**确定的宽度**，不能让内容撑。
+   *
+   * 两个坑叠在一起：`left: 50%` 的固定定位元素，收缩宽度只算到视口右半边；
+   * 而 `width: max-content` 在「列方向 flex + 可收缩的文字」上也报不准——
+   * 真机上「这 10 首已经在播放列表里了」实测被压成 199px、两行。
+   * 给一个明确上限，具体多宽仍由 `.toast-item` 自己按内容决定。
+   */
+  width: min(560px, 82vw);
   pointer-events: none;
 }
 .toast-host.low { top: auto; bottom: 118px; }
@@ -690,7 +1029,34 @@
 /* 「我的」右上角的登录按钮：邮箱长了要截断，不许把标题栏顶变形 */
 .home-acct { max-width: 140px; white-space: nowrap; }
 .home-acct .acct-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.home-acct.on { color: var(--sy-accent-soft); border-color: color-mix(in srgb, var(--sy-accent) 35%, var(--sy-surface-border)); }
+
+/*
+ * 右上角的工具组：刷新 + 账号。
+ * 桌面端跟着 `.lib-actions` 那行走，只是单独包了一层，保证手机上能整组挪到第一行。
+ */
+.lib-tools { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/*
+ * 已登录态：底色 + 描边 + 图标一起变。
+ * 原来只有 `border-color: color-mix(...)` 一条——真机 WebView 不支持 color-mix，
+ * 整条声明直接作废，于是「登录了」和「没登录」长得几乎一样（用户：「不太容易看得出来」）。
+ * 这里全部改用 ThemeProvider 算好的 rgba 变量。
+ */
+.home-acct.on {
+  color: var(--sy-accent-soft);
+  border-color: var(--sy-accent-a42);
+  background: var(--sy-accent-a15);
+}
+.home-acct.on svg { color: var(--sy-accent-soft); }
+/* 手机上那颗圆钮本身就是「头像位」：登录后填实一点，一眼分辨 */
+html[data-shell='phone'] .home-head .home-acct.on {
+  color: #fff;
+  border-color: transparent;
+  background: var(--sy-accent);
+  box-shadow: 0 2px 10px var(--sy-accent-a42);
+}
+html[data-shell='phone'] .home-head .home-acct.on svg { color: #fff; }
+html[data-shell='phone'] .home-head .home-acct.on:active { background: var(--sy-accent); }
 
 /* 窄窗：歌单卡片小一点，标题栏按钮换行不挤压 */
 @media (max-width: 1180px) {
@@ -699,3 +1065,491 @@
   .plp-name { font-size: 20px; }
   .hk-name { width: 116px; }
 }
+
+/* ---------- 「我喜欢的音乐」固定卡（收藏的歌曲） ----------
+ * 它是收藏集合的视图，不是真歌单：不给改名/删除入口，
+ * 所以视觉上要和普通歌单卡一眼分得开——角标用强调色，封面左上角那颗心换成重色。
+ * 其余尺寸完全沿用 .home-card，混在网格里才不显得「插进来一块」。
+ */
+.home-card.is-fav .home-badge {
+  background: color-mix(in srgb, var(--sy-accent) 82%, #000);
+  color: #fff;
+}
+.home-card.is-fav .home-cover::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-accent) 32%, transparent);
+  pointer-events: none;
+}
+
+/* ==================================================================== */
+/* 歌单整理的「抖动」态                                                  */
+/* -------------------------------------------------------------------- */
+/* 抄 iPhone 桌面：卡片轻微摇摆、右上角浮出小叉、按住能拖着换位。         */
+/* 摇摆是给「现在可以整理」的一个持续信号 —— 没有它，用户不知道点进      */
+/* 整理模式之后该干什么；有它，一眼就知道「这些可以动」。                */
+/* ==================================================================== */
+
+.home-card { position: relative; }
+
+.home-edit-btn,
+.home-edit-done { align-self: center; flex: none; }
+.home-edit-hint {
+  align-self: center;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+  white-space: nowrap;
+}
+
+/*
+ * 摇摆。
+ *
+ * 幅度刻意压得很小（±1.1 度）：再大一点就像卡在抽搐，而且封面上的文字会糊。
+ * 每张卡用不同的时长和负延迟错开相位——否则整屏同频摆动，看着像整块板在晃。
+ */
+@keyframes sy-jiggle {
+  0%   { transform: rotate(-1.1deg) translateY(-0.4px); }
+  50%  { transform: rotate(1.1deg) translateY(0.4px); }
+  100% { transform: rotate(-1.1deg) translateY(-0.4px); }
+}
+
+.home-page[data-edit='true'] .home-card[data-skey] {
+  animation: sy-jiggle 320ms ease-in-out infinite;
+  cursor: grab;
+  transform-origin: 50% 50%;
+}
+.home-page[data-edit='true'] .home-card[data-skey]:nth-child(2n) {
+  animation-duration: 362ms;
+  animation-delay: -92ms;
+}
+.home-page[data-edit='true'] .home-card[data-skey]:nth-child(3n) {
+  animation-duration: 298ms;
+  animation-delay: -184ms;
+}
+/* 固定卡（我喜欢的音乐）不参与拖拽，但也可以跟着摇——它同样「摆在这一排里」 */
+.home-page[data-edit='true'] .home-card[data-fixed] { cursor: default; }
+
+/*
+ * 长按到点：卡片「端起来」。
+ *
+ * 这是长按成功了的**唯一**可见反馈。以前只加了一个 `.is-armed` 类，样式表里
+ * 根本没有它——手指按了半秒，屏幕上一点变化都没有，用户只能猜「到底按到了没有」，
+ * 于是反复长按、反复失败（2026-11-11：「长按拖动不好触发」）。
+ *
+ * 现在的语汇和系统「图标进入可编辑态」一致：放大一点点 + 一圈强调色描边 +
+ * 更重的投影，意思是「已经拿在手里了，现在拖就是排序，松手才是删」。
+ */
+.home-card.is-armed,
+.home-card[data-armed='1'] {
+  animation: none !important;
+  z-index: 38;
+  transform: scale(1.045);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.45), 0 0 0 2px var(--sy-accent-a55);
+  transition: transform 140ms var(--sy-ease-soft), box-shadow 140ms var(--sy-ease-soft);
+}
+
+/* 拖动中：停摇、抬起来、盖住邻居 */
+.home-card.is-dragging {
+  animation: none !important;
+  cursor: grabbing;
+  z-index: 40;
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.5);
+  border-radius: var(--sy-radius-card);
+  /* 不写 will-change：拖动本身走 translate3d 已经独立成层，撤销那一刻反而会
+     把这张卡拉回主图层重栅格化，正好卡在松手收尾那一下。 */
+}
+.home-card.is-dragging .home-cover {
+  transform: none;
+  box-shadow: var(--sy-shadow-cover);
+}
+/* 整理态不弹播放键：手指按住是为了拖，不是为了播 */
+.home-page[data-edit='true'] .home-card .home-play { display: none; }
+.home-page[data-edit='true'] .home-card:hover .home-cover {
+  transform: none;
+  box-shadow: none;
+}
+
+/*
+ * 删除钮。
+ *
+ * 以前是 22px 的不透明深色圆 + 一个字符「×」，还悬在卡片外沿（top/right -8）。
+ * 三个问题叠一起就显得糙：字符× 字重和界面不配、实心深底在浅色卡片上像块补丁、
+ * 挂在卡片外面在网格里会被相邻卡片压住半个。
+ *
+ * 现在收到封面内部（8px），玻璃底 + 细线图标：和封面内容之间永远隔着一层模糊，
+ * 在深/浅两种封面、深/浅两套主题上都不用单独调色。
+ */
+.card-x {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(10, 12, 18, 0.4);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: rgba(255, 255, 255, 0.9);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 6;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.2);
+  touch-action: manipulation;
+  animation: none;
+  transition: background var(--sy-dur-fast), color var(--sy-dur-fast), transform var(--sy-dur-fast);
+}
+.card-x:hover { background: var(--sy-error); color: #fff; }
+.card-x:active { transform: scale(0.92); }
+html[data-dark='false'] .card-x {
+  background: rgba(255, 255, 255, 0.76);
+  color: var(--sy-text-2);
+  box-shadow: 0 1px 5px rgba(17, 20, 28, 0.12);
+}
+html[data-dark='false'] .card-x:hover { background: var(--sy-error); color: #fff; }
+
+/*
+ * 整理态的拖动手柄。
+ *
+ * 为什么要有手柄：整理态里「按住卡片就拖」和「按住滚动页面」是同一根手指，
+ * 浏览器永远先判滚动，长按那条路一旦被 pointercancel 就断在半路 ——
+ * 用户看到的就是「拖不动 / 拖一半弹回去」。手柄上写死 `touch-action: none`，
+ * 从它按下去浏览器就不接管，拖一定跟手。
+ *
+ * 两种形态各放一个 DOM（`in-cover` / `in-row`）：网格里它就是**整张封面**
+ * （命中区 = 整个封面，视觉上只留一枚裸 ≡），列表里它要贴到行尾去，
+ * 而两者的绝对定位参照物不同，靠 CSS 只显示其一。
+ *
+ * 都不再画「方块底」：整理态本来就在摇摆、还有 × 和封面内容，再叠一层
+ * 半透明方框只会让画面更吵。可抓这件事交给 `cursor`、渐隐遮罩和那一下
+ * 按下去的缩放下沉去说。
+ */
+.card-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  /* 这一条是整套手势的地基：手柄上永远不滚页面 */
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  z-index: 5;
+}
+.card-grip:active { cursor: grabbing; }
+.card-grip svg { transition: transform var(--sy-dur-fast) var(--sy-ease-soft); }
+.card-grip:active svg { transform: scale(0.86); }
+
+/*
+ * 网格：整张封面是一层灰雾，正中间一枚拖动钮。
+ *
+ * 整理态下卡片在摇，一屏铺满封面图会把「哪些能拎起来」这件事盖掉；压一层
+ * 灰色高斯模糊之后，所有卡片统一退成「待整理的面板」，正中间那枚钮上面
+ * 唯一亮着的东西——一眼就知道抓这里。
+ *
+ * 模糊用 `backdrop-filter` 而不是给封面加滤镜：糊的是**卡片自己的内容**，
+ * 灰只是叠在上面的一层薄膜，所以封面是深是浅、有没有图，出来的观感一致。
+ */
+.card-grip.in-cover {
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  background: rgba(118, 122, 132, 0.34);
+  backdrop-filter: blur(13px) saturate(0.85);
+  -webkit-backdrop-filter: blur(13px) saturate(0.85);
+  color: rgba(255, 255, 255, 0.96);
+}
+/* 钮底：雾上再压一枚更深的圆，点阵才立得住（纯点阵在灰雾里会糊成噪点） */
+.card-grip.in-cover::before {
+  content: '';
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(12, 14, 20, 0.32);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: transform var(--sy-dur-fast), background var(--sy-dur-fast);
+}
+.card-grip.in-cover svg { position: relative; z-index: 1; }
+.card-grip.in-cover:active::before {
+  transform: scale(0.92);
+  background: rgba(12, 14, 20, 0.4);
+}
+/* 雾盖住之后「自建/导入」会透成一团糊字，整理态直接收掉 */
+.home-page[data-edit='true'] .home-cover .home-badge { opacity: 0; }
+
+/* 列表：行尾，和 × 并排（× 26 宽在 right:12，手柄跟它隔 8） */
+.card-grip.in-row {
+  display: none;
+  position: absolute;
+  right: 42px;
+  top: 50%;
+  width: 36px;
+  height: 36px;
+  margin-top: -18px;
+  border-radius: 10px;
+  color: var(--sy-text-2);
+  text-shadow: none;
+  transition: color var(--sy-dur-fast), background var(--sy-dur-fast);
+}
+.card-grip.in-row:active {
+  color: var(--sy-accent);
+  background: var(--sy-accent-a15);
+}
+.home-grid.is-list .card-grip.in-cover { display: none; }
+.home-grid.is-list .card-grip.in-row { display: flex; }
+/* 列表行尾多出两颗钮，文字得提前收住，不然长名字钻到钮底下 */
+.home-grid.is-list[data-edit='true'] .home-card-name,
+.home-grid.is-list[data-edit='true'] .home-card-meta {
+  padding-right: 92px;
+}
+
+/* 底部那行「已移除 N 个」找回入口 */
+.home-hidden-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 0 0 12px;
+  padding: 6px 12px;
+  border: 1px dashed var(--sy-surface-border);
+  border-radius: var(--sy-radius-small);
+  background: none;
+  color: var(--sy-text-3);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.home-hidden-bar span { color: var(--sy-accent-soft); }
+.home-hidden-bar:hover { border-color: var(--sy-accent-a26); color: var(--sy-text-2); }
+
+/* 「已移除的歌单」弹窗 */
+.hidden-pl {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+.hidden-pl-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  min-height: 44px;
+}
+.hidden-pl-cover {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--sy-surface);
+  color: var(--sy-text-3);
+}
+.hidden-pl-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.hidden-pl-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.hidden-pl-meta b {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--sy-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hidden-pl-meta span { font-size: 10.5px; color: var(--sy-text-3); }
+.hidden-pl-row .ghost-btn { flex: none; white-space: nowrap; }
+
+/*
+ * 整理态里卡片不许触发页面滚动。
+ *
+ * 不写这条，手指按住卡片往上一推，浏览器会去滚 `.home-scroll`：
+ * pointermove 变成滚动，卡片拖不动，页面倒是滑走了。
+ * 代价是整理态下不能从卡片上起手滚屏——从卡片之间的空隙或标题那行滚就行，
+ * 而且整理态本来就该「定住」，滚来滚去反而容易误拖。
+ */
+.home-page[data-edit='true'] .home-card[data-skey] { touch-action: none; }
+
+.hidden-pl-empty {
+  margin: 6px 2px 2px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--sy-text-3);
+}
+
+/* ==================================================================== */
+/* 「我的」歌单：列表视图                                                */
+/* -------------------------------------------------------------------- */
+/* 卡片看封面、列表看名字。登录两三个平台之后歌单能到二三十个，网格要滚     */
+/* 三四屏还得靠封面认人；列表把「名字 + 首数 + 时长」压成一行，一屏扫八个。   */
+/*                                                                      */
+/* 结构上仍然是一列 grid：`SortableGrid` 按「容器宽 ÷ 格宽」反推列数，     */
+/* 列宽等于容器宽时列数就是 1，让位模型自动退化成上下换行——长按拖动的代码   */
+/* 一行都不用改。卡片内部改成三列 grid（封面 | 文字 | 播放），DOM 也不动。  */
+/* ==================================================================== */
+
+.home-grid.is-list {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.home-grid.is-list .home-card {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  column-gap: 12px;
+  row-gap: 2px;
+  align-items: center;
+  /* 行高固定：让位几何按「第一行的高度」算步长，行高不齐落点就会偏 */
+  height: 72px;
+  padding: 8px 10px 8px 8px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  transition: background var(--sy-dur-fast), border-color var(--sy-dur-fast);
+}
+html[data-dark='false'] .home-grid.is-list .home-card {
+  background: rgba(17, 20, 28, 0.035);
+  border-color: rgba(17, 20, 28, 0.08);
+}
+.home-grid.is-list .home-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.09);
+}
+html[data-dark='false'] .home-grid.is-list .home-card:hover {
+  background: rgba(17, 20, 28, 0.055);
+  border-color: rgba(17, 20, 28, 0.12);
+}
+
+.home-grid.is-list .home-cover {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 56px;
+  height: 56px;
+  aspect-ratio: auto;
+  border-radius: 12px;
+}
+/* 卡片自己抬起来了，里面的封面就别再跟着动一下 */
+.home-grid.is-list .home-card:hover .home-cover { transform: none; box-shadow: none; }
+
+.home-grid.is-list .home-card-name {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: end;
+  font-size: 14px;
+  line-height: 1.35;
+}
+.home-grid.is-list .home-card-meta {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: start;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* 56 的封面里塞不下 30+ 的播放圆钮：封面里的那颗收掉，整行右侧单独给一颗 */
+.home-grid.is-list .home-cover .home-play { display: none; }
+/* 小封面上再压一枚「自建 / 导入」角标就只剩角标了；名字那行已经说清是什么 */
+.home-grid.is-list .home-badge { display: none; }
+.home-row-play { display: none; }
+.home-grid.is-list .home-row-play {
+  display: flex;
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  /* 实心强调色 + 白三角：和网格模式那颗播放键同一套语汇。
+     用 15% 透明底 + accent 描字在深色上是个暗暗的蓝点，一眼看不出是能按的 */
+  background: var(--sy-accent);
+  color: #fff;
+  box-shadow: 0 4px 12px var(--sy-accent-a32);
+  cursor: pointer;
+  transition: filter var(--sy-dur-fast), transform var(--sy-dur-fast);
+}
+.home-grid.is-list .home-row-play:hover { filter: brightness(1.12); transform: scale(1.05); }
+/* 整理态：这一下按下去要么是拖、要么是删，不该顺手播起来 */
+.home-page[data-edit='true'] .home-grid.is-list .home-row-play { display: none; }
+.home-page[data-edit='true'] .home-grid.is-list .card-x {
+  top: 50%;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  margin-top: -13px;
+}
+
+/* 触屏三形态：底板令牌换成设计交付包那一套（深色近黑 / 浅色白玻璃都在这套里） */
+html[data-shell='phone'] .home-grid.is-list .home-card,
+html[data-shell='tablet'] .home-grid.is-list .home-card,
+html[data-shell='car'] .home-grid.is-list .home-card {
+  background: var(--hd-surface-2);
+  border-color: var(--hd-line-subtle);
+  border-radius: 16px;
+}
+html[data-shell='phone'] .home-grid.is-list .home-card:hover,
+html[data-shell='tablet'] .home-grid.is-list .home-card:hover {
+  background: var(--hd-surface-2);
+  border-color: var(--hd-line-subtle);
+}
+html[data-shell='phone'] .home-grid.is-list .home-cover,
+html[data-shell='tablet'] .home-grid.is-list .home-cover,
+html[data-shell='car'] .home-grid.is-list .home-cover {
+  border-radius: 12px;
+}
+html[data-shell='phone'] .home-grid.is-list .home-card-name,
+html[data-shell='tablet'] .home-grid.is-list .home-card-name,
+html[data-shell='car'] .home-grid.is-list .home-card-name {
+  font-size: 14.5px;
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .home-grid.is-list .home-card-meta,
+html[data-shell='tablet'] .home-grid.is-list .home-card-meta,
+html[data-shell='car'] .home-grid.is-list .home-card-meta {
+  font-size: 11.5px;
+  color: var(--hd-text-3);
+}
+/* 手机上没有 hover，播放键必须一直亮着——不然那个圆是一块空心的补丁 */
+html[data-shell='phone'] .home-grid.is-list .home-row-play,
+html[data-shell='tablet'] .home-grid.is-list .home-row-play,
+html[data-shell='car'] .home-grid.is-list .home-row-play {
+  background: var(--hd-accent);
+  color: #fff;
+}
+
+/* 整理态「完成 / 整理」旁边那颗视图切换钮：圆钮比 ghost-btn 省一半宽度 */
+.home-view-btn {
+  align-self: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--sy-text-2);
+}
+html[data-shell='phone'] .home-view-btn,
+html[data-shell='tablet'] .home-view-btn { width: 30px; height: 30px; color: var(--hd-text-2); }

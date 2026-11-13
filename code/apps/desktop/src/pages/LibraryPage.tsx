@@ -11,15 +11,18 @@ import { usePlayer } from '../lib/PlayerProvider'
 import { bridge, type ScanProgressPayload } from '../lib/bridge'
 import { KEYS, settings } from '../lib/settings'
 import { toast } from '../lib/toast'
+import { queueToast } from '../lib/queueToast'
 import { consumeLongPress, longPressProps } from '../lib/longPress'
-import { isCoarsePointer } from '../lib/shellMode'
+import { isCoarsePointer, useShell } from '../lib/shellMode'
 import { confirm } from '../lib/confirm'
 import { Cover } from '../components/Cover'
 import { VList } from '../components/VList'
 import { ContextMenu, type MenuItem } from '../components/ContextMenu'
+import { ActionSheet } from '../components/ActionSheet'
+import { useFavs, favRecOf } from '../lib/favTracks'
 import { AddToPlaylistDialog } from '../components/AddToPlaylistDialog'
 import {
-  IconCheck, IconClose, IconFolder, IconLyric, IconMusicNote, IconNext, IconPlay, IconPlus,
+  IconCheck, IconClose, IconFolder, IconHeart, IconHeartFilled, IconLyric, IconMusicNote, IconNext, IconPlay, IconPlus,
   IconRefresh, IconSearch, IconTrash,
 } from '../components/icons'
 
@@ -32,14 +35,23 @@ interface Props {
   /** 作为「我的」的子页打开时，左上角给一个返回 */
   onBack?: () => void
   backLabel?: string
+  /** 进来时停在哪一类：从「我喜欢的音乐」点进来直接是收藏 */
+  initialChip?: 'all' | 'fav'
 }
 
 export function LibraryPage({
   onOpenDetail, embedded = false, scrollParent, onBack, backLabel = '返回我的',
+  initialChip = 'all',
 }: Props) {
   const p = usePlayer()
+  const shell = useShell()
+  /** 车机（设计稿 11）：标题写「媒体库」，页头收干净 */
+  const car = shell === 'car'
   const [query, setQuery] = useState('')
   const [menu, setMenu] = useState<{ x: number; y: number; track: LocalTrack } | null>(null)
+  /** 触屏长按弹出的底部面板（设计稿 06） */
+  const [sheet, setSheet] = useState<LocalTrack | null>(null)
+  const favs = useFavs()
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   /** 「加入歌单」弹窗要处理的曲目 id（单首或批量） */
   const [addTo, setAddTo] = useState<string[] | null>(null)
@@ -51,14 +63,17 @@ export function LibraryPage({
 
   const progress: ScanProgressPayload | null = p.scanProgress
 
+  /* 分类：设计稿 11 的 chip 行。手机/车机才显示（桌面靠表头排序与搜索）。 */
+  const [chip, setChip] = useState<'all' | 'fav'>(initialChip)
   const filtered = useMemo(() => {
+    const base = chip === 'fav' ? p.library.filter(t => favs.ids.has(t.id)) : p.library
     const q = query.trim().toLowerCase()
-    if (!q) return p.library
-    return p.library.filter(t =>
+    if (!q) return base
+    return base.filter(t =>
       t.title.toLowerCase().includes(q) ||
       t.artist.toLowerCase().includes(q) ||
       t.album.toLowerCase().includes(q))
-  }, [p.library, query])
+  }, [p.library, query, chip, favs.ids])
 
   const selectedTracks = useMemo(
     () => filtered.filter(t => selected.has(t.id)),
@@ -211,21 +226,24 @@ export function LibraryPage({
 
   const buildMenu = useCallback((track: LocalTrack, index: number): MenuItem[] => {
     /*
-     * 「在文件夹中显示」是桌面专属动作：安卓没有资源管理器，点了只会什么都不发生。
-     * 手机菜单里干脆不出现——菜单项点了没反应比没有这一项更让人困惑。
+     * 「在文件夹中显示」在安卓上没有等价能力，`bridge.revealInFolder` 会退化成
+     * 「把路径写进剪贴板」。以前手机菜单干脆不出现这一项，结果用户到处找不到
+     * 「这首歌在哪」——现在照常显示，文案跟着平台说清楚是「复制路径」。
      */
     const reveal: MenuItem = {
-      id: 'reveal', label: '在文件夹中显示', icon: <IconFolder width={14} height={14} />,
+      id: 'reveal',
+      label: bridge.isAndroid ? '复制路径' : '在文件夹中显示',
+      icon: <IconFolder width={14} height={14} />,
       onSelect: () => void bridge.revealInFolder(track.path),
     }
     return [
       { id: 'play', label: '播放', icon: <IconPlay width={14} height={14} />, onSelect: () => p.playList(filtered, index) },
-      { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => p.addToQueue(track, 'next') },
-      { id: 'queue', label: '加入播放列表', icon: <IconPlus width={14} height={14} />, onSelect: () => p.addToQueue(track, 'end') },
+      { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => { queueToast([track], p.queueState.queue, 'next'); p.addToQueue(track, 'next') } },
+      { id: 'queue', label: '加入播放列表', icon: <IconPlus width={14} height={14} />, onSelect: () => { queueToast([track], p.queueState.queue, 'end'); p.addToQueue(track, 'end') } },
       { id: 'addpl', label: '加入歌单…', icon: <IconMusicNote width={14} height={14} />, onSelect: () => setAddTo([track.id]) },
       { id: 'd1', label: '', divider: true, onSelect: () => {} },
       { id: 'detail', label: '歌曲详情', icon: <IconLyric width={14} height={14} />, onSelect: () => onOpenDetail(track) },
-      ...(isCoarsePointer ? [] : [reveal]),
+      reveal,
       {
         id: 'copy', label: '复制歌曲信息', icon: <IconLyric width={14} height={14} />,
         onSelect: () => { void navigator.clipboard?.writeText(`${track.title} - ${track.artist}`) },
@@ -240,36 +258,75 @@ export function LibraryPage({
 
   return (
     <div className={'page library-page' + (embedded ? ' embedded' : '')}>
-      {onBack && (
+      {/* 车机没有「上一级」——媒体库就是导轨上的顶级目的地，返回按钮只在桌面/手机出现 */}
+      {onBack && !car && (
         <button className="ghost-btn lib-back" onClick={onBack}>← {backLabel}</button>
       )}
       <header className={'lib-head' + (embedded ? ' compact' : '')}>
         <div className="lib-head-left">
-          {embedded ? <p className="lib-status">{statusText}</p> : <h1>本地音乐</h1>}
+          {embedded ? <p className="lib-status">{statusText}</p> : <h1>{car ? '媒体库' : '本地音乐'}</h1>}
           {!embedded && <p className="lib-status">{statusText}</p>}
         </div>
         <div className="lib-actions">
-          <button className="primary-btn" onClick={() => void p.scan('fast')} disabled={p.scanning}>
-            <IconRefresh width={14} height={14} /> 扫描全部音乐
-          </button>
-          <button className="ghost-btn" onClick={() => void p.scan('full')} disabled={p.scanning}
-            title="扫描所有磁盘（自动跳过系统目录）">
-            全盘扫描
-          </button>
-          <button className="ghost-btn" onClick={() => void addFolder()} disabled={p.scanning}>
-            <IconFolder width={14} height={14} /> 添加文件夹
-          </button>
-          <div className="search-box">
-            <IconSearch width={14} height={14} />
-            <input
-              className="text-input" placeholder="搜索本地曲库（按 / 聚焦）"
-              value={query}
-              onChange={e => { queryTouched.current = true; setQuery(e.target.value) }}
-              aria-label="搜索本地曲库"
-            />
-          </div>
+          {/*
+           * 车机（设计稿 11）：页头只有「标题 + 统计 + 分类胶囊」，桌面那排
+           * 「扫描全部音乐 / 全盘扫描 / 添加文件夹 / 搜索框」在这里太吵。
+           * 但扫描不能没有——车机导轨上没有「我的」入口，这里是唯一的落点，
+           * 所以留两颗小的：重新扫描、添加文件夹（指定外接盘用）。
+           * 「全盘扫描」在车里没有意义（会去翻系统分区），去掉。
+           */}
+          {car ? (
+            <>
+              <button className="ghost-btn" onClick={() => void p.scan('fast')} disabled={p.scanning}>
+                <IconRefresh width={16} height={16} /> 重新扫描
+              </button>
+              {/* 安卓没有系统文件夹选择器（`pick_music_folder` 恒回 null），
+                  这颗按钮点下去只会什么都不发生 —— 干脆不出现 */}
+              {!bridge.isAndroid && (
+                <button className="ghost-btn" onClick={() => void addFolder()} disabled={p.scanning}>
+                  <IconFolder width={16} height={16} /> 添加文件夹
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <button className="primary-btn" onClick={() => void p.scan('fast')} disabled={p.scanning}>
+                <IconRefresh width={14} height={14} /> 扫描全部音乐
+              </button>
+              <button className="ghost-btn" onClick={() => void p.scan('full')} disabled={p.scanning}
+                title="扫描所有磁盘（自动跳过系统目录）">
+                全盘扫描
+              </button>
+              {!bridge.isAndroid && (
+                <button className="ghost-btn" onClick={() => void addFolder()} disabled={p.scanning}>
+                  <IconFolder width={14} height={14} /> 添加文件夹
+                </button>
+              )}
+              <div className="search-box">
+                <IconSearch width={14} height={14} />
+                <input
+                  className="text-input" placeholder={shell === 'desk' ? '搜索本地曲库（按 / 聚焦）' : '搜索本地曲库'}
+                  value={query}
+                  onChange={e => { queryTouched.current = true; setQuery(e.target.value) }}
+                  aria-label="搜索本地曲库"
+                />
+              </div>
+            </>
+          )}
         </div>
       </header>
+
+      {/* 分类 chip（设计稿 11）：触屏上先把「全部 / 收藏」分开，桌面不需要 */}
+      {isCoarsePointer && (
+        <div className="lib-chips" role="tablist" aria-label="曲库分类">
+          <button role="tab" aria-selected={chip === 'all'}
+            className={'lib-chip' + (chip === 'all' ? ' on' : '')} onClick={() => setChip('all')}>全部</button>
+          <button role="tab" aria-selected={chip === 'fav'}
+            className={'lib-chip' + (chip === 'fav' ? ' on' : '')} onClick={() => setChip('fav')}>
+            收藏{favs.count > 0 ? <span className="num"> · {favs.count}</span> : null}
+          </button>
+        </div>
+      )}
 
       {p.scanning && (
         <div className="scan-banner" role="status">
@@ -286,16 +343,16 @@ export function LibraryPage({
             <button className="bb-btn primary" onClick={() => p.playList(selectedTracks, 0)}>
               <IconPlay width={12} height={12} /> 播放
             </button>
-            <button className="bb-btn" onClick={() => p.addManyToQueue(selectedTracks, 'next')}>
+            <button className="bb-btn" onClick={() => { queueToast(selectedTracks, p.queueState.queue, 'next'); p.addManyToQueue(selectedTracks, 'next') }}>
               <IconNext width={12} height={12} /> 下一首播放
             </button>
-            <button className="bb-btn" onClick={() => p.addManyToQueue(selectedTracks, 'end')}>
+            <button className="bb-btn" onClick={() => { queueToast(selectedTracks, p.queueState.queue, 'end'); p.addManyToQueue(selectedTracks, 'end') }}>
               <IconPlus width={12} height={12} /> 加入播放列表
             </button>
             <button className="bb-btn" onClick={() => setAddTo(selectedTracks.map(t => t.id))}>
               <IconMusicNote width={12} height={12} /> 加入歌单
             </button>
-            <button className="bb-btn" onClick={copySelected}>
+            <button className="bb-btn phone-hide" onClick={copySelected}>
               <IconLyric width={12} height={12} /> 复制信息
             </button>
             <button className="bb-btn danger" onClick={() => void removeSelected()}>
@@ -354,10 +411,19 @@ export function LibraryPage({
                 index={i}
                 playing={cur?.id === t.id}
                 checked={selected.has(t.id)}
+                selecting={selected.size > 0}
                 onCheck={() => toggleOne(t.id, i)}
                 onRowClick={e => (selected.size > 0 ? toggleOne(t.id, i) : onRowClick(t, i, e))}
                 onDetail={() => onOpenDetail(t)}
-                onMenu={e => setMenu({ x: e.clientX, y: e.clientY, track: t })}
+                onMenu={e => {
+                  /*
+                   * 触摸屏没有右键：行内那颗「⋯」直接开底部动作面板（设计稿 06），
+                   * 贴指针的 ContextMenu 在手机上经常被播放条挡住。
+                   */
+                  if (isCoarsePointer) { setSheet(t); return }
+                  setMenu({ x: e.clientX, y: e.clientY, track: t })
+                }}
+                onHold={() => toggleOne(t.id, i)}
               />
             )}
             empty={<div className="empty-state">
@@ -376,6 +442,33 @@ export function LibraryPage({
         />
       )}
 
+      {/* 长按一行 → 底部面板（设计稿 06）。动作跟桌面右键菜单同一批数据，
+          只是把「主操作」摊成一排圆钮，另一批留在下面的文字行里。 */}
+      <ActionSheet
+        open={!!sheet}
+        title={sheet?.title ?? ''}
+        sub={sheet ? [sheet.artist || '未知歌手', sheet.album, fmtTime(sheet.duration)].filter(Boolean).join(' · ') : ''}
+        cover={sheet ? <Cover track={sheet} size={44} radius={10} /> : undefined}
+        actions={sheet ? [
+          { id: 'next', label: '下一首播放', icon: <IconNext width={20} height={20} />, onClick: () => { queueToast([sheet], p.queueState.queue, 'next'); p.addToQueue(sheet, 'next') } },
+          {
+            id: 'fav', label: '收藏',
+            icon: favs.has(sheet.id) ? <IconHeartFilled width={20} height={20} /> : <IconHeart width={20} height={20} />,
+            on: favs.has(sheet.id),
+            onClick: () => { void favs.toggle(favRecOf(sheet)) },
+          },
+          { id: 'addpl', label: '添加到歌单', icon: <IconMusicNote width={20} height={20} />, onClick: () => setAddTo([sheet.id]) },
+          { id: 'queue', label: '加入队列', icon: <IconPlus width={20} height={20} />, onClick: () => { queueToast([sheet], p.queueState.queue, 'end'); p.addToQueue(sheet, 'end') } },
+          { id: 'detail', label: '歌曲详情', icon: <IconLyric width={20} height={20} />, onClick: () => onOpenDetail(sheet) },
+        ] : []}
+        rows={sheet ? [
+          { id: 'play', label: '立即播放', chevron: true, onClick: () => p.playList(filtered, Math.max(0, filtered.findIndex(t => t.id === sheet.id))) },
+          { id: 'copy', label: '复制歌曲信息', chevron: true, onClick: () => { void navigator.clipboard?.writeText(`${sheet.title} - ${sheet.artist}`) } },
+          { id: 'rm', label: '从曲库移除', danger: true, onClick: () => void p.removeTrack(sheet.id) },
+        ] : []}
+        onClose={() => setSheet(null)}
+      />
+
       <AddToPlaylistDialog
         open={!!addTo}
         trackIds={addTo ?? []}
@@ -386,27 +479,29 @@ export function LibraryPage({
   )
 }
 
-function TrackRow({ track, index, playing, checked, onCheck, onRowClick, onDetail, onMenu }: {
+function TrackRow({ track, index, playing, checked, selecting, onCheck, onHold, onRowClick, onDetail, onMenu }: {
   track: LocalTrack
   index: number
   playing: boolean
   checked: boolean
+  /** 当前是否处于多选态：只有这时才把行首复选框放出来（见 handoff.css 手机段） */
+  selecting: boolean
   onCheck(): void
+  /** 长按：触摸屏上进多选（手机上复选框默认不显示，长按是唯一入口） */
+  onHold?(): void
   onRowClick(e: React.MouseEvent): void
   onDetail(): void
   onMenu(e: React.MouseEvent): void
 }) {
   return (
     <div
-      className={'track-row' + (playing ? ' playing' : '') + (checked ? ' selected' : '') + (index % 2 === 1 ? ' zebra' : '')}
-      {...longPressProps(onCheck)}
+      className={'track-row' + (playing ? ' playing' : '') + (checked ? ' selected' : '') + (selecting ? ' selecting' : '') + (index % 2 === 1 ? ' zebra' : '')}
+      {...longPressProps(() => (onHold ? onHold() : onCheck()))}
       onClick={e => { if (consumeLongPress()) return; onRowClick(e) }}
       /* 手机上快速点两下「播放」会被当成双击直接跳详情——手指场景不需要双击 */
       onDoubleClick={isCoarsePointer ? undefined : onDetail}
       onContextMenu={e => { e.preventDefault(); onMenu(e) }}
-      title={isCoarsePointer
-        ? '单击播放 · 长按多选 · 右侧「更多」打开菜单'
-        : '单击播放 · 双击查看详情 · 长按多选 · 右键更多操作'}
+      title={isCoarsePointer ? '单击播放 · 长按多选' : '单击播放 · 双击查看详情 · 长按多选 · 右键更多操作'}
     >
       <span className="col-check">
         <button
