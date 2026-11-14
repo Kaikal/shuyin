@@ -933,8 +933,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const curFavOn = currentId ? favs.has(currentId) : false
 
   /* ---------------- 下一首预告（安卓：息屏时自动接歌靠它） ---------------- */
-  /** 往前预告几首：够撑过一段不碰手机的时间，又不至于把平台打到限流 */
-  const PREFETCH_N = 3
+  /**
+   * 往前预告几首。
+   *
+   * 这个数就是「熄屏后还能自己播多久」：预告表是原生**唯一**的续播依据，
+   * 用完就只剩 `ended` 一帧推给 JS（那时 WebView 往往已经被系统摁住，
+   * 没人接就停在两首之间）。原来给 3 首 ≈ 12 分钟，用户听一张歌单听到
+   * 第 4 首就发现「停了、锁屏上还挂着上一首」，反馈过两次。
+   *
+   * 6 首 ≈ 25 分钟，仍然是个可控的出网量（只取直链、不下载整首；
+   * 整首落盘是另一个 `warmCache`，有它自己的节流）。
+   */
+  const PREFETCH_N = 6
   /** 每次重算都换号：旧轮次在下一个 await 边界自己退出（同 resolvePlayUrl 的 cancel） */
   const prefetchSeq = useRef(0)
   const prefetchTimer = useRef(0)
@@ -1528,7 +1538,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
        * 有源的时候暂停也会有时长，所以这条判断不会误伤正常暂停。
        */
       if (t && (loadedRef.current !== trackKey(t) || snapshot.duration <= 0)) {
-        const start = resumePos.current
+        /*
+         * 从哪儿接着放：`resumePos` 优先（冷启动恢复算好的），否则用**界面上
+         * 正显示的那个位置**。
+         *
+         * 不能只认 `resumePos`：它会话恢复完就清零了，而 `snapshot.duration <= 0`
+         * 这个分支恰恰是「原生那边的播放器没了」（服务被回收 / 上一轮加载失败）——
+         * 此时用户界面上还停在 2:30，点播放却从 0 开始，听起来就是
+         * 「这首歌停了，又从头放了一遍」。
+         */
+        const start = resumePos.current || (snapRef.current.position > 0 ? snapRef.current.position : 0)
         resumePos.current = 0
         loadedRef.current = trackKey(t)
         lastPlayedIndex.current = queueState.index

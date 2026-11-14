@@ -1371,6 +1371,27 @@ class PlaybackService : Service() {
         if (p == null || !prepared) {
             /* 焦点回调里没有播放器可动——绝不能退化成 `playpause`，那是反着切 */
             if (fromFocus) return
+            /*
+             * 服务里没有可用的播放器，但**预告里还有下一首**：直接用它开播。
+             *
+             * 用户在这个场景里看到的是「点了锁屏那颗播放键，响了，但歌名/歌词/封面
+             * 全是上一首的，而且只放一首就又停」——因为老写法只把 `playpause` 递给
+             * WebView：前端要是已经被系统回收/冻住，这一下就石沉大海；偶尔接上了，
+             * 它也只能 resume 一个并不存在的播放器。
+             *
+             * 预告项里带着标题/歌手/专辑/封面/时长，[playPrefetched] 会把它们
+             * 一起写进 `NowPlaying`、媒体会话和通知——所以走这条路的「信息」是对的，
+             * 而且播完还能接着消费预告里的下一项，不会只放一首就断。
+             *
+             * 只在 `want = true` 时走：暂停一个不存在的播放器没有意义。
+             */
+            if (want) {
+                val next = synchronized(prefetch) { if (prefetch.isEmpty()) null else prefetch.pollFirst() }
+                if (next != null) {
+                    playPrefetched(next)
+                    return
+                }
+            }
             action("playpause")
             return
         }
@@ -1392,7 +1413,8 @@ class PlaybackService : Service() {
     private fun toggleInService() {
         val p = mp
         if (p == null || !prepared) {
-            action("playpause")
+            /* 没有播放器可切，语义上就是「想开始放」：交给 setPlayingInService 走预告兜底 */
+            setPlayingInService(true)
             return
         }
         setPlayingInService(try { !p.isPlaying } catch (_: Exception) { true })

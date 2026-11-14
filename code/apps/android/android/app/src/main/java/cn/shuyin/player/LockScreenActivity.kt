@@ -50,7 +50,6 @@ class LockScreenActivity : Activity() {
         /** 「去开小米锁屏显示」那条提示通知的 id（也是单独一条，别和上面撞） */
         private const val GUIDE_NOTI_ID = 0x5A18
         private const val CH_LOCK = "lock_screen"
-
         /**
          * 这一页是「被系统锁屏压在下面」的那一次（MIUI 拒了「显示在锁屏上」）。
          *
@@ -130,37 +129,25 @@ class LockScreenActivity : Activity() {
         fun onScreenOff(ctx: Context) {
             val a = inst
             if (a == null) {
-                quietCreate(ctx)
                 /*
-                 * 后台建不出来（用户是在别的应用里锁的屏）→ 退回全屏意图。
+                 * 页面不在：只**悄悄**建一个，一条通知都不发。
                  *
-                 * **必须在这一刻发**，不能等亮屏再发。SystemUI 的
-                 * `NotificationInterruptStateProviderImpl.shouldLaunchFullScreenIntentWhenAdded()`
-                 * 只在「这条通知不会弹横幅」或「状态 == KEYGUARD」时才启动那个 Activity；
-                 * 而屏幕已经亮着的时候它会走 heads-up 分支——通知被降级成一条横幅，
-                 * 页面永远起不来（这正是以前的死结，真机日志里一条
-                 * "full screen intent" 都找不到，只有我们自己 startActivity 被
-                 * `Abort background activity starts` 拦下的记录）。
+                 * 这里原来会在 700ms 后发一条全屏意图通知把页面拉起来，正是用户报的
+                 * 「刚要熄屏那个通知又跳出来，导致根本熄不了屏」。
                  *
-                 * 发送方是 system_server，压根不走「后台不许启动 Activity」那道闸门。
-                 * 页面本身不带 turnScreenOn（见 bring 的注释），所以屏幕该黑还是黑。
+                 * 在这台机器（HarmonyOS 4.2 / API 31）上把三条路都试过了：
+                 *   · IMPORTANCE_HIGH + setFullScreenIntent(pi, true) → 页面起来了，
+                 *     但屏幕被点亮（熄屏 1s 还是 Dozing，3s 就回 Awake 并一直亮着）；
+                 *   · IMPORTANCE_LOW / DEFAULT + setFullScreenIntent(pi, false) →
+                 *     屏幕确实不亮，但系统**压根不执行**全屏意图，页面也不起来。
+                 * 也就是说「拉起锁屏页」和「息屏不点屏」在华为上只能保一个。
+                 * 用户是按电源键想关屏，不是想看我们——保熄屏。
                  *
-                 * 但要**等一下**：`ACTION_SCREEN_OFF` 到达时 PowerManager 的
-                 * wakefulness 还常常是 Awake（系统正在跑息屏动画），SystemUI 此刻
-                 * 判出来的是「屏幕亮着」，照样只弹横幅。实测 700ms 之后
-                 * `isInteractive` 才翻成 false，那才是系统愿意执行全屏意图的时机。
+                 * 代价如实记在这里：从**别的应用**锁屏时这一页不会自己冒出来；
+                 * 应用内锁屏时 [quietCreate] 多半能成（那时我们还算可见），
+                 * 亮屏后 [onScreenOn] 也还会再试一轮 startActivity。
                  */
-                main.postDelayed({
-                    /*
-                     * 用 Display 状态判「屏幕真的黑了」，**不要**用 PowerManager.isInteractive()：
-                     * 这台机器（HarmonyOS 4.2 / API 31）上 `input keyevent 223` 之后
-                     * wakefulness 报的还是 Awake，isInteractive 也一直是 true，
-                     * 判断会一直为假 —— 全屏意图那条通知压根发不出去（真机里
-                     * 连 enqueue 日志都没有，看上去像「系统不支持」，其实是自己没发）。
-                     * 用户动作快、屏幕又亮了这种情况仍然跳过，留给亮屏那条路。
-                     */
-                    if (screenOff(ctx)) postPullUp(ctx)
-                }, 700)
+                quietCreate(ctx)
                 return
             }
             a.setAwake(false)
@@ -265,9 +252,14 @@ class LockScreenActivity : Activity() {
              * 只有「用户刚按亮屏幕」那条路径才补全屏意图：
              * 屏幕亮着的时候它只是「借系统的手把 Activity 拉起来」，
              * 不会再点亮任何东西；息屏 / 预览路径一条都不发。
+             *
+             * 而且**先让 startActivity 飞一会儿**：这一页在后台时十有八九能起来
+             * （亮屏那一刻应用刚回到可见状态），起得来就完全不用发通知——
+             * 少一条 IMPORTANCE_HIGH 的通知，用户就少看见一次莫名其妙的大横幅。
+             * 起不来（被「后台不许启动 Activity」拦下）才退回全屏意图。
              */
             if (!light) return
-            postPullUp(ctx)
+            main.postDelayed({ if (!alive) postPullUp(ctx) }, 350)
             /*
              * 亮屏后再补几发 startActivity。
              *
@@ -302,7 +294,10 @@ class LockScreenActivity : Activity() {
             }
         }
 
-        /** 屏幕真的黑着吗（Display 状态，比 isInteractive 可靠，见 onScreenOff 的注释） */
+        /* 屏幕真的黑着吗（Display 状态，比 isInteractive 可靠）。
+           暂时没有调用点：熄屏那条路已经不再发任何通知，见 onScreenOff 的注释；
+           留着是因为判断「屏幕状态」和下一个人要改这块时都还会用到。 */
+        @Suppress("unused")
         private fun screenOff(ctx: Context): Boolean = try {
             val dm = ctx.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
             val st = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state
@@ -613,6 +608,11 @@ class LockScreenActivity : Activity() {
                         NotificationChannel(
                             CH_LOCK,
                             "锁屏播放页",
+                            /*
+                             * 只能是 HIGH：实测 LOW / DEFAULT 的全屏意图在华为上
+                             * 系统压根不执行。这条通知只在**屏幕已经亮着**时才发
+                             * （见 onScreenOff 的注释），所以它不会点亮任何东西。
+                             */
                             NotificationManager.IMPORTANCE_HIGH,
                         ).apply {
                             /* 静音：这是「把页面拉起来」的信使，不该响一声吓人 */
@@ -648,6 +648,8 @@ class LockScreenActivity : Activity() {
                     .setContentTitle(NowPlaying.title.ifBlank { "疏音" })
                     .setContentText(NowPlaying.artist)
                     .setContentIntent(pi)
+                    /* true = 当高优先级处理。只有这一档在华为上才真的会启动页面；
+                       此时屏幕本来就是亮的，不存在「点亮」的问题。 */
                     .setFullScreenIntent(pi, true)
                     .setCategory(Notification.CATEGORY_TRANSPORT)
                     /*
