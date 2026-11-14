@@ -1,22 +1,22 @@
 {
   "base": "https://github.com/Kaikal/shuyin/releases/download",
-  "headline": "v0.6.109 · 应用内更新",
+  "headline": "v0.6.111 · 熄屏与锁屏播放修复",
   "items": [
     {
       "id": "android",
-      "version": "0.6.109",
-      "tag": "v0.6.109",
-      "file": "shuyin-android-0.6.109.apk",
-      "size": 4179508,
-      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-android-0.6.109.apk"
+      "version": "0.6.111",
+      "tag": "v0.6.111",
+      "file": "shuyin-android-0.6.111.apk",
+      "size": 4179744,
+      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-android-0.6.111.apk"
     },
     {
       "id": "car",
-      "version": "0.6.109",
-      "tag": "v0.6.109",
-      "file": "shuyin-car-0.6.109.apk",
-      "size": 4179588,
-      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-car-0.6.109.apk"
+      "version": "0.6.111",
+      "tag": "v0.6.111",
+      "file": "shuyin-car-0.6.111.apk",
+      "size": 4179724,
+      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-car-0.6.111.apk"
     },
     {
       "id": "windows",
