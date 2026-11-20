@@ -2,6 +2,11 @@
 # 产物为「未签名 IPA」：用户用爱思助手 / Sideloadly / 轻松签 + 自己的 Apple ID
 # 自签后安装（免费证书 7 天有效）。后续接入正式分发（TestFlight / App Store）
 # 需要开发者账号 + 签名证书，届时在 secrets 里配置即可复用本流程。
+#
+# 流程说明：tauri ios build 会驱动 xcodebuild（项目里的 Run Script 阶段需要
+# CLI 在场，直接裸调 xcodebuild 会报 cli-options-server.json 缺失）。
+# 签名豁免从 `-- ` 之后的参数透传给 xcodebuild；导出 IPA 那一步没有证书
+# 注定失败（|| true 兜底），.app 从 xcarchive 里捞出来手工打成未签名 IPA。
 name: iOS build
 
 on:
@@ -44,7 +49,7 @@ jobs:
           workspaces: 'code/apps/desktop/src-tauri'
 
       - name: Generate iOS project (tauri ios init)
-        run: pnpm -F shuyin-desktop tauri ios init
+        run: pnpm -F shuyin-desktop tauri ios init --ci
 
       - name: Patch Info.plist (后台播放音频)
         run: |
@@ -53,22 +58,21 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PLIST" 2>/dev/null || true
 
-      - name: Build unsigned .app for device
+      - name: Build for device (unsigned; export step allowed to fail)
         run: |
-          PROJ=$(find apps/desktop/src-tauri/gen/apple -name "*.xcodeproj" | head -1)
-          echo "project: $PROJ"
-          xcodebuild -project "$PROJ" -list
-          SCHEME=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f&&NF{print $1; exit}')
-          echo "scheme: $SCHEME"
-          xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration Release \
-            -sdk iphoneos -derivedDataPath build/ios \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
+          pnpm -F shuyin-desktop tauri ios build --ci --target aarch64 --export-method debugging \
+            -- CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES || true
 
       - name: Package unsigned IPA
         run: |
-          APP=$(find apps/desktop/src-tauri/build/ios/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -path "*Applications*" | head -1)
+          if [ -z "$APP" ]; then
+            APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
+          fi
           echo "app: $APP"
+          if [ -z "$APP" ]; then echo "没有产出 .app（Rust 编译失败？看上面的日志）"; exit 1; fi
+          rm -rf Payload shuyin-ios-unsigned.ipa
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry shuyin-ios-unsigned.ipa Payload
