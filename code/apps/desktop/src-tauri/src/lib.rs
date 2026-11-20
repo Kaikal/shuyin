@@ -11,7 +11,18 @@ pub mod net;
 pub mod platform_login;
 pub mod player;
 pub mod smtc;
+#[cfg(windows)]
 pub mod wallpaper;
+#[cfg(not(windows))]
+pub(crate) mod wallpaper {
+    /// 非 Windows 占位：壁纸嵌入依赖 Win32 WorkerW（详见 wallpaper.rs），
+    /// 其他平台没有对应实现，调用点也都在 `#[cfg(windows)]` 内。
+    #[allow(dead_code)]
+    pub struct Attach {
+        pub ok: bool,
+        pub detail: String,
+    }
+}
 
 use crate::db::{Db, LocalTrack, LyricsRaw, ScanResult};
 use crate::player::{Player, PlayerSnapshot};
@@ -1376,6 +1387,7 @@ fn save_lyrics_pos(app: &AppHandle, x: i32, y: i32) {
 ///
 /// 标准修法是拦 WM_GETMINMAXINFO，把最大化尺寸改成当前显示器的工作区。
 /// 这样 IsZoomed、Win+↑、Aero Snap、双击标题栏全都走系统逻辑，前端不需要伪造状态。
+#[cfg(windows)]
 fn install_max_fix(win: &WebviewWindow) {
     use core::ffi::c_void;
     let Ok(h) = win.hwnd() else { return };
@@ -1531,6 +1543,10 @@ fn install_max_fix(win: &WebviewWindow) {
     }
 }
 
+/// 非 Windows：无边框窗口最大化由系统按工作区处理，无需修正。
+#[cfg(not(windows))]
+fn install_max_fix(_win: &WebviewWindow) {}
+
 /* ---------------- 主窗口位置 / 大小记忆 ---------------- */
 
 fn main_geo_file(app: &AppHandle) -> PathBuf {
@@ -1677,6 +1693,10 @@ fn decorate_frameless(win: &WebviewWindow) {
         DwmExtendFrameIntoClientArea(hwnd, &m);
     }
 }
+
+/// 非 Windows：无 DWM 装饰概念，占位即可。
+#[cfg(not(windows))]
+fn decorate_frameless(_win: &WebviewWindow) {}
 
 /// 桌面歌词窗口：透明、无边框、置顶、不进任务栏
 fn build_lyrics_window(app: &AppHandle) -> Result<WebviewWindow, String> {
