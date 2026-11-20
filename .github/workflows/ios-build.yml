@@ -58,6 +58,28 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PLIST" 2>/dev/null || true
 
+      - name: Disable code signing in project
+        run: |
+          PBX=$(find apps/desktop/src-tauri/gen/apple -name "project.pbxproj" | head -1)
+          echo "pbxproj: $PBX"
+          python3 - "$PBX" <<'EOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+          # 每个 buildConfiguration 里都换成 Manual + 免签设置：
+          # tauri CLI 透传的 xcodebuild 参数到不了 archive 这步，只能改工程本体
+          s = s.replace(
+              "CODE_SIGN_STYLE = Automatic;",
+              "CODE_SIGN_STYLE = Manual;\n"
+              "\t\t\t\tCODE_SIGN_IDENTITY = \"\";\n"
+              "\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n"
+              "\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n"
+              "\t\t\t\tDEVELOPMENT_TEAM = \"\";",
+          )
+          open(p, "w", encoding="utf-8").write(s)
+          print("patched:", s.count("CODE_SIGNING_ALLOWED = NO;"), "sections")
+          EOF
+
       - name: Build for device (unsigned; export step allowed to fail)
         run: |
           pnpm -F shuyin-desktop tauri ios build --ci --target aarch64 --export-method debugging \
