@@ -28,6 +28,9 @@ windows-sys = { version = "0.60", features = [
 # 只用到 Media + Foundation，版本与 tauri 自己带的 windows 保持一致（0.62），
 # 否则 HWND 这类类型在两边不是同一个，编译期就对不上。
 windows = { version = "0.62", features = ["Foundation", "Media", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_RemoteDesktop"] }
+# 修复：TOML 里 target 小节会一直吞到下一个段头，下面这些依赖此前全被
+# 吞进 cfg(windows)，导致非 Windows 构建（macOS CI）缺插件与基础依赖。
+[dependencies]
 # 无边框窗口取 HWND 用（Win11 圆角 / DWM 阴影）
 raw-window-handle = "0.6"
 tauri-plugin-store = "2"
