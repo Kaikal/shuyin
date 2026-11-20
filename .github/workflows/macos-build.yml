@@ -1,0 +1,49 @@
+# macOS 安装包（.dmg）云打包：在 GitHub 的 macOS 机器上出包，本机无需 Mac。
+# 触发：手动（Actions 页面 Run workflow）或修改本文件推送时。
+# 产物：未签名 dmg（用户首次打开需「右键 → 打开」绕过 Gatekeeper），挂在本次 run 的 Artifacts 里。
+name: macOS build
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/macos-build.yml']
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: code
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.8.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: code/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'code/apps/desktop/src-tauri'
+
+      - name: Build dmg (universal)
+        run: pnpm -F shuyin-desktop tauri build --bundles dmg --target universal-apple-darwin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shuyin-macos-dmg
+          path: code/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
