@@ -399,12 +399,17 @@ mod mac {
         ) -> i32;
     }
 
-    static MAP: OnceLock<Mutex<HashMap<u32, Ref>>> = OnceLock::new();
+    /// 裸指针跨线程要显式承诺：这些 EventHotKeyRef 只在主线程被系统使用，
+    /// Rust 侧只拿它做注销，指向的内容不由我们解引用
+    struct SendRef(Ref);
+    unsafe impl Send for SendRef {}
+
+    static MAP: OnceLock<Mutex<HashMap<u32, (SendRef, String)>>> = OnceLock::new();
     static INSTALLED: OnceLock<()> = OnceLock::new();
     static APP: OnceLock<AppHandle> = OnceLock::new();
     static NEXT_ID: Mutex<u32> = Mutex::new(1);
 
-    fn map_cell() -> &'static Mutex<HashMap<u32, Ref>> {
+    fn map_cell() -> &'static Mutex<HashMap<u32, (SendRef, String)>> {
         MAP.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
@@ -555,8 +560,8 @@ mod mac {
                     .map(|it| HotkeyResult { id: it.id, ok: false, error: Some("内部状态异常".into()) })
                     .collect();
             };
-            for r in map.values() {
-                let _ = UnregisterEventHotKey(*r);
+            for (r, _) in map.values() {
+                let _ = UnregisterEventHotKey(r.0);
             }
             map.clear();
             let mut out = Vec::with_capacity(items.len());
@@ -579,15 +584,14 @@ mod mac {
                     });
                     continue;
                 };
-                let mut next = NEXT_ID.lock().map(|mut g| { let v = *g; *g = v + 1; v }).unwrap_or(0);
+                let next = NEXT_ID.lock().map(|mut g| { let v = *g; *g = v + 1; v }).unwrap_or(0);
                 let id = HotKeyId { signature: 0x7379686B, id: next }; // 'syhk'
                 let mut hk: Ref = std::ptr::null_mut();
                 let st = RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &mut hk);
                 let ok = st == 0 && !hk.is_null();
                 if ok {
-                    map.insert(next, hk);
+                    map.insert(next, (SendRef(hk), it.id.clone()));
                 }
-                let _ = &mut next;
                 out.push(HotkeyResult {
                     id: it.id,
                     ok,
@@ -602,8 +606,9 @@ mod mac {
         let _ = APP.set(app.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         let moved = app.clone();
+        let into = items.clone();
         let r = moved.run_on_main_thread(move || {
-            let _ = tx.send(register_all(items));
+            let _ = tx.send(register_all(into));
         });
         if r.is_err() {
             return items
@@ -621,8 +626,8 @@ mod mac {
         let r = moved.run_on_main_thread(move || {
             if let Some(m) = MAP.get() {
                 if let Ok(mut g) = m.lock() {
-                    for r in g.values() {
-                        unsafe { let _ = UnregisterEventHotKey(*r); }
+                    for (r, _) in g.values() {
+                        unsafe { let _ = UnregisterEventHotKey(r.0); }
                     }
                     g.clear();
                 }

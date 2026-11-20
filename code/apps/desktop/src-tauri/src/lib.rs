@@ -2659,13 +2659,20 @@ pub fn run() {
                         install_max_fix(&w);
                         /*
                          * 系统媒体会话：耳机线控（含蓝牙 AVRCP）与键盘媒体键的**唯一**可靠入口。
-                         * Windows = SMTC；macOS = Now Playing + 远控命令。
+                         * Windows = SMTC（绑窗口 HWND）；macOS = Now Playing（进程级，不需要 HWND）。
                          * 失败不能影响启动——顶多是耳机按键不响应，窗口照常用。
                          */
-                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                        #[cfg(target_os = "windows")]
                         {
                             let hwnd = w.hwnd().ok().map(|h| h.0 as isize).unwrap_or(0);
                             match crate::smtc::init(app.handle(), hwnd) {
+                                Ok(()) => append_log(app.handle(), "smtc ok"),
+                                Err(e) => append_log(app.handle(), &format!("smtc fail {e}")),
+                            }
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            match crate::smtc::init(app.handle(), 0) {
                                 Ok(()) => append_log(app.handle(), "smtc ok"),
                                 Err(e) => append_log(app.handle(), &format!("smtc fail {e}")),
                             }

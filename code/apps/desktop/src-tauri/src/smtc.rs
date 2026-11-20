@@ -283,15 +283,7 @@ mod mac {
     use std::ffi::CString;
     use std::sync::OnceLock;
 
-    /// 持住远控命令回调 token：addTarget 的 token 一丢回调就静默失效
-    struct Ctl {
-        _tokens: Vec<Retained<AnyObject>>,
-    }
-    static CTL: OnceLock<Mutex<Option<Ctl>>> = OnceLock::new();
-
-    fn cell() -> &'static Mutex<Option<Ctl>> {
-        CTL.get_or_init(|| Mutex::new(None))
-    }
+    static INSTALLED: OnceLock<()> = OnceLock::new();
 
     /// NSString：直接 stringWithUTF8String，免开 objc2-foundation 的强类型
     unsafe fn ns(s: &str) -> Retained<AnyObject> {
@@ -304,13 +296,13 @@ mod mac {
     /// 一次性把三个远控命令（播放暂停 / 下一首 / 上一首）挂到共享命令中心。
     /// 每个块内捕获自己的 AppHandle，emit 出去的东西与 Windows 完全同形。
     pub fn init(app: &AppHandle) -> Result<(), String> {
-        if cell().lock().map(|g| g.is_some()).unwrap_or(false) {
+        if INSTALLED.get().is_some() {
             return Ok(());
         }
         unsafe {
             let center: Retained<AnyObject> =
                 objc2::msg_send![class!(MPRemoteCommandCenter), sharedCommandCenter];
-            let mut tokens = Vec::new();
+            let mut ok = 0;
             let actions = [("playpause", "togglePlayPauseCommand"), ("next", "nextTrackCommand"), ("prev", "previousTrackCommand")];
             for (action, sel) in actions {
                 let cmd: Retained<AnyObject> = match sel {
@@ -320,24 +312,28 @@ mod mac {
                 };
                 let app2 = app.clone();
                 let action2 = action.to_string();
-                // MPRemoteCommandHandlerStatus = i64；0 = Success
-                let block = block2::Block::new(move |_evt: std::ptr::NonNull<AnyObject>| -> i64 {
-                    let _ = app2.emit(
-                        "hotkey://action",
-                        serde_json::json!({ "id": action2, "source": "smtc" }),
-                    );
-                    0
-                });
+                // StackBlock：栈上构造，addTargetWithHandler 内部会拷贝持有，
+                // 不需要 Rust 侧再持引用（block2 0.6 已移除 Block::new）
+                let block = block2::StackBlock::new(
+                    move |_evt: std::ptr::NonNull<AnyObject>| -> i64 {
+                        let _ = app2.emit(
+                            "hotkey://action",
+                            serde_json::json!({ "id": action2, "source": "smtc" }),
+                        );
+                        0
+                    },
+                );
                 let token: Retained<AnyObject> =
-                    objc2::msg_send![&cmd, addTargetWithHandler: &*block];
-                tokens.push(token);
+                    objc2::msg_send![&cmd, addTargetWithHandler: &block];
+                if !token.is_null() {
+                    ok += 1;
+                }
+                let _ = token;
             }
-            if tokens.is_empty() {
+            if ok == 0 {
                 return Err("远控命令全部注册失败".into());
             }
-            if let Ok(mut g) = cell().lock() {
-                *g = Some(Ctl { _tokens: tokens });
-            }
+            let _ = INSTALLED.set(());
         }
         Ok(())
     }
@@ -376,14 +372,8 @@ mod mac {
     }
 }
 
+/// macOS：Now Playing 卡片本身线程安全，不需要绕 run_on_main_thread
 #[cfg(target_os = "macos")]
-pub fn init(app: &AppHandle, _hwnd: isize) -> Result<(), String> {
-    mac::init(app)
-}
-
-#[cfg(target_os = "macos")]
-pub fn update(app: &AppHandle, title: String, artist: String, album: String, playing: bool) {
-    // MPNowPlayingInfoCenter 本身线程安全，不需要绕 run_on_main_thread
+pub fn update(_app: &AppHandle, title: String, artist: String, album: String, playing: bool) {
     mac::apply(&title, &artist, &album, playing);
-    let _ = app;
 }
