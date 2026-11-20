@@ -325,10 +325,8 @@ mod mac {
                 );
                 let token: Retained<AnyObject> =
                     objc2::msg_send![&cmd, addTargetWithHandler: &block];
-                if !token.is_null() {
-                    ok += 1;
-                }
-                let _ = token;
+                let _ = token; // 命令中心已持有自己的拷贝，token 用完即弃
+                ok += 1;
             }
             if ok == 0 {
                 return Err("远控命令全部注册失败".into());

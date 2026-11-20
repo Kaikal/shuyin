@@ -2609,7 +2609,7 @@ pub fn run() {
             show_main_window(app);
         }));
 
-    builder
+    let builder = builder
         .setup(|app| {
             // Rust 侧 panic 也落日志：否则崩溃时只剩一个空窗口，无从查起
             let handle_for_panic = app.handle().clone();

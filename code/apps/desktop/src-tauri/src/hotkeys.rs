@@ -372,7 +372,7 @@ mod mac {
     unsafe extern "C" {
         fn InstallEventHandler(
             target: Ref,
-            handler: extern "C" fn(Ref, Ref, *mut std::ffi::c_void) -> i32,
+            handler: unsafe extern "C" fn(Ref, Ref, *mut std::ffi::c_void) -> i32,
             count: isize,
             types: *const EventTypeSpec,
             user_data: *mut std::ffi::c_void,
@@ -428,7 +428,7 @@ mod mac {
         if st == 0 {
             if let Some(m) = MAP.get() {
                 if let Ok(g) = m.lock() {
-                    if let Some(action) = g.get(&hk.id) {
+                    if let Some((_, action)) = g.get(&hk.id) {
                         if let Some(app) = APP.get() {
                             let _ = app.emit(
                                 "hotkey://action",
