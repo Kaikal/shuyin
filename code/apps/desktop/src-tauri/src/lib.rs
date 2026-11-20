@@ -8,6 +8,7 @@
 pub mod db;
 pub mod hotkeys;
 pub mod net;
+#[cfg(desktop)]
 pub mod platform_login;
 pub mod player;
 pub mod smtc;
@@ -30,10 +31,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+#[cfg(desktop)]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 
 /// 是否「真的要退出」（托盘菜单退出前置位，否则关窗口只是收进托盘）
@@ -268,20 +268,36 @@ fn remove_track(db: State<'_, Db>, track_id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn pick_music_folder(app: AppHandle) -> Result<Option<String>, String> {
-    let dir = app.dialog().file().blocking_pick_folder();
-    Ok(dir.map(|d| d.to_string()))
+    #[cfg(desktop)]
+    {
+        let dir = app.dialog().file().blocking_pick_folder();
+        Ok(dir.map(|d| d.to_string()))
+    }
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Err("移动端暂不支持自选扫描目录".to_string())
+    }
 }
 
 /// 选取歌单文件（其他音乐 APP 导出的 json / txt / csv / m3u / lxmc）
 #[tauri::command]
 async fn pick_playlist_file(app: AppHandle) -> Result<Option<String>, String> {
-    let file = app
-        .dialog()
-        .file()
-        .add_filter("歌单文件", &["json", "txt", "csv", "m3u", "m3u8", "pls", "lxmc"])
-        .add_filter("全部文件", &["*"])
-        .blocking_pick_file();
-    Ok(file.map(|p| p.to_string()))
+    #[cfg(desktop)]
+    {
+        let file = app
+            .dialog()
+            .file()
+            .add_filter("歌单文件", &["json", "txt", "csv", "m3u", "m3u8", "pls", "lxmc"])
+            .add_filter("全部文件", &["*"])
+            .blocking_pick_file();
+        Ok(file.map(|p| p.to_string()))
+    }
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Err("移动端暂不支持导入本地歌单文件".to_string())
+    }
 }
 
 /// 读二进制文件（lxmc 这类 gzip 容器走这里；大小上限与文本版一致）
@@ -2122,7 +2138,13 @@ fn desk_lock_exit(app: AppHandle) -> Result<(), String> {
 /// 详见 `platform_login.rs`。
 #[tauri::command]
 async fn platform_login(app: AppHandle, source: String) -> Result<(), String> {
-    platform_login::open(&app, &source)
+    #[cfg(desktop)]
+    return platform_login::open(&app, &source);
+    #[cfg(mobile)]
+    {
+        let _ = (app, source);
+        Err("移动端暂不支持平台账号网页登录".to_string())
+    }
 }
 
 /// 打开音乐桌面。`layer` = `bottom`（嵌壁纸）/ `top`（浮在最上面）。
@@ -2216,6 +2238,7 @@ fn hide_main(app: AppHandle) {
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.state::<QuitFlag>().0.store(true, Ordering::SeqCst);
+    #[cfg(desktop)]
     save_main_geo(&app, true);
     app.exit(0);
 }

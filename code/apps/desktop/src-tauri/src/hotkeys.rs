@@ -35,7 +35,6 @@ pub struct HotkeyResult {
     pub error: Option<String>,
 }
 
-#[cfg(target_os = "windows")]
 enum Cmd {
     Apply(Vec<HotkeyItem>, Sender<Vec<HotkeyResult>>),
     Clear(Sender<Vec<HotkeyResult>>),
