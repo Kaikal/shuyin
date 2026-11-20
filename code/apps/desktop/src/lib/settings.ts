@@ -44,19 +44,72 @@ const local = {
 function ensureStore(): Promise<void> {
   if (!storeReady) {
     storeReady = (async () => {
-      if (!isTauri) return
-      try {
-        const { load } = await import('@tauri-apps/plugin-store')
-        store = await load('settings.json', { autoSave: true })
-      } catch (e) {
-        console.error('[疏音] 设置存储加载失败，已降级为本地缓存', e)
-        store = null
-        // 让用户看到具体原因（白屏报告时这项信息最关键）
-        void import('./diag').then(m => m.diag('settings.load.failed', { error: String(e) })).catch(() => {})
+      if (isTauri) {
+        try {
+          const { load } = await import('@tauri-apps/plugin-store')
+          store = await load('settings.json', { autoSave: true })
+        } catch (e) {
+          console.error('[疏音] 设置存储加载失败，已降级为本地缓存', e)
+          store = null
+          // 让用户看到具体原因（白屏报告时这项信息最关键）
+          void import('./diag').then(m => m.diag('settings.load.failed', { error: String(e) })).catch(() => {})
+        }
       }
+      // 默认值必须套在「存储就绪之后、任何读取之前」——所有 settings.get
+      // 都先 await ensureStore()，所以这里的时序天然正确。
+      // 非 tauri（安卓换壳 / 浏览器预览走 localStorage）也要套：安卓发行包同样要纯净默认。
+      await applyFirstRunDefaults()
     })()
   }
   return storeReady
+}
+
+/* ---------------- 发行版首启默认值 ---------------- */
+
+/**
+ * 发行默认设置（2026-11-20 拍板）：我们只是个播放器，给陌生用户的初始状态要克制——
+ * 歌词动效关、频谱可视化关、主题用内置第一个「疏影」、音源为空（安卓发行包
+ * 也不再内置音源清单，见 build-web.sh 与 Sources.kt 的纯净版路径）。
+ *
+ * **只对全新安装生效一次**：判定看「本机从未启动过」（`app.launched` 缺失）。
+ * 老用户哪怕从没动过这些开关也保持现状——动没动过无从考证，不能替他们翻开关。
+ *
+ * 桌面歌词 / 音乐桌面 / 音乐锁屏本来就是「存了 true 才开」（App.tsx 启动时
+ * 只读存档恢复窗口），默认即是关，不用在这里处理。
+ *
+ * 放在 ensureStore 里做（所有 settings.get 都排在它后面），保证任何读取方
+ * ——ThemeProvider、uiPrefs 的 createPref——拿到的一定是套用完默认值的状态。
+ */
+const FIRST_RUN_KEY = 'app.distributionDefaults.v1'
+const FIRST_RUN_DEFAULTS: ReadonlyArray<readonly [string, unknown]> = [
+  ['ui.foliaFx', false],      // 歌词动效（逐字弹出 + 错落排版）
+  ['spectrum.on', false],     // 边缘频谱可视化
+  ['theme.mode', 'dark'],     // 「疏影」是深色底：不锁深色，浅色模式下会被回落成「清浅」
+  ['theme.active', 'shuyin'], // 内置第一个主题「疏影」
+]
+
+async function applyFirstRunDefaults(): Promise<void> {
+  const read = async <T,>(k: string): Promise<T | null> => {
+    if (store) return (await store.get<T>(k)) ?? null
+    const raw = local.get('sy.' + k)
+    return raw ? (JSON.parse(raw) as T) : null
+  }
+  const write = async (k: string, v: unknown): Promise<void> => {
+    if (store) { await store.set(k, v); return }
+    local.set('sy.' + k, JSON.stringify(v))
+  }
+  try {
+    if (await read<boolean>(FIRST_RUN_KEY)) return
+    if (await read<boolean>(KEYS.launched)) {
+      // 老用户：补个标记完事，现状不动
+      await write(FIRST_RUN_KEY, true)
+      return
+    }
+    for (const [k, v] of FIRST_RUN_DEFAULTS) await write(k, v)
+    await write(FIRST_RUN_KEY, true)
+  } catch (e) {
+    console.warn('[疏音] 首启默认值套用失败（不拦启动）', e)
+  }
 }
 
 export const settings = {
@@ -142,6 +195,15 @@ export const KEYS = {
   audioFx: 'audio.fx',                 // 音效预设 id
   audioFxBands: 'audio.fxBands',       // 音效自定义三段增益 + 前置增益
   audioFxName: 'audio.fxName',         // 自定义音效的名字（用户自己取）
+  /**
+   * 音量保护（安卓）：起播淡入 / 暂停淡出 / 被系统压低后缓慢回升。
+   *
+   * 原生自己也存一份（`player` prefs）——冷启动自动续播那一刻 WebView 还没起来，
+   * 只靠这边下发会让第一首按默认值走一遍。
+   */
+  audioGuard: 'audio.guard',
+  /** 定时关闭（安卓）：上次选的分钟数，只用于下次打开面板时高亮，不表示正在倒计时 */
+  sleepMinutes: 'player.sleepMinutes',
   scanVersion: 'scan.version',        // 扫描规则版本（升级时强制重扫一次，清掉旧噪音）
   lyricsOn: 'lyrics.visible',         // 桌面歌词窗口是否打开
   lyricsFont: 'lyrics.fontSize',      // 桌面歌词字号（滚轮 / A± / 设置页调，记住）
@@ -210,4 +272,10 @@ export const KEYS = {
   updateLastAt: 'update.lastAt',
   /** 用户点过「以后再说」的那个版本，同一个版本不再弹 */
   updateSkip: 'update.skip',
+  /** 装机号（随机 UUID，非硬件标识；匿名使用统计用） */
+  statMachine: 'stat.machine',
+  /** 上次心跳时间戳（毫秒），24h 一次 */
+  statLastPing: 'stat.lastPing',
+  /** 播放历史（最近播放的曲目记录，最新在最前，上限 200 条） */
+  playHistory: 'history.tracks',
 } as const

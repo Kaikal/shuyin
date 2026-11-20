@@ -13,12 +13,9 @@ OUT="../android/android/app/src/main/assets/www"
 ./node_modules/.bin/tsc -p . --noEmit
 ./node_modules/.bin/vite build --base ./ --outDir "$OUT" --emptyOutDir
 
-# 音源清单：从桌面端的数据目录带一份进 APK，
-# 这样装到手机上就是「已经导入过音源」的状态，不用再找一遍脚本。
-SRC="${APPDATA:-$HOME/AppData/Roaming}/cn.shuyin.player/sources/sources.json"
-if [ -f "$SRC" ]; then
-  cp "$SRC" ../android/android/app/src/main/assets/sources.json
-  echo "已带入音源清单：$(basename "$SRC")"
-fi
+# 音源清单不进 APK（2026-11-20 拍板：我们只是个播放器，发行包不能自带音源）。
+# 用户音源一律自己导入；assets 里没有 sources.json 时 Sources.kt 的 seed()
+# 会自动写一份空清单（纯净版路径，本来就是设计好的）。
+# 旧版曾把开发者本机 %APPDATA% 的清单带进包里——那是测试期的做法，已移除。
 
 echo "web 产物 → $OUT"
