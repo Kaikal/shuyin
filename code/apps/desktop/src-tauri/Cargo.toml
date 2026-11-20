@@ -77,11 +77,11 @@ tauri = { version = "2", features = ["tray-icon"] }
 
 # macOS 系统媒体会话（Now Playing / 耳机线控 / 控制中心）。
 # 故意不用生成的强类型 API：NSDictionary 的泛型值类型在 objc2 各版本间
-# 反复变过，裸 msg_send 更抗版本漂移（见 smtc.rs 的 mac 分支）
+# 反复变过，裸 msg_send 更抗版本漂移（见 smtc.rs 的 mac 分支）——
+# 所以连 objc2-foundation 都不需要，NSString/NSNumber 全走 class! + msg_send
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSNumber"] }
 
 [profile.release]
 # 保留 unwind：单个解码/元数据异常不应杀掉整个进程（声音线程内部另有 catch_unwind）
