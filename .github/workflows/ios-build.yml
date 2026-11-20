@@ -1,0 +1,81 @@
+# iOS 云编译（未签名 IPA）：GitHub 的 macOS 机器上出包，无需苹果开发者账号。
+# 产物为「未签名 IPA」：用户用爱思助手 / Sideloadly / 轻松签 + 自己的 Apple ID
+# 自签后安装（免费证书 7 天有效）。后续接入正式分发（TestFlight / App Store）
+# 需要开发者账号 + 签名证书，届时在 secrets 里配置即可复用本流程。
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios-build.yml'
+      - 'code/apps/desktop/src-tauri/**'
+      - 'code/apps/desktop/src/**'
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: code
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.8.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: code/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'code/apps/desktop/src-tauri'
+
+      - name: Generate iOS project (tauri ios init)
+        run: pnpm -F shuyin-desktop tauri ios init
+
+      - name: Patch Info.plist (后台播放音频)
+        run: |
+          PLIST=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" | head -1)
+          echo "plist: $PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PLIST" 2>/dev/null || true
+
+      - name: Build unsigned .app for device
+        run: |
+          PROJ=$(find apps/desktop/src-tauri/gen/apple -name "*.xcodeproj" | head -1)
+          echo "project: $PROJ"
+          xcodebuild -project "$PROJ" -list
+          SCHEME=$(xcodebuild -project "$PROJ" -list | awk '/Schemes:/{f=1;next} f&&NF{print $1; exit}')
+          echo "scheme: $SCHEME"
+          xcodebuild -project "$PROJ" -scheme "$SCHEME" -configuration Release \
+            -sdk iphoneos -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build
+
+      - name: Package unsigned IPA
+        run: |
+          APP=$(find apps/desktop/src-tauri/build/ios/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "app: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry shuyin-ios-unsigned.ipa Payload
+          ls -la shuyin-ios-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shuyin-ios-unsigned-ipa
+          path: code/shuyin-ios-unsigned.ipa
+          if-no-files-found: error

@@ -199,6 +199,7 @@ fn boot_ok(boot: State<'_, Boot>) {
 static MIN_W: AtomicU32 = AtomicU32::new(0);
 static MIN_H: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(desktop)]
 #[tauri::command]
 fn apply_min_size(app: AppHandle, dpr: f64) {
     let Some(win) = app.get_webview_window("main") else { return };
@@ -532,7 +533,7 @@ async fn check_update(url: Option<String>) -> Result<UpdateInfo, String> {
     })
 }
 
-/// 用系统默认浏览器打开下载页。只认 http/https——别把任意字符串丢给 `cmd start`。
+/// 用系统默认浏览器打开下载页。只认 http/https——别把任意字符串丢给系统命令。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     let u = url.trim();
@@ -546,7 +547,80 @@ fn open_url(url: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| e.to_string())?;
     }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(u)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+/// macOS 应用内更新：下载 dmg 到临时目录并直接挂载打开。
+///
+/// Windows 的更新走 NSIS 安装器（安卓走原生 update_download），macOS 的 dmg
+/// 没有「静默安装」的官方通道——但 `open xxx.dmg` 会自动挂载并弹出 Finder
+/// 窗口，用户把「疏音.app」拖进「应用程序」就完成更新，比跳浏览器再翻
+/// 下载目录顺得多。下载用 ureq（跟取链同一套 TLS），写到系统临时目录。
+#[derive(serde::Serialize)]
+struct MacInstall {
+    status: &'static str,
+    path: String,
+}
+
+#[tauri::command]
+async fn update_dmg_install(
+    app: AppHandle,
+    urls: Vec<String>,
+    name: String,
+) -> Result<MacInstall, String> {
+    let _ = &app;
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("应用内安装 dmg 只在 macOS 上可用".to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let target_dir = std::env::temp_dir();
+        let safe_name: String = name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        let path = target_dir.join(if safe_name.ends_with(".dmg") { safe_name } else { format!("{safe_name}.dmg") });
+        tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+            let mut last_err = String::new();
+            for u in urls.iter().filter(|u| u.starts_with("http")) {
+                match ureq::get(u.as_str())
+                    .timeout(std::time::Duration::from_secs(180))
+                    .call()
+                {
+                    Ok(resp) => {
+                        let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+                        use std::io::Read;
+                        let mut reader = resp.into_reader();
+                        std::io::copy(&mut reader, &mut f).map_err(|e| e.to_string())?;
+                        drop(f);
+                        let st = std::process::Command::new("open")
+                            .arg(&path)
+                            .spawn();
+                        return match st {
+                            Ok(_) => Ok(path.display().to_string()),
+                            Err(e) => Err(format!("镜像挂载失败：{e}")),
+                        };
+                    }
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        continue;
+                    }
+                }
+            }
+            Err(if last_err.is_empty() { "更新地址是空的".into() } else { format!("下载失败：{last_err}") })
+        })
+        .await
+        .map_err(|e| format!("下载线程异常：{e}"))?
+        .map(|path| MacInstall { status: "installed", path })
+    }
 }
 
 /// 把当前曲目与播放状态交给系统媒体会话。
@@ -1305,6 +1379,7 @@ fn cover_abs_path(app: AppHandle, cover: String) -> Result<String, String> {
 /* 窗口 / 托盘 / 桌面歌词                                              */
 /* ------------------------------------------------------------------ */
 
+#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     // 第二次启动时主窗口可能还没建好（单例回调比 setup 早），等它一会儿再唤
     if app.get_webview_window("main").is_none() {
@@ -1326,6 +1401,7 @@ fn show_main_window(app: &AppHandle) {
 }
 
 /// 把窗口从「最小化 / 托盘 / 被别的窗口盖住」三种状态里提出来。
+#[cfg(desktop)]
 fn raise_window(w: tauri::WebviewWindow) {
     let _ = w.unminimize();
     let _ = w.show();
@@ -1347,6 +1423,7 @@ fn raise_window(w: tauri::WebviewWindow) {
 }
 
 /// 桌面歌词窗口位置文件（记住上次拖到哪）
+#[cfg(desktop)]
 fn lyrics_pos_file(app: &AppHandle) -> PathBuf {
     app.path()
         .app_local_data_dir()
@@ -1354,12 +1431,14 @@ fn lyrics_pos_file(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("lyrics.window.json"))
 }
 
+#[cfg(desktop)]
 fn read_lyrics_pos(app: &AppHandle) -> Option<(i32, i32)> {
     let raw = std::fs::read_to_string(lyrics_pos_file(app)).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     Some((v.get("x")?.as_i64()? as i32, v.get("y")?.as_i64()? as i32))
 }
 
+#[cfg(desktop)]
 fn save_lyrics_pos(app: &AppHandle, x: i32, y: i32) {
     let state = app.try_state::<LyricsState>();
     if let Some(st) = state {
@@ -1549,6 +1628,7 @@ fn install_max_fix(_win: &WebviewWindow) {}
 
 /* ---------------- 主窗口位置 / 大小记忆 ---------------- */
 
+#[cfg(desktop)]
 fn main_geo_file(app: &AppHandle) -> PathBuf {
     app.path()
         .app_local_data_dir()
@@ -1556,6 +1636,7 @@ fn main_geo_file(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("main.window.json"))
 }
 
+#[cfg(desktop)]
 fn read_main_geo(app: &AppHandle) -> Option<(i32, i32, u32, u32, bool)> {
     let raw = std::fs::read_to_string(main_geo_file(app)).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
@@ -1569,6 +1650,7 @@ fn read_main_geo(app: &AppHandle) -> Option<(i32, i32, u32, u32, bool)> {
 }
 
 /// 窗口至少要有这么一块落在某个显示器里，否则宁可用默认居中
+#[cfg(desktop)]
 fn geo_on_screen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> bool {
     let Ok(mons) = app.available_monitors() else { return true };
     if mons.is_empty() {
@@ -1583,6 +1665,7 @@ fn geo_on_screen(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) -> bool {
     })
 }
 
+#[cfg(desktop)]
 fn save_main_geo(app: &AppHandle, force: bool) {
     let Some(win) = app.get_webview_window("main") else { return };
     // 最小化时 outer_position 是 -32000 之类的哨兵值，inner_size 也塌成最小值，
@@ -1635,6 +1718,7 @@ fn save_main_geo(app: &AppHandle, force: bool) {
  * 直接 set_size 会绕过 min_inner_size —— 窗口回到了比最小值还小的状态，
  * 两列布局被挤扁。最小尺寸按当前缩放算（和 apply_min_size 同一套值）。
  */
+#[cfg(desktop)]
 fn restore_main_geo(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
     let Some((x, y, w, h, maximized)) = read_main_geo(app) else { return };
@@ -1699,6 +1783,7 @@ fn decorate_frameless(win: &WebviewWindow) {
 fn decorate_frameless(_win: &WebviewWindow) {}
 
 /// 桌面歌词窗口：透明、无边框、置顶、不进任务栏
+#[cfg(desktop)]
 fn build_lyrics_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window("lyrics") {
         return Ok(w);
@@ -1750,6 +1835,7 @@ fn build_lyrics_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     Ok(win)
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn lyrics_open(app: AppHandle) -> Result<(), String> {
     // 建 WebView2 窗口必须回到主线程：IPC 线程没有 Win32 消息泵，
@@ -1777,6 +1863,7 @@ fn lyrics_open(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn lyrics_hide(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("lyrics") {
@@ -1785,6 +1872,7 @@ fn lyrics_hide(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn lyrics_close(app: AppHandle) -> Result<(), String> {
     // 只隐藏：窗口预建过一次，销毁后再开要走 WebView2 重建设路（容易卡）
@@ -1795,6 +1883,7 @@ fn lyrics_close(app: AppHandle) -> Result<(), String> {
 }
 
 /// 桌面歌词是否开着（前端按钮态用）
+#[cfg(desktop)]
 #[tauri::command]
 fn lyrics_visible(app: AppHandle) -> bool {
     app.get_webview_window("lyrics")
@@ -1803,6 +1892,7 @@ fn lyrics_visible(app: AppHandle) -> bool {
 }
 
 /// 锁定：锁定后鼠标穿透，不挡桌面操作（微信/QQ 音乐同款行为）
+#[cfg(desktop)]
 #[tauri::command]
 fn lyrics_set_locked(app: AppHandle, locked: bool) -> Result<(), String> {
     if let Some(st) = app.try_state::<LyricsState>() {
@@ -1814,6 +1904,7 @@ fn lyrics_set_locked(app: AppHandle, locked: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn lyrics_is_locked(app: AppHandle) -> bool {
     app.try_state::<LyricsState>()
@@ -1822,6 +1913,7 @@ fn lyrics_is_locked(app: AppHandle) -> bool {
 }
 
 /// 桌面歌词里双击/回车回到主窗口
+#[cfg(desktop)]
 #[tauri::command]
 fn show_main(app: AppHandle) {
     show_main_window(&app);
@@ -1844,6 +1936,7 @@ fn show_main(app: AppHandle) {
 /// 之后连 `lyrics_visible` 这种纯读命令都超时）。桌面歌词窗口不设这两个属性，
 /// 是这套建窗流程里唯一被线上验证过的组合——所以这里严格照抄它，
 /// 层级放到 `build()` 之后用 `set_always_on_*` 显式设（两个都要设，不能只设一个）。
+#[cfg(desktop)]
 fn build_desk_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window("musicdesk") {
         return Ok(w);
@@ -1884,6 +1977,7 @@ fn build_desk_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 /// 现在各自一个窗口，锁屏开关不影响壁纸，壁纸开关也不影响锁屏。
 ///
 /// 建窗规则照抄 `build_desk_window`（主线程建 `build()` 会死锁，所以同样放在 setup 预建）。
+#[cfg(desktop)]
 fn build_lock_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window("musiclock") {
         return Ok(w);
@@ -1925,6 +2019,7 @@ fn desk_hwnd(w: &WebviewWindow) -> Option<windows::Win32::Foundation::HWND> {
 /// 应用层级：`bottom` = **嵌进桌面壁纸层**（WorkerW，图标保留、Win+D 收不走）；
 /// 嵌不进去再退回 `always_on_bottom`。`top` = 拔出来置顶。
 /// **必须在主线程**（SetParent / 窗口样式都要求）。
+#[cfg(desktop)]
 fn apply_desk_layer(app: &AppHandle, layer: &str) {
     let Some(w) = app.get_webview_window("musicdesk") else { return };
     let top = layer == "top";
@@ -1966,6 +2061,7 @@ fn apply_desk_layer(app: &AppHandle, layer: &str) {
 ///
 /// 完全不碰音乐桌面窗口：桌面该是壁纸就继续当壁纸（锁屏窗口全屏置顶会盖住它，
 /// 退出后露出来的还是原来的壁纸，状态没被改过）。
+#[cfg(desktop)]
 fn desk_lock_show(app: &AppHandle) {
     match app.get_webview_window("musiclock") {
         Some(w) => {
@@ -1992,6 +2088,7 @@ fn desk_lock_show(app: &AppHandle) {
 }
 
 /// 「音乐锁屏」退出：只收锁屏窗口，音乐桌面的显示状态原样保留。主线程调用。
+#[cfg(desktop)]
 fn desk_lock_hide(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("musiclock") {
         let _ = w.set_always_on_top(false);
@@ -2002,6 +2099,7 @@ fn desk_lock_hide(app: &AppHandle) {
 }
 
 /// 进入「音乐锁屏」（用户主动：快捷键 / 设置页按钮 / 托盘）。
+#[cfg(desktop)]
 #[tauri::command]
 fn desk_lock_enter(app: AppHandle) -> Result<(), String> {
     let a = app.clone();
@@ -2010,6 +2108,7 @@ fn desk_lock_enter(app: AppHandle) -> Result<(), String> {
 }
 
 /// 退出「音乐锁屏」：前端收到事件后按「进来前是否开着」决定收起或重新嵌回壁纸层。
+#[cfg(desktop)]
 #[tauri::command]
 fn desk_lock_exit(app: AppHandle) -> Result<(), String> {
     let a = app.clone();
@@ -2032,6 +2131,7 @@ async fn platform_login(app: AppHandle, source: String) -> Result<(), String> {
 /// v0.5.5 实测过在主线程里 `build()` 会死锁——WebView2 的环境创建回调要主线程消息泵，
 /// 而我们正堵在 `recv()` 上等它，表现是「点了没反应，整个应用一起卡死」。
 /// setup 阶段建（同歌词窗 / 托盘窗）没有这个问题，顺带让「打开」秒出。
+#[cfg(desktop)]
 #[tauri::command]
 fn musicdesk_open(app: AppHandle, layer: Option<String>) -> Result<(), String> {
     let layer = layer.unwrap_or_else(|| "bottom".into());
@@ -2076,6 +2176,7 @@ fn musicdesk_open(app: AppHandle, layer: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn musicdesk_close(app: AppHandle) -> Result<(), String> {
     // 和歌词窗口一样只隐藏不销毁：销毁后重建走 WebView2 重建设路，容易卡
@@ -2085,6 +2186,7 @@ fn musicdesk_close(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn musicdesk_visible(app: AppHandle) -> bool {
     app.get_webview_window("musicdesk")
@@ -2093,6 +2195,7 @@ fn musicdesk_visible(app: AppHandle) -> bool {
 }
 
 /// 切换层级：`bottom` 嵌壁纸 / `top` 浮在最上面
+#[cfg(desktop)]
 #[tauri::command]
 fn musicdesk_set_layer(app: AppHandle, layer: String) -> Result<(), String> {
     let a = app.clone();
@@ -2102,6 +2205,7 @@ fn musicdesk_set_layer(app: AppHandle, layer: String) -> Result<(), String> {
 }
 
 
+#[cfg(desktop)]
 #[tauri::command]
 fn hide_main(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -2174,6 +2278,7 @@ struct TrayState {
 
 /// 前端「伪最大化」：不用系统 zoom，由前端按工作区摆窗口，这里只记状态。
 /// 存档沿用上一次正常态的尺寸，还原时才能回到用户原来的大小。
+#[cfg(desktop)]
 #[tauri::command]
 fn window_max_hint(app: AppHandle, v: bool) {
     if let Some(st) = app.try_state::<WindowGeo>() {
@@ -2185,6 +2290,7 @@ fn window_max_hint(app: AppHandle, v: bool) {
 }
 
 /// 还原时的目标几何：优先用前端 drag 时记下的，没有就回存档里的正常态尺寸
+#[cfg(desktop)]
 #[tauri::command]
 fn main_geo(app: AppHandle) -> (i32, i32, u32, u32) {
     read_main_geo(&app)
@@ -2201,6 +2307,7 @@ fn now_meta_set(app: AppHandle, title: String, artist: String, cover: String, in
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn tray_state(app: AppHandle) -> TrayState {
     let snap = app.try_state::<Player>().map(|p| p.snapshot());
@@ -2231,6 +2338,7 @@ fn tray_state(app: AppHandle) -> TrayState {
 }
 
 /// 前端量完内容尺寸后回报：窗口立刻跟着贴紧内容（多一像素都会露白边）
+#[cfg(desktop)]
 #[tauri::command]
 fn tray_fit(app: AppHandle, w: f64, h: f64, dpr: f64) {
     let dpr = if dpr > 0.5 { dpr } else { 1.0 };
@@ -2250,6 +2358,7 @@ fn tray_fit(app: AppHandle, w: f64, h: f64, dpr: f64) {
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn tray_hide(app: AppHandle) {
     if let Some(w) = app.get_webview_window("tray") {
@@ -2257,6 +2366,7 @@ fn tray_hide(app: AppHandle) {
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn tray_action(app: AppHandle, id: String) {
     // 跳页/退出这类「一次性的动作」菜单直接收起；播放/歌词这类开关留在原地——
@@ -2271,6 +2381,7 @@ fn tray_action(app: AppHandle, id: String) {
 }
 
 /// 托盘菜单窗口：透明、无边框、置顶、不进任务栏
+#[cfg(desktop)]
 fn build_tray_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(w) = app.get_webview_window("tray") {
         return Ok(w);
@@ -2294,6 +2405,7 @@ fn build_tray_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 
 /// 在光标处弹出菜单。
 /// 托盘一般在屏幕右下，所以默认「贴在光标左上」往上长；碰到显示器边缘再夹回来。
+#[cfg(desktop)]
 fn show_tray_menu(app: &AppHandle, at: Option<(f64, f64)>) {
     let a = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -2348,6 +2460,7 @@ fn show_tray_menu(app: &AppHandle, at: Option<(f64, f64)>) {
     });
 }
 
+#[cfg(desktop)]
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     // 不再挂 menu：Windows 原生菜单是系统画的，样式无法统一。
     // 右击由下面的事件接住，改弹自绘窗口。
@@ -2378,6 +2491,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// 菜单动作的统一入口：原生菜单和自绘菜单都走这里
+#[cfg(desktop)]
 fn do_tray_action(app: &AppHandle, id: &str) {
     append_log(app, &format!("tray.action {id}"));
     match id {
@@ -2474,12 +2588,7 @@ fn do_tray_action(app: &AppHandle, id: &str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // 单实例：已收进托盘时再次双击 exe 只唤起原实例，而不是开出第二个播放器
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            append_log(app, "single.instance 第二次启动，唤起主窗口");
-            show_main_window(app);
-        }))
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -2490,7 +2599,17 @@ pub fn run() {
         .manage(WindowGeo::default())
         .manage(TrayGeom::default())
         .manage(TrayShownAt::default())
-        .manage(NowMetaState::default())
+        .manage(NowMetaState::default());
+
+    /* 单实例是桌面概念：iOS 上重复启动由系统管理，插件也没有移动端实现 */
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            append_log(app, "single.instance 第二次启动，唤起主窗口");
+            show_main_window(app);
+        }));
+
+    builder
         .setup(|app| {
             // Rust 侧 panic 也落日志：否则崩溃时只剩一个空窗口，无从查起
             let handle_for_panic = app.handle().clone();
@@ -2500,6 +2619,11 @@ pub fn run() {
                 append_log(&handle_for_panic, &msg);
             }));
             append_log(app.handle(), "app.start");
+
+            /* ---- 桌面专属：主窗口 / 无边框修饰 / 媒体会话 / 白屏看门狗 ----
+             * 移动端（iOS）的 webview 由生成的 Swift 壳提供，不在这里建窗。 */
+            #[cfg(desktop)]
+            {
             append_log(app.handle(), &format!("browser.args {}", browser_args()));
 
             // 主窗口在代码里建：WebView2 启动参数要按机器情况动态决定，
@@ -2535,15 +2659,16 @@ pub fn run() {
                         install_max_fix(&w);
                         /*
                          * 系统媒体会话：耳机线控（含蓝牙 AVRCP）与键盘媒体键的**唯一**可靠入口。
+                         * Windows = SMTC；macOS = Now Playing + 远控命令。
                          * 失败不能影响启动——顶多是耳机按键不响应，窗口照常用。
                          */
-                        #[cfg(target_os = "windows")]
-                        match w.hwnd() {
-                            Ok(h) => match crate::smtc::init(app.handle(), h.0 as isize) {
+                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                        {
+                            let hwnd = w.hwnd().ok().map(|h| h.0 as isize).unwrap_or(0);
+                            match crate::smtc::init(app.handle(), hwnd) {
                                 Ok(()) => append_log(app.handle(), "smtc ok"),
                                 Err(e) => append_log(app.handle(), &format!("smtc fail {e}")),
-                            },
-                            Err(e) => append_log(app.handle(), &format!("smtc hwnd fail {e}")),
+                            }
                         }
                     }
                     restore_main_geo(app.handle());
@@ -2575,6 +2700,7 @@ pub fn run() {
                     watchdog.restart();
                 }
             });
+            } // #[cfg(desktop)] 主窗口段结束
 
             // 先把后端状态装好，再建第二个 webview：
             // 歌词窗口一加载就会 invoke set_volume / lyrics_is_locked，
@@ -2587,6 +2713,9 @@ pub fn run() {
             // 音频线程没有 AppHandle，日志路径从这儿注入（打包版 stderr 看不到）
             crate::player::set_log_path(log_path(app.handle()));
 
+            // 桌面歌词 / 托盘 / 桌面 / 锁屏窗口：全是桌面专属（移动端没有这些窗口）
+            #[cfg(desktop)]
+            {
             // 桌面歌词窗口一次性预建好（隐藏），之后只做 show/hide：
             // WebView2 的第二个 webview 在 IPC 线程里建会卡死在环境创建上，
             // 启动阶段建则没有问题，顺带让「打开歌词」秒出。
@@ -2664,10 +2793,13 @@ pub fn run() {
             if let Err(e) = setup_tray(app.handle()) {
                 eprintln!("托盘图标初始化失败：{e}");
             }
+            } // #[cfg(desktop)] 窗口/托盘段结束
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
+        });
+    /* 窗口事件全是桌面概念（托盘菜单失焦、位置记忆、关闭收进托盘）——移动端没有窗口体系 */
+    #[cfg(desktop)]
+    let builder = builder.on_window_event(|window, event| {
             // 托盘菜单：点到别处（失焦）就收起；刚弹出的一瞬间的失焦事件忽略
             if window.label() == "tray" {
                 match event {
@@ -2755,7 +2887,9 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-        })
+        });
+
+    builder
         .invoke_handler(tauri::generate_handler![
             check_update,
             app_version,
@@ -2778,6 +2912,7 @@ pub fn run() {
             play_url,
             net_request,
             smtc_update,
+            update_dmg_install,
             probe_audio_url,
             local_audio_duration,
             local_audio_tags,
@@ -2808,29 +2943,50 @@ pub fn run() {
             cover_abs_path,
             diag_log,
             boot_ok,
+            #[cfg(desktop)]
             apply_min_size,
+            #[cfg(desktop)]
             lyrics_open,
+            #[cfg(desktop)]
             lyrics_hide,
+            #[cfg(desktop)]
             lyrics_close,
+            #[cfg(desktop)]
             lyrics_visible,
+            #[cfg(desktop)]
             lyrics_set_locked,
+            #[cfg(desktop)]
             lyrics_is_locked,
+            #[cfg(desktop)]
             musicdesk_open,
+            #[cfg(desktop)]
             musicdesk_close,
+            #[cfg(desktop)]
             musicdesk_visible,
+            #[cfg(desktop)]
             musicdesk_set_layer,
+            #[cfg(desktop)]
             desk_lock_enter,
+            #[cfg(desktop)]
             desk_lock_exit,
             platform_login,
+            #[cfg(desktop)]
             show_main,
+            #[cfg(desktop)]
             hide_main,
             quit_app,
+            #[cfg(desktop)]
             window_max_hint,
+            #[cfg(desktop)]
             main_geo,
             now_meta_set,
+            #[cfg(desktop)]
             tray_state,
+            #[cfg(desktop)]
             tray_fit,
+            #[cfg(desktop)]
             tray_hide,
+            #[cfg(desktop)]
             tray_action,
         ])
         .run(tauri::generate_context!())

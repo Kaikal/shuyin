@@ -16,6 +16,13 @@ import { toast } from './toast'
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 export { isAndroid }
 
+/**
+ * macOS 桌面端。iPadOS 13+ 的 Safari 也会伪装成 Macintosh UA，
+ * 但那类环境没有 __TAURI_INTERNALS__，而这里只被桌面分支消费，误判无害。
+ */
+export const isMac =
+  isTauri && typeof navigator !== 'undefined' && /Macintosh/.test(navigator.userAgent)
+
 /** 有原生能力（桌面或安卓），即「不是浏览器预览」 */
 export const isNative = isTauri || isAndroid
 
@@ -212,6 +219,7 @@ export const bridge = {
   invoke,
   isTauri,
   isAndroid,
+  isMac,
   isNative,
 
   async scanMusic(scope: ScanScope, directories: string[], incremental: boolean): Promise<ScanResult> {
@@ -256,12 +264,16 @@ export const bridge = {
    * opts.startAt：从第几秒开始（恢复上次进度）；
    * opts.autoplay=false：只加载并停在 startAt，等用户点播放。
    */
-  async playFile(path: string, index: number, opts?: { startAt?: number; autoplay?: boolean }): Promise<void> {
+  async playFile(
+    path: string, index: number,
+    opts?: { startAt?: number; autoplay?: boolean; epoch?: number },
+  ): Promise<void> {
     return invoke('play_file', {
       path,
       index,
       startAt: opts?.startAt ?? 0,
       autoplay: opts?.autoplay ?? true,
+      epoch: opts?.epoch ?? 0,
     })
   },
   /**
@@ -271,7 +283,7 @@ export const bridge = {
   async playUrl(
     url: string,
     index: number,
-    opts?: { durationHint?: number; startAt?: number; autoplay?: boolean },
+    opts?: { durationHint?: number; startAt?: number; autoplay?: boolean; epoch?: number },
   ): Promise<void> {
     return invoke('play_url', {
       url,
@@ -279,9 +291,29 @@ export const bridge = {
       durationHint: opts?.durationHint ?? 0,
       startAt: opts?.startAt ?? 0,
       autoplay: opts?.autoplay ?? true,
+      epoch: opts?.epoch ?? 0,
     })
   },
-  async pause(): Promise<void> { return invoke('pause') },  async resume(): Promise<void> { return invoke('resume') },
+  /**
+   * 暂停 / 续播。
+   *
+   * `epoch` 是**用户意图的代号**（见 PlayerProvider 的 epochRef）：原生拿它丢弃
+   * 「迟到的加载」——用户按了暂停之后，还在路上的 `play_url` 一到就会自己出声，
+   * 那正是「暂停了过几秒又响」。代号比当前小的 open 一律不执行。
+   */
+  async pause(epoch?: number, why = ''): Promise<void> { return invoke('pause', { epoch: epoch ?? 0, why }) },
+  async resume(epoch?: number, why = ''): Promise<void> { return invoke('resume', { epoch: epoch ?? 0, why }) },
+  /**
+   * 把前端的关键节点写进原生日志（安卓是 `lock.log`）。
+   *
+   * 「歌自己停了」这类问题两头都要看：原生的 `setPlaying want=…` 只说**停了**，
+   * 谁让它停的只有前端知道（换歌前的静音？定时器？某个 effect？）。两端共用一个
+   * 时间轴才对得上时序，否则只能靠猜。
+   */
+  async trace(msg: string): Promise<void> {
+    if (!isAndroid) return
+    try { await invoke('trace', { msg }) } catch { /* 日志写不进去不影响播放 */ }
+  },
   async stop(): Promise<void> { return invoke('stop') },
   async seek(secs: number): Promise<void> { return invoke('seek', { positionSecs: secs }) },
   async setVolume(v: number): Promise<void> { return invoke('set_volume', { volume: v }) },

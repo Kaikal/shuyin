@@ -150,16 +150,20 @@ fn action_of(btn: SystemMediaTransportControlsButton) -> Option<&'static str> {
 /// 绑定到主窗口。**必须在主线程调用**（tauri 的 setup 里正好是）。
 ///
 /// `hwnd` 传裸值而不是 `HWND`：这样非 Windows 平台也能有完全相同的签名。
+#[cfg(target_os = "windows")]
 pub fn init(app: &AppHandle, hwnd: isize) -> Result<(), String> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (app, hwnd);
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        init_win(app, HWND(hwnd as *mut c_void))
-    }
+    init_win(app, HWND(hwnd as *mut c_void))
+}
+
+/// macOS：hwnd 用不上（Now Playing 是进程级的，不绑窗口）
+#[cfg(target_os = "macos")]
+pub fn init(app: &AppHandle, _hwnd: isize) -> Result<(), String> {
+    mac::init(app)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn init(_app: &AppHandle, _hwnd: isize) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -254,5 +258,132 @@ pub fn update(app: &AppHandle, title: String, artist: String, album: String, pla
 /* 非 Windows：保留同名接口，不报错                                      */
 /* ------------------------------------------------------------------ */
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 pub fn update(_app: &AppHandle, _t: String, _a: String, _al: String, _p: bool) {}
+
+/* ------------------------------------------------------------------ */
+/* macOS：MPNowPlayingInfoCenter + MPRemoteCommandCenter                */
+/*                                                                      */
+/* 对应 Windows 的 SMTC：控制中心 / 锁屏 / 耳机按键都走这一套。          */
+/* 按键回发同样是 `hotkey://action`（source=smtc），前端零改动。         */
+/* 故意用裸 msg_send 而不是 objc2-media-player 的强类型包装：            */
+/* 那套 API 的 NSDictionary 泛型值类型在 0.2/0.3 之间改过一轮，          */
+/* 裸调用只依赖 selector 名，跨版本稳定得多。                            */
+/* ------------------------------------------------------------------ */
+
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::*;
+    use objc2::class;
+    use std::ffi::CString;
+    use std::sync::OnceLock;
+
+    /// 持住远控命令回调 token：addTarget 的 token 一丢回调就静默失效
+    struct Ctl {
+        _tokens: Vec<Retained<AnyObject>>,
+    }
+    static CTL: OnceLock<Mutex<Option<Ctl>>> = OnceLock::new();
+
+    fn cell() -> &'static Mutex<Option<Ctl>> {
+        CTL.get_or_init(|| Mutex::new(None))
+    }
+
+    /// NSString：直接 stringWithUTF8String，免开 objc2-foundation 的强类型
+    unsafe fn ns(s: &str) -> Retained<AnyObject> {
+        let c = CString::new(s).unwrap_or_default();
+        let p: Retained<AnyObject> =
+            objc2::msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+        p
+    }
+
+    /// 一次性把三个远控命令（播放暂停 / 下一首 / 上一首）挂到共享命令中心。
+    /// 每个块内捕获自己的 AppHandle，emit 出去的东西与 Windows 完全同形。
+    pub fn init(app: &AppHandle) -> Result<(), String> {
+        if cell().lock().map(|g| g.is_some()).unwrap_or(false) {
+            return Ok(());
+        }
+        unsafe {
+            let center: Retained<AnyObject> =
+                objc2::msg_send![class!(MPRemoteCommandCenter), sharedCommandCenter];
+            let mut tokens = Vec::new();
+            let actions = [("playpause", "togglePlayPauseCommand"), ("next", "nextTrackCommand"), ("prev", "previousTrackCommand")];
+            for (action, sel) in actions {
+                let cmd: Retained<AnyObject> = match sel {
+                    "togglePlayPauseCommand" => objc2::msg_send![&center, togglePlayPauseCommand],
+                    "nextTrackCommand" => objc2::msg_send![&center, nextTrackCommand],
+                    _ => objc2::msg_send![&center, previousTrackCommand],
+                };
+                let app2 = app.clone();
+                let action2 = action.to_string();
+                // MPRemoteCommandHandlerStatus = i64；0 = Success
+                let block = block2::Block::new(move |_evt: std::ptr::NonNull<AnyObject>| -> i64 {
+                    let _ = app2.emit(
+                        "hotkey://action",
+                        serde_json::json!({ "id": action2, "source": "smtc" }),
+                    );
+                    0
+                });
+                let token: Retained<AnyObject> =
+                    objc2::msg_send![&cmd, addTargetWithHandler: &*block];
+                tokens.push(token);
+            }
+            if tokens.is_empty() {
+                return Err("远控命令全部注册失败".into());
+            }
+            if let Ok(mut g) = cell().lock() {
+                *g = Some(Ctl { _tokens: tokens });
+            }
+        }
+        Ok(())
+    }
+
+    /// 换歌 / 播放状态变化：刷新 Now Playing 卡片。
+    /// 不带时长/进度（update 的签名没有）——卡片显示不了进度条，但按键与歌名都在。
+    pub fn apply(title: &str, artist: &str, album: &str, playing: bool) {
+        unsafe {
+            let info: Retained<AnyObject> =
+                objc2::msg_send![class!(NSMutableDictionary), dictionaryWithCapacity: 4u64];
+            if !title.is_empty() {
+                let k = ns("Title");
+                let v = ns(title);
+                let _: () = objc2::msg_send![&info, setObject: &*v, forKey: &*k];
+            }
+            if !artist.is_empty() {
+                let k = ns("Artist");
+                let v = ns(artist);
+                let _: () = objc2::msg_send![&info, setObject: &*v, forKey: &*k];
+            }
+            if !album.is_empty() {
+                let k = ns("AlbumTitle");
+                let v = ns(album);
+                let _: () = objc2::msg_send![&info, setObject: &*v, forKey: &*k];
+            }
+            // 播放速率：系统靠它判断显示播放还是暂停键
+            let rate: Retained<AnyObject> = objc2::msg_send![class!(NSNumber),
+                numberWithDouble: if playing { 1.0 } else { 0.0 }];
+            let k = ns("MPNowPlayingInfoPropertyPlaybackRate");
+            let _: () = objc2::msg_send![&info, setObject: &*rate, forKey: &*k];
+
+            let center: Retained<AnyObject> =
+                objc2::msg_send![class!(MPNowPlayingInfoCenter), defaultCenter];
+            let _: () = objc2::msg_send![&center, setNowPlayingInfo: &*info];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn init(app: &AppHandle, _hwnd: isize) -> Result<(), String> {
+    mac::init(app)
+}
+
+#[cfg(target_os = "macos")]
+pub fn update(app: &AppHandle, title: String, artist: String, album: String, playing: bool) {
+    // MPNowPlayingInfoCenter 本身线程安全，不需要绕 run_on_main_thread
+    mac::apply(&title, &artist, &album, playing);
+    let _ = app;
+}

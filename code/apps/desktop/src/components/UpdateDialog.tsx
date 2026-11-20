@@ -38,12 +38,15 @@ export function UpdateDialog({
   const [err, setErr] = useState('')
   /** 下载好的 APK 路径：从「未知来源」设置页回来之后要用它续装 */
   const pathRef = useRef('')
+  /** macOS：dmg 已下载并挂载，提示拖拽安装 */
+  const [macDone, setMacDone] = useState(false)
 
   /* 换了一个版本要重新开始，别把上一版的 100% 留着 */
   useEffect(() => {
     setStage('idle')
     setPct(-1)
     setErr('')
+    setMacDone(false)
     pathRef.current = ''
   }, [info?.latest])
 
@@ -54,7 +57,7 @@ export function UpdateDialog({
 
   const start = useCallback(async () => {
     if (!info) return
-    if (!bridge.isAndroid) { onGo(); return }
+    if (!bridge.isAndroid && !bridge.isMac) { onGo(); return }
     setStage('downloading')
     setPct(-1)
     setErr('')
@@ -62,6 +65,7 @@ export function UpdateDialog({
       const r = await downloadAndInstall(info)
       pathRef.current = r.path || ''
       setStage(r.status === 'need_perm' ? 'need_perm' : 'idle')
+      setMacDone(bridge.isMac && r.status === 'installed')
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
       setStage('error')
@@ -85,7 +89,7 @@ export function UpdateDialog({
 
   const busy = stage === 'downloading'
   const primary: Record<Stage, string> = {
-    idle: '立即更新',
+    idle: macDone ? '完成' : '立即更新',
     downloading: pct >= 0 ? `下载中 ${pct}%` : '下载中…',
     need_perm: '我已允许，继续安装',
     error: '重试',
@@ -106,7 +110,10 @@ export function UpdateDialog({
         <button
           className="primary-btn"
           disabled={busy}
-          onClick={() => { if (stage === 'need_perm' || stage === 'error') void retry(); else void start() }}
+          onClick={() => {
+            if (macDone) { onSkip(); return }
+            if (stage === 'need_perm' || stage === 'error') void retry(); else void start()
+          }}
         >
           {primary[stage]}
         </button>
@@ -129,6 +136,11 @@ export function UpdateDialog({
       {stage === 'need_perm' && (
         <p className="upd-tip">
           系统要求允许「疏音」安装应用。已经帮你打开设置页，打开开关后回来点下面这颗按钮即可。
+        </p>
+      )}
+      {macDone && (
+        <p className="upd-tip">
+          镜像已经挂载好了：在弹出的窗口里把「疏音.app」拖进「应用程序」，替换旧版本即可完成更新。
         </p>
       )}
       {stage === 'error' && (

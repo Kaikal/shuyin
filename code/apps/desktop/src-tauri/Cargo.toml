@@ -15,7 +15,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+# 托盘特性按平台拆（见文件末尾的 target 小节）：tray-icon 的底层实现没有 iOS 支持
+tauri = { version = "2", features = ["protocol-asset"] }
 # 无边框窗口取 HWND 用（Win11 圆角 / DWM 阴影）
 raw-window-handle = "0.6"
 tauri-plugin-store = "2"
@@ -68,6 +69,19 @@ windows-sys = { version = "0.60", features = [
 # 只用到 Media + Foundation，版本与 tauri 自己带的 windows 保持一致（0.62），
 # 否则 HWND 这类类型在两边不是同一个，编译期就对不上。
 windows = { version = "0.62", features = ["Foundation", "Media", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_RemoteDesktop"] }
+
+# 托盘只在桌面端启用：底层 tray-icon crate 没有 iOS / Android 实现，
+# 不拆开的话 iOS 构建直接链接失败
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+
+# macOS 系统媒体会话（Now Playing / 耳机线控 / 控制中心）。
+# 故意不用生成的强类型 API：NSDictionary 的泛型值类型在 objc2 各版本间
+# 反复变过，裸 msg_send 更抗版本漂移（见 smtc.rs 的 mac 分支）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSNumber"] }
 
 [profile.release]
 # 保留 unwind：单个解码/元数据异常不应杀掉整个进程（声音线程内部另有 catch_unwind）

@@ -15,6 +15,7 @@
 import { bridge } from './bridge'
 import { androidAppInfo, onNative } from './native/android'
 import { settings, KEYS } from './settings'
+import { statDownload } from './stats'
 
 export interface UpdateInfo {
   current: string
@@ -120,14 +121,25 @@ export async function skipVersion(v: string): Promise<void> {
   await settings.set(KEYS.updateSkip, v)
 }
 
-/** 用系统浏览器打开下载页；浏览器预览（非 Tauri / 非安卓）时退回 window.open */
-export async function openDownload(url: string): Promise<void> {
-  const u = url || 'https://gitee.com/ghpgitee/shuyin'
+/**
+ * 用系统浏览器打开任意 http(s) 链接。
+ *
+ * 三端三种出口：原生（安卓 `open_url` intent / 桌面 Tauri 的 shell open）、
+ * 纯浏览器预览时退回 `window.open`。地址是常量、不是用户输入，所以这里不做
+ * 协议白名单之外的过滤（原生那侧会再校验一次 http/https）。
+ */
+export async function openLink(url: string): Promise<void> {
+  if (!/^https?:\/\//i.test(url)) return
   if (bridge.isNative) {
-    await bridge.invoke('open_url', { url: u }).catch(() => {})
+    await bridge.invoke('open_url', { url }).catch(() => { /* 没有浏览器可接：静默，别弹错 */ })
     return
   }
-  window.open(u, '_blank', 'noopener')
+  window.open(url, '_blank', 'noopener')
+}
+
+/** 用系统浏览器打开下载页；浏览器预览（非 Tauri / 非安卓）时退回 window.open */
+export async function openDownload(url: string): Promise<void> {
+  await openLink(url || 'https://gitee.com/ghpgitee/shuyin')
 }
 
 /* ------------------------------------------------------------------ *
@@ -180,15 +192,30 @@ function apkName(latest: string): string {
  * 国内直连 GitHub 的 release 时快时慢，两个都试比只给一个稳。
  */
 export async function downloadAndInstall(info: UpdateInfo): Promise<InstallResult> {
-  if (!bridge.isAndroid) throw new Error('应用内安装只在安卓上可用')
   const urls = [info.url, info.urlAlt].filter(Boolean)
   if (!urls.length) throw new Error('更新地址是空的')
-  const r = await bridge.invoke<InstallResult>('update_download', {
-    urls,
-    name: apkName(info.latest),
-  })
-  if (!r || !r.status) throw new Error('下载失败')
-  return r
+  if (bridge.isAndroid) {
+    const r = await bridge.invoke<InstallResult>('update_download', {
+      urls,
+      name: apkName(info.latest),
+    })
+    if (!r || !r.status) throw new Error('下载失败')
+    /* 下载完成（不管装不装）都记一次：这就是「下载次数」的来源，
+       按 app 形态 + 装机号区分，比 Gitee raw 链接的裸计数可靠 */
+    void statDownload(info.latest)
+    return r
+  }
+  /* macOS：应用内下载 dmg 并挂载打开（Rust 的 update_dmg_install）。
+     没有静默安装通道，但比跳浏览器顺：下载完 Finder 直接弹镜像窗口。 */
+  if (bridge.isMac) {
+    const r = await bridge.invoke<{ status: string; path: string }>('update_dmg_install', {
+      urls,
+      name: `shuyin-${info.latest}.dmg`,
+    })
+    void statDownload(info.latest)
+    return { status: 'installed', path: r?.path ?? '' }
+  }
+  throw new Error('应用内安装只支持安卓与 macOS')
 }
 
 /** 从设置页授权回来之后续装（文件已经在缓存里） */
