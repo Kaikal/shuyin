@@ -68,9 +68,11 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      # 注意用 bash 调而不是 ./gradlew：仓库里 gradlew 的模式是 100644
+      # （没有执行位，Windows 上 git 不会保留），直接 ./gradlew 会 Permission denied。
       - name: Build APKs
         working-directory: code/apps/android/android
-        run: ./gradlew assemblePhoneRelease assembleCarRelease --no-daemon --stacktrace
+        run: bash gradlew assemblePhoneRelease assembleCarRelease --no-daemon --stacktrace
 
       - name: Collect artifacts
         run: |
