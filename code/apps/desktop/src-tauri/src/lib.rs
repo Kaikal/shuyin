@@ -2758,6 +2758,14 @@ pub fn run() {
             #[cfg(mobile)]
             {
                 match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    /*
+                     * 底色必须给：wry 在 iOS 上若不指定 background_color，会把 WKWebView
+                     * 的底色设成 `UIColor.systemBackgroundColor()`（浅色模式下就是**白**），
+                     * 同时 `setOpaque(false)`。页面一旦没铺满（安全区、启动瞬间、
+                     * 键盘弹出），露出来的就是这块白 —— 用户看到的就是上下两条白边。
+                     * 给成应用底色（#0A0B0F）之后，没铺满的地方也是同一块黑。
+                     */
+                    .background_color(tauri::window::Color(10, 11, 15, 255))
                     .build()
                 {
                     Ok(_) => append_log(app.handle(), "window.main ok (mobile)"),
