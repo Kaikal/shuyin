@@ -223,6 +223,11 @@ export interface LiveActivityState {
   album: string
   /** base64 JPEG，**不含** data URI 前缀；空串 = 没有封面 */
   art: string
+  /**
+   * 当前正在唱的那一句（空串 = 没有歌词，锁屏不画这一行）。
+   * 只在换句时变，随 `live_activity_sync` 一起推——扩展那边只做展示，不自己算行。
+   */
+  line?: string
   playing: boolean
   position: number
   duration: number

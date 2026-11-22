@@ -36,6 +36,12 @@ pub struct LiveState {
     /// ContentState 有 4KB 上限，前端压到 72×72 再传；空串 = 没有封面。
     #[serde(default)]
     pub art: String,
+    /// 当前那句歌词（空串 = 没有歌词，锁屏就不显示这一行）。
+    ///
+    /// 只在**换句那一刻**推一次，不要当心跳：ContentState 一次更新要序列化整份载荷，
+    /// 每秒推会把 Live Activity 的更新预算烧光（表现是灵动岛越刷越慢）。
+    #[serde(default)]
+    pub line: String,
     pub playing: bool,
     /// 锚点时刻的播放位置（秒）
     pub position: f64,

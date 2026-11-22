@@ -276,6 +276,13 @@ export const KEYS = {
   statMachine: 'stat.machine',
   /** 上次心跳时间戳（毫秒），24h 一次 */
   statLastPing: 'stat.lastPing',
+  /**
+   * 「已登记」标记：首次启动上报成功过一次就不再发。
+   *
+   * 服务端拿它算「总共有多少台设备用过疏音」——一台设备一个文件，重装才会重复。
+   * 这是「多少人用过」的唯一来源，跟从哪个渠道下载无关。
+   */
+  statRegistered: 'stat.registered',
   /** 播放历史（最近播放的曲目记录，最新在最前，上限 200 条） */
   playHistory: 'history.tracks',
 } as const

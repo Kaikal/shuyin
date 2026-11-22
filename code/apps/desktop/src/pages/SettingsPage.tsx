@@ -10,7 +10,7 @@ import {
 } from '@shuyin/theme-engine'
 import { useTheme } from '../lib/ThemeProvider'
 import {
-  IconCheck, IconDownload, IconFolder, IconGitee, IconGithub, IconMusicNote, IconTrash, IconUpload,
+  IconCheck, IconDownload, IconFolder, IconGitee, IconGithub, IconGlobe, IconMusicNote, IconTrash, IconUpload,
 } from '../components/icons'
 import { bridge } from '../lib/bridge'
 import { useShell } from '../lib/shellMode'
@@ -68,8 +68,8 @@ const SET_PANES: Array<{ id: SetPane; label: string }> = [
 /**
  * 项目主页入口（关于 → 仓库地址）。
  *
- * 只放**常量地址**，点一下交给系统浏览器。以后官网定了，往数组里加一条即可
- * （顺序就是显示顺序，官网建议放最前）。两端的打开能力已经统一在
+ * 只放**常量地址**，点一下交给系统浏览器（顺序就是显示顺序，官网放最前）。
+ * 两端的打开能力已经统一在
  * `lib/update.ts` 的 `openLink()`：安卓走 `open_url` intent，桌面走 Tauri
  * shell open，浏览器预览退回 `window.open`。
  */
@@ -80,6 +80,11 @@ const PROJECT_LINKS: Array<{
   url: string
   Icon: typeof IconGithub
 }> = [
+  /*
+   * 官网放最前：这是唯一一个「既能看介绍又能下载各平台安装包」的地址，
+   * 别人问「去哪下」直接给这条就够了。`id` 用 site，底色走强调色（见 pages.css）。
+   */
+  { id: 'site', name: '官网', sub: 'shuyin.pages.dev', url: 'https://shuyin.pages.dev/', Icon: IconGlobe },
   { id: 'github', name: 'GitHub', sub: 'github.com/Kaikal/shuyin', url: 'https://github.com/Kaikal/shuyin', Icon: IconGithub },
   /*
    * Gitee 主仓（ghpgitee/shuyin）是**私有**的：浏览器直接打开就是 403「访问受限」，
@@ -87,9 +92,6 @@ const PROJECT_LINKS: Array<{
    * 在里面，匿名可读），不暴露私有源码仓。
    */
   { id: 'gitee', name: 'Gitee', sub: 'gitee.com/ghpgitee/shuyin-update', url: 'https://gitee.com/ghpgitee/shuyin-update', Icon: IconGitee },
-  /* 官网地址定下来之后在这里加一条，`id` 用 site（底色走强调色）：
-   * { id: 'site', name: '官网', sub: 'shuyin.xxx', url: 'https://…', Icon: IconGlobe },
-   */
 ]
 
 /**
@@ -1342,6 +1344,14 @@ function ThemeCard({ def, active, onClick, onDelete }: {
         '--card-bg': t.backgroundBase, '--card-elev': t.backgroundElevated,
         '--card-text': t.textPrimary, '--card-sub': t.textSecondary,
         '--card-accent': t.accent, '--card-line': t.line,
+        /*
+         * 半透明档在这里算好：CSS 那边原来用 color-mix(accent 30%, transparent)，
+         * 而安卓 WebView 104 没有 color-mix（整条声明失效）——
+         * 主题卡预览里的强调条、选中环、右上角小圆点会一起消失。
+         */
+        '--card-accent-a35': withAlpha(t.accent, 0.35),
+        '--card-accent-a30': withAlpha(t.accent, 0.3),
+        '--card-text-a10': withAlpha(t.textPrimary, 0.1),
       } as React.CSSProperties}
       onClick={onClick}
       role="button" tabIndex={0}

@@ -51,6 +51,25 @@ class LyricBoard @JvmOverloads constructor(
             invalidate()
         }
 
+    /**
+     * 右上角要不要给关闭键让位（默认要）。
+     *
+     * 悬浮歌词的窗上有一颗常驻 ×，文字必须避开它，否则会钻到按钮底下。
+     * 但**状态栏歌词没有关闭键**（它触摸穿透，开关只在 App 的弹窗里），
+     * 还留这 42dp 的话文字右侧会平白空一块、整句看着像没居中——
+     * 所以那个窗把自己设成 false。默认 true 是为了不动悬浮歌词和锁屏页的现状。
+     */
+    var reserveClose = true
+
+    /**
+     * 当前句水平居中（默认关）。
+     *
+     * 悬浮歌词按电脑端桌面歌词排版：上排贴左、下排贴右，故意不对齐。
+     * 状态栏歌词是一条居中的字幕，左右都贴边反而不像「状态栏」——
+     * 那个窗把自己设成 true。默认 false 保证现有两处（悬浮窗 / 锁屏）画面不变。
+     */
+    var alignCenter = false
+
     /** 底板颜色（悬浮窗薄一点，锁屏厚一点）。改成 0 = 不要底板 */
     var plateColor = Color.argb(118, 12, 14, 22)
         set(v) {
@@ -352,7 +371,7 @@ class LyricBoard @JvmOverloads constructor(
             spec.toInt()
         } else {
             val contentW = max(curW, nextW)
-            (contentW + padH * 2 + closeW).coerceAtMost(budget).toInt()
+            (contentW + padH * 2 + if (reserveClose) closeW else 0f).coerceAtMost(budget).toInt()
                 .coerceAtLeast(dp(90f).toInt())
         }
         /*
@@ -387,7 +406,7 @@ class LyricBoard @JvmOverloads constructor(
          * 下面那行可以直接铺到右内边距。共用一份宽度的话，下排右对齐之后
          * 右边会平白空出一截，浅色壁纸上就是一条不对称的黑边。
          */
-        val availTop = (budget - padH * 2 - closeW).coerceAtLeast(dp(60f))
+        val availTop = (budget - padH * 2 - if (reserveClose) closeW else 0f).coerceAtLeast(dp(60f))
         val availBot = (budget - padH * 2).coerceAtLeast(dp(60f))
         val fullCur = cur.ifBlank { fallback.ifBlank { "疏音" } }
         this.fullCur = fullCur
@@ -535,10 +554,14 @@ class LyricBoard @JvmOverloads constructor(
         val curBase = curTop - cm.ascent
         val nextBase = nextTop - nm.ascent
 
-        /* 上排左对齐、下排右对齐（与谁在上无关，跟着「排」走） */
+        /* 上排左对齐、下排右对齐（与谁在上无关，跟着「排」走）；居中模式两边都居中对齐 */
         val left = padH
         val right = w - padH
-        val curX = if (flip) (right - curW).coerceAtLeast(left) else left
+        val curX = when {
+            alignCenter -> ((w - curW) / 2f).coerceAtLeast(left)
+            flip -> (right - curW).coerceAtLeast(left)
+            else -> left
+        }
         val nextX = if (flip) left else (right - nextW).coerceAtLeast(left)
 
         if (shownNext.isNotBlank()) {
@@ -556,7 +579,7 @@ class LyricBoard @JvmOverloads constructor(
          * 溢出的句子一律从左边起排：右对齐再往左推，一开唱就看不见句首。
          */
         val progNow = animProg()
-        val availCur = (budgetOf(w) - padH * 2 - if (flip) 0f else closeW).coerceAtLeast(dp(60f))
+        val availCur = (budgetOf(w) - padH * 2 - if (flip || !reserveClose) 0f else closeW).coerceAtLeast(dp(60f))
         val over = curFullW - availCur
         if (over > dp(1f) && fullCur.isNotBlank()) {
             val lead = availCur * 0.62f

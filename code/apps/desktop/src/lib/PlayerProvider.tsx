@@ -32,6 +32,21 @@ import { installIdleTracking, userActive, waitIdle } from './idle'
 import { diag } from './diag'
 import { parseLrc, plainLyricLines } from '@shuyin/core'
 
+/**
+ * 灵动岛 / 锁屏卡片要显示的那一句歌词。
+ *
+ * 截到 40 字：ContentState 一共只有 4KB（封面占大头），而 JSON 里的中文会变成
+ * `\uXXXX`（每字 6 字节），一行 60 字就要多吃 100 多字节。40 字足够一整句
+ * （中文歌一句很少超过 20 字），再长扩展那边也放不下。
+ */
+const LIVE_LINE_MAX = 40
+function liveLineOf(doc: LyricsDoc | null, position: number): string {
+  const lines = doc?.lines ?? []
+  if (!lines.length) return ''
+  const text = (lyricAt(doc, position)?.text ?? '').trim()
+  return text.length > LIVE_LINE_MAX ? text.slice(0, LIVE_LINE_MAX) : text
+}
+
 export interface PlayerSnapshot {
   playing: boolean
   position: number
@@ -1995,15 +2010,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   /*
    * 灵动岛（iOS Live Activity）：把「当前曲目 + 播放状态」推给原生。
    *
-   * 只在状态**真的变了**的时候调（换歌 / 播放暂停 / 拖动进度 / 封面补全），
+   * 只在状态**真的变了**的时候调（换歌 / 播放暂停 / 拖动进度 / 封面补全 / 换句），
    * 绝不当心跳用：进度条由扩展里的 `Text(timerInterval:)` 自己走秒，
    * 每秒推一次只会烧掉 Live Activity 的更新预算（超了系统会限流，
    * 表现就是「灵动岛卡在某一秒不动」）。
    *
    * 封面必须先压成 base64：扩展和主 App 是两个沙箱，路径在那边读不到。
+   * `line` 是当前那一句歌词，空串 = 这首歌没有歌词（锁屏就不画那一行）。
    */
   const liveSyncNow = useCallback(
-    async (t: LocalTrack | undefined, playing: boolean, position: number, duration: number) => {
+    async (
+      t: LocalTrack | undefined, playing: boolean, position: number, duration: number,
+      line = '',
+    ) => {
       if (!isIOS) return
       if (!t) {
         // 队列空了 / 播完了：把锁屏上那条收掉，别留一块过期的卡片
@@ -2016,6 +2035,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         artist: t.artist ?? '',
         album: t.album ?? '',
         art,
+        line,
         playing,
         position: Math.max(0, position || 0),
         duration: Math.max(0, duration || 0),
@@ -2024,6 +2044,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     },
     [],
   )
+
+  /*
+   * 当前这一句歌词（iOS 锁屏 / 灵动岛用）。
+   *
+   * 依赖里放 `snapshot.position` 是必要的——它每秒都在变，`lyricAt` 得靠它定位；
+   * 但返回值在**同一句之内是同一个字符串**，所以下面那个 effect 不会每秒触发。
+   * 长句截到 60 字符：ContentState 有 4KB 上限，锁屏也只有一行，多了纯浪费。
+   */
+  const liveLine = useMemo(
+    () => (isIOS ? liveLineOf(lyrics, snapshot.position) : ''),
+    [lyrics, snapshot.position],
+  )
+
+  /*
+   * 换句 → 推一次灵动岛。
+   *
+   * key 里带 `currentId` 是为了切歌时强制推一次：新歌开头几秒常常没有歌词（空串），
+   * 光比字符串会漏掉「把上一首的词留在锁屏上」这种情况。
+   *
+   * 约 3~5 秒一次，是 Live Activity 能长期承受的量级；每秒推会被系统限流。
+   * 主 App 进后台后 JS 会被 iOS 挂起，锁屏就停在那一刻的句子——系统限制，不是推送的问题。
+   */
+  const lastLiveLine = useRef('')
+  useEffect(() => {
+    if (!isIOS) return
+    const key = `${currentId ?? ''}|${liveLine}`
+    if (key === lastLiveLine.current) return
+    lastLiveLine.current = key
+    const t = currentTrack(queueState)
+    if (!t) return
+    /* position/playing 故意不进依赖：它们每秒都变，进来就等于每秒推一次 */
+    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine)
+  }, [liveLine, currentId, liveSyncNow])
 
   useEffect(() => {
     if (!bridge.isTauri && !isAndroid) return
@@ -2079,7 +2132,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      * 位置——反而更错。effect 的依赖里没有 position 是故意的：位置每秒都变，
      * 进了依赖就等于每秒推一次。
      */
-    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration)
+    /*
+     * 这里的 `liveLine` 取的是「此刻」的值，故意**不进依赖数组**——
+     * 进了就等于每句都重跑整个 effect，把 smtc_update / trace 也带成每句一次。
+     * 换句那次推送由上面那个专门的小 effect 负责，这里只保证切歌那一帧
+     * 不把上一首的歌词带到锁屏上。
+     */
+    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine)
   }, [currentId, snapshot.playing, curFavOn, cacheVer, liveSyncNow,
       metaTrack?.title, metaTrack?.artist, metaTrack?.album, metaTrack?.cover])
 
@@ -2762,9 +2821,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     /*
      * 拖动进度也要推一次灵动岛：扩展是按「锚点 + 已流逝时间」自己走秒的，
      * 不推的话它会沿旧锚点继续往下跑，越走越偏，直到下次换歌才对上。
+     *
+     * 当前句必须按**新位置**重算：`liveLine` 是基于拖动前那个位置算出来的，
+     * 直接用会把上一句又推一遍，锁屏上就出现「拖完还显示刚才那句」。
      */
-    if (t) void liveSyncNow(t, snapRef.current.playing, secs, snapRef.current.duration)
-  }, [queueState, liveSyncNow])
+    if (t) {
+      void liveSyncNow(
+        t, snapRef.current.playing, secs, snapRef.current.duration,
+        liveLineOf(lyrics, secs),
+      )
+    }
+  }, [queueState, liveSyncNow, lyrics])
 
   /*
    * 锁屏 / 控制中心拖进度条 → 原生那边已经直接 seek 了播放器，这里把 UI 跟上。

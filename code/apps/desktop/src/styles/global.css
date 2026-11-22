@@ -53,6 +53,26 @@
   --sy-ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
   --sy-error: #E08A72;
   /*
+   * 错误色的半透明档位。
+   *
+   * 别的令牌的 alpha 档在 ThemeProvider 里按主题算（accent / text / bg 都会变），
+   * 而 error 是**固定色**，不随主题走，所以直接在这里写死 rgba——
+   * 不用 color-mix（WebView 104 不认，整条声明失效，红底提示会变成没底色的红字）。
+   */
+  --sy-error-a06: rgba(224, 138, 114, 0.06);
+  --sy-error-a08: rgba(224, 138, 114, 0.08);
+  --sy-error-a10: rgba(224, 138, 114, 0.10);
+  --sy-error-a12: rgba(224, 138, 114, 0.12);
+  --sy-error-a14: rgba(224, 138, 114, 0.14);
+  --sy-error-a15: rgba(224, 138, 114, 0.15);
+  --sy-error-a16: rgba(224, 138, 114, 0.16);
+  --sy-error-a20: rgba(224, 138, 114, 0.20);
+  --sy-error-a26: rgba(224, 138, 114, 0.26);
+  --sy-error-a34: rgba(224, 138, 114, 0.34);
+  --sy-error-a45: rgba(224, 138, 114, 0.45);
+  --sy-error-a55: rgba(224, 138, 114, 0.55);
+  --sy-error-a70: rgba(224, 138, 114, 0.70);
+  /*
    * 芯片 / 小浮层的底板（音质、频谱、位置这些下拉芯片，以及它们弹出来的列表）。
    *
    * 原来这些地方写的是 `var(--sy-bg-2, #14161d)`，而 `--sy-bg-2` **从来没有被
@@ -109,9 +129,16 @@ body {
   margin: 0;
   font-family: var(--sy-font-cn);
   color: var(--sy-text-1);
-  /* 规范：静态极低透明度径向光斑（≤8%）+ 160° 渐变，不做漂移动效 */
+  /*
+   * 规范：静态极低透明度径向光斑（≤8%）+ 160° 渐变，不做漂移动效。
+   *
+   * 光斑原来写的是 `var(--sy-accent-a10)`，
+   * 而真机 WebView 104 没有 color-mix：整条 background 判无效，光斑在安卓上
+   * 一直是缺失的（桌面 Chrome 有，所以两端不一致）。改成 ThemeProvider 算好的
+   * rgba 变量（纯值，哪一代 WebView 都认），视觉与桌面原先完全一致。
+   */
   background:
-    radial-gradient(900px 700px at 8% -12%, color-mix(in srgb, var(--sy-accent) 10%, transparent), transparent 62%),
+    radial-gradient(900px 700px at 8% -12%, var(--sy-accent-a10), transparent 62%),
     linear-gradient(160deg, var(--sy-bg-base), var(--sy-bg-elevated));
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
@@ -131,7 +158,7 @@ button { font-family: inherit; }
 }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--sy-text-3) 45%, transparent); border-radius: 999px; }
+::-webkit-scrollbar-thumb { background: var(--sy-text-3-a45); border-radius: 999px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 .num { font-family: var(--sy-font-num); font-variant-numeric: tabular-nums; }
@@ -261,11 +288,11 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
   color: var(--sy-text-2);
   transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
 }
-.icon-btn:hover { background: color-mix(in srgb, var(--sy-text-1) 6%, transparent); color: var(--sy-text-1); }
+.icon-btn:hover { background: var(--sy-text-1-a06); color: var(--sy-text-1); }
 .icon-btn[aria-expanded='true'] {
-  background: color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+  background: var(--sy-text-1-a08);
   color: var(--sy-text-1);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  box-shadow: inset 0 0 0 1px var(--sy-text-1-a07);
 }
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 .icon-btn:disabled:hover { background: none; color: var(--sy-text-2); }
@@ -302,7 +329,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
   display: grid;
   place-items: center;
   cursor: pointer;
-  box-shadow: 0 8px 22px color-mix(in srgb, var(--sy-accent) 40%, transparent);
+  box-shadow: 0 8px 22px var(--sy-accent-a40);
   transition: background var(--sy-dur-fast) var(--sy-ease-soft), transform var(--sy-dur-fast) var(--sy-ease-soft);
 }
 .play-primary:hover { background: var(--sy-accent-soft); }
@@ -344,7 +371,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
 .text-input {
   appearance: none;
   border: 1px solid var(--sy-line);
-  background: color-mix(in srgb, var(--sy-text-1) 3%, transparent);
+  background: var(--sy-text-1-a03);
   color: var(--sy-text-1);
   border-radius: 10px;
   height: 32px;
@@ -405,7 +432,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
   gap: 2px;
   padding: 3px;
   border-radius: var(--sy-radius-pill);
-  background: color-mix(in srgb, var(--sy-text-1) 5%, transparent);
+  background: var(--sy-text-1-a05);
   border: 1px solid var(--sy-line);
 }
 .segmented button {
@@ -422,7 +449,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
 }
 .segmented button:hover { color: var(--sy-text-1); }
 .segmented button[aria-checked='true'] {
-  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  background: var(--sy-text-1-a10);
   color: var(--sy-text-1);
 }
 
@@ -431,8 +458,8 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
   width: 36px;
   height: 20px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--sy-text-1) 18%, transparent);
-  background: color-mix(in srgb, var(--sy-text-1) 6%, transparent);
+  border: 1px solid var(--sy-text-1-a18);
+  background: var(--sy-text-1-a06);
   cursor: pointer;
   transition: background var(--sy-dur-fast) var(--sy-ease-soft);
   flex: none;
@@ -449,7 +476,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
   background: var(--sy-text-2);
   transition: transform var(--sy-dur-fast) var(--sy-ease-soft), background var(--sy-dur-fast) var(--sy-ease-soft);
 }
-.toggle[aria-checked='true'] { background: color-mix(in srgb, var(--sy-text-1) 22%, transparent); }
+.toggle[aria-checked='true'] { background: var(--sy-text-1-a22); }
 .toggle[aria-checked='true']::after { transform: translateX(16px); background: var(--sy-text-1); }
 .slider {
   -webkit-appearance: none;
@@ -493,7 +520,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
   height: 16px;
   padding: 0 6px;
   border-radius: var(--sy-radius-pill);
-  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  background: var(--sy-text-1-a07);
   font: 500 8.5px/1 var(--sy-font-num);
   letter-spacing: 0.04em;
   color: var(--sy-text-2);
@@ -538,7 +565,7 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
 @keyframes sy-skeleton { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.75; } }
 .skeleton {
   border-radius: var(--sy-radius-small);
-  background: color-mix(in srgb, var(--sy-text-1) 6%, transparent);
+  background: var(--sy-text-1-a06);
   animation: sy-skeleton 1.2s ease-in-out infinite;
 }
 html[data-reduced-motion='true'] .skeleton { animation: none; opacity: 0.55; }

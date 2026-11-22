@@ -1,0 +1,11 @@
+{
+  "name": "shuyin-stat",
+  "version": "1.1.0",
+  "private": true,
+  "description": "疏音匿名使用统计（云函数）",
+  "main": "index.js",
+  "dependencies": {
+    "@cloudbase/node-sdk": "^2.10.0",
+    "@cloudbase/manager-node": "^4.2.0"
+  }
+}

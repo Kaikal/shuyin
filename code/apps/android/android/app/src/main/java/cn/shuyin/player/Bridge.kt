@@ -120,7 +120,9 @@ class Bridge(private val web: WebView) {
         put("platform", "android")
         put("car", Sy.isCar)
         put("sdk", android.os.Build.VERSION.SDK_INT)
+        /* MODEL 常常只有代号（M2012K11AC），配上 MANUFACTURER 才看得出是哪家哪款 */
         put("device", android.os.Build.MODEL)
+        put("brand", android.os.Build.MANUFACTURER)
         put("downloads", Sy.downloads.absolutePath)
     }.toString()
 
@@ -386,6 +388,18 @@ class Bridge(private val web: WebView) {
                    这里只喂悬浮窗，不再回头覆盖 */
                 mirror = !NowPlaying.hasTimeline(),
             )
+            /*
+             * 状态栏歌词是**另一个窗**，同一条心跳顺带喂它。
+             *
+             * 不做判重、不查 `shown`——[StatusLyrics.setLines] 自己会在没开窗时直接返回，
+             * 开窗时才 post 到主线程重绘。两个窗的开关彼此独立：只开状态栏歌词、
+             * 关掉桌面歌词，这条心跳照样把字送过去。
+             */
+            StatusLyrics.setLines(
+                a.optString("cur"),
+                a.optDouble("prog", 0.0).toFloat(),
+                a.optString("title"),
+            )
             null
         }
         /*
@@ -416,6 +430,25 @@ class Bridge(private val web: WebView) {
         "float_lyric_toggle" -> FloatingLyrics.toggleState(Sy.app)
         // 只读当前状态：面板每次打开都对一次，别拿一份可能过期的本地开关
         "float_lyric_state" -> FloatingLyrics.stateJson()
+
+        /*
+         * ---- 状态栏歌词 ----
+         *
+         * 与桌面歌词**各走各的命令**（用户 2026-11-22：两个独立功能，不要互相影响）。
+         * 共享命令会让两边的开关串在一起：开一个另一个的开关也跟着亮。
+         */
+        "status_lyric_toggle" -> StatusLyrics.toggleState(Sy.app)
+        "status_lyric_state" -> StatusLyrics.stateJson()
+        /* 调宽度 / 水平位置 / 配色：只传要改的那个字段，没传的保持原样 */
+        "status_lyric_set" -> {
+            val w = a.optDouble("width", -1.0)
+            if (w > 0) StatusLyrics.setWidth(w.toFloat())
+            /* pos 允许 0（贴左），所以判据是「有没有这个键」而不是「大于 0」 */
+            if (a.has("pos")) StatusLyrics.setPos(a.optDouble("pos", 0.5).toFloat())
+            val c = a.optInt("color", -1)
+            if (c >= 0) StatusLyrics.setColor(c)
+            null
+        }
 
         /* ---- 锁屏播放页 ---- */
         // 立刻预览一次（手动打开；不点亮屏幕，也不会因为开关一变就自己跳过去）

@@ -87,6 +87,16 @@ function applyTokensToCss(t: ThemeTokens): void {
       .map(v => Math.round(v + (255 - v) * k))
     return `rgb(${ch[0]},${ch[1]},${ch[2]})`
   }
+  /**
+   * 把「令牌名 + 一组透明度百分数」展开成 CSS 变量表。
+   *
+   * 变量名固定补零两位（`a05` / `a45`），否则 5% 与 50% 会撞成同一个名字；
+   * 95 以上的两位本来就是三位，按原样写（`a96`）。
+   */
+  const alphaScale = (name: string, hex: string, pcts: number[]): Record<string, string> =>
+    Object.fromEntries(
+      pcts.map(p => [`--sy-${name}-a${String(p).padStart(2, '0')}`, tint(hex, p / 100)]),
+    )
   const vars: Record<string, string> = {
     '--sy-bg-base': t.backgroundBase,
     '--sy-bg-elevated': t.backgroundElevated,
@@ -99,31 +109,28 @@ function applyTokensToCss(t: ThemeTokens): void {
     '--hd-accent-weak': tint(t.accent, 0.16),
     '--hd-glow': tint(t.accent, 0.36),
     /*
-     * Folia 歌词要用的几档强调色透明度。
+     * 带透明度的令牌**整档位**（`--sy-{令牌}-a{百分数，补零两位}`）。
      *
-     * 原来这几处写的是 `color-mix(in srgb, var(--sy-accent) 74%, transparent)`，
-     * 而真机 WebView 104 没有 color-mix：整条声明判无效 → 唱到哪个字都不变色、
-     * 光晕也没有——「歌词动效好像坏了」很大一部分是这里。算成 rgba 落成变量，
-     * 哪一代 WebView 都认，桌面端视觉不变。
-     */
-    '--sy-accent-a15': tint(t.accent, 0.15),
-    '--sy-accent-a20': tint(t.accent, 0.2),
-    '--sy-accent-a26': tint(t.accent, 0.26),
-    '--sy-accent-a40': tint(t.accent, 0.4),
-    '--sy-accent-a42': tint(t.accent, 0.42),
-    '--sy-accent-a74': tint(t.accent, 0.74),
-    /*
-     * 播放页 / 播放队列里几档更细的强调色。
+     * 这些位置原来全是 `color-mix(in srgb, var(--sy-accent) 14%, transparent)` 这种写法。
+     * color-mix 要 Chrome 111+，而真机（小米 WebView 104）没有这个函数，且**不回退**：
+     * 它把整条声明判成计算值无效，于是开关打开后没有底色、按钮悬停没有任何反馈、
+     * 歌词染色不动、导轨毛玻璃底下什么都没有。桌面端（WebView2）一直正常，
+     * 所以这一类问题只在真机上看得见。
      *
-     * 这几处原来在 handoff.css 里写死了默认主题的靛蓝 `rgba(110,139,255,…)`
-     * （正在播放那行的底色、已缓冲的进度、拖拽时的描边）。换到「清浅」之后
-     * 播放键是青蓝 #3E9BD8、进度条缓冲段却是靛蓝——**一个屏幕上两套蓝**，
-     * 就是「播放页和整体主题不搭」最直接的那一半。
+     * 全部算成 rgba 落成变量，哪一代 WebView 都认，桌面端像素级不变。
+     * 档位是扫一遍 CSS 得出的**实际用量**：加新档请顺手删掉没人用的。
      */
-    '--sy-accent-a08': tint(t.accent, 0.08),
-    '--sy-accent-a32': tint(t.accent, 0.32),
-    '--sy-accent-a38': tint(t.accent, 0.38),
-    '--sy-accent-a55': tint(t.accent, 0.55),
+    ...alphaScale('accent', t.accent, [
+      5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 22, 24, 26,
+      30, 32, 34, 38, 40, 42, 45, 46, 55, 74,
+    ]),
+    ...alphaScale('text-1', t.textPrimary, [
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22,
+      56, 58, 72, 76, 88,
+    ]),
+    ...alphaScale('text-3', t.textTertiary, [45, 55, 58]),
+    ...alphaScale('bg-base', t.backgroundBase, [22, 34, 40, 44, 58, 62, 64, 72, 74, 76, 78, 88, 90]),
+    ...alphaScale('bg-elevated', t.backgroundElevated, [96, 97]),
     /** 近黑底上的强调色文字（播放页 / 播放队列） */
     '--sy-accent-on-dark': lift(t.accent, 0.45),
     '--sy-glass-tint': t.glassTint,

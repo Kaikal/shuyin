@@ -24,7 +24,7 @@ html[data-fs='true'] .rz-host { display: none; }
    * 直接从标题栏底下透出来，三颗窗口按钮和页面按钮糊成一片
    * （用户反馈「背景色和下面的按钮重复了」）。有了底板它们就是独立的一栏。
    */
-  background: color-mix(in srgb, var(--sy-bg-base, #0A0B0F) 86%, transparent);
+  background: var(--sy-bg-base-a88);
   backdrop-filter: blur(16px) saturate(1.2);
   /* 无边框窗口少了系统边框的那道亮边，补一条内描边让窗口边界看得见 */
   box-shadow: inset 0 1px 0 var(--sy-line);
@@ -66,11 +66,11 @@ html[data-fs='true'] .rz-host { display: none; }
   transition: background var(--sy-dur-fast) var(--sy-ease-soft), color var(--sy-dur-fast) var(--sy-ease-soft);
 }
 .tb-btn:hover {
-  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  background: var(--sy-text-1-a10);
   color: var(--sy-text-1);
 }
 .tb-btn:active {
-  background: color-mix(in srgb, var(--sy-text-1) 15%, transparent);
+  background: var(--sy-text-1-a15);
 }
 /* 关闭键用系统同一套红，但压暗一档，和应用的哑光质感搭 */
 .tb-btn.tb-close:hover {
@@ -105,7 +105,7 @@ html[data-fs='true'] .rz-host { display: none; }
   display: flex;
   flex-direction: column;
   padding: 20px 14px 16px;
-  background: color-mix(in srgb, var(--sy-bg-base) 62%, var(--sy-bg-elevated));
+  background: var(--sy-bg-base);
   border-right: 1px solid var(--sy-line);
   z-index: 30;
   transition: width var(--sy-dur-panel) var(--sy-ease-panel);
@@ -207,7 +207,7 @@ html[data-fs='true'] .rz-host { display: none; }
   margin-left: -6px;
   transition: background var(--sy-dur-fast) var(--sy-ease-soft);
 }
-.pb-left:hover { background: color-mix(in srgb, var(--sy-text-1) 5%, transparent); }
+.pb-left:hover { background: var(--sy-text-1-a05); }
 /* 播放条横滑切歌时只有这两行字跟手（见 Shell.tsx 的 barSetX）：
    `.pb-meta` 只管裁切，真正被平移/做入场动画的是内层 `.pb-meta-in`——
    换歌时 React 会重建 `.pb-name` 的子树，写在那上面的 transform 会跟着丢掉。 */
@@ -293,7 +293,7 @@ html[data-fs='true'] .rz-host { display: none; }
   flex: 1;
   height: 4px;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--sy-text-1) 10%, transparent);
+  background: var(--sy-text-1-a10);
   cursor: pointer;
   touch-action: none;
   transition: transform var(--sy-dur-fast) var(--sy-ease-soft);
@@ -312,7 +312,7 @@ html[data-fs='true'] .rz-host { display: none; }
 .track .fill-buf {
   position: absolute; inset: 0 auto 0 0;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--sy-accent) 26%, transparent);
+  background: var(--sy-accent-a26);
   transition: width 420ms linear;
 }
 .track .knob {
@@ -341,7 +341,7 @@ html[data-fs='true'] .rz-host { display: none; }
   border-radius: 7px;
   background: var(--sy-chip-bg-hover);
   backdrop-filter: blur(12px) saturate(1.25);
-  border: 1px solid color-mix(in srgb, var(--sy-text-1) 14%, transparent);
+  border: 1px solid var(--sy-text-1-a14);
   font: 500 11.5px/1 var(--sy-font-num);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
@@ -457,7 +457,7 @@ html[data-fs='true'] .rz-host { display: none; }
 .q-row .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .q-row .name {
   font-size: 12px; font-weight: 500;
-  color: color-mix(in srgb, var(--sy-text-1) 88%, transparent);
+  color: var(--sy-text-1-a88);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   transition: color 140ms var(--sy-ease-soft);
 }
@@ -465,7 +465,7 @@ html[data-fs='true'] .rz-host { display: none; }
 /* 当前曲目：只在列表里加一层强调（标题着色 + 左侧强调条 + 淡底），
    不再单独在上面摆一张「正在播放」卡片 */
 .q-row.current {
-  background: color-mix(in srgb, var(--sy-accent) 9%, transparent);
+  background: var(--sy-accent-a09);
 }
 .q-row.current::before {
   content: '';
@@ -498,8 +498,8 @@ html[data-fs='true'] .rz-host { display: none; }
 .q-row.is-dragging {
   z-index: 5;
   cursor: grabbing;
-  background: color-mix(in srgb, var(--sy-bg-elevated) 92%, var(--sy-text-1) 8%);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5), inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 18%, transparent);
+  background: var(--sy-bg-elevated);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5), inset 0 0 0 1px var(--sy-text-1-a18);
 }
 .q-row.drop-before::before {
   content: '';
@@ -535,8 +535,8 @@ html[data-fs='true'] .rz-host { display: none; }
   display: grid;
   place-items: center;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--sy-text-1) 2%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--sy-text-1) 8%, transparent);
+  background: var(--sy-text-1-a02);
+  border: 1px dashed var(--sy-text-1-a08);
   font-size: 11.5px;
   color: var(--sy-text-3);
   text-align: center;
@@ -553,7 +553,7 @@ html[data-fs='true'] .rz-host { display: none; }
   height: 40px;
   padding: 0 14px 0 18px;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--sy-bg-elevated) 96%, transparent);
+  background: var(--sy-bg-elevated-a96);
   border: 1px solid var(--sy-line);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   font-size: 12px;
@@ -591,7 +591,7 @@ html[data-fs='true'] .rz-host { display: none; }
   min-width: 208px;
   padding: 5px;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--sy-bg-elevated) 97%, transparent);
+  background: var(--sy-bg-elevated-a97);
   border: 1px solid var(--sy-surface-border);
   box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   animation: ctx-in var(--sy-dur-pop, 150ms) var(--sy-ease-soft);
@@ -686,8 +686,8 @@ html[data-fs='true'] .rz-host { display: none; }
   width: min(520px, 78vw);
   padding: 7px 10px 7px 11px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--sy-bg-elevated) 96%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sy-error) 34%, var(--sy-line));
+  background: var(--sy-bg-elevated-a96);
+  border: 1px solid var(--sy-error-a45);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.42);
   font-size: 12px;
   line-height: 1.45;
@@ -711,7 +711,7 @@ html[data-fs='true'] .rz-host { display: none; }
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--sy-error) 20%, transparent);
+  background: var(--sy-error-a20);
   color: var(--sy-error);
   font: 700 10px/1 var(--sy-font-num);
 }
@@ -741,11 +741,11 @@ html[data-fs='true'] .rz-host { display: none; }
   height: 20px;
   padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--sy-accent) 45%, transparent);
+  border: 1px solid var(--sy-accent-a45);
   color: var(--sy-accent-soft);
   font-size: 11.5px;
 }
-.app-toast .app-toast-act:hover { background: color-mix(in srgb, var(--sy-accent) 14%, transparent); }
+.app-toast .app-toast-act:hover { background: var(--sy-accent-a14); }
 
 /*
  * 浅提示（.soft）：给「已经帮你处理好了」的消息用——音质自动降档、自动换了个平台。
@@ -754,11 +754,11 @@ html[data-fs='true'] .rz-host { display: none; }
  * 用醒目红色会让人以为又出问题了；用强调色 + 对钩，一眼就知道「能听，只是我替你调了」。
  */
 .app-toast.soft {
-  border-color: color-mix(in srgb, var(--sy-accent) 34%, var(--sy-line));
+  border-color: var(--sy-accent-a34);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.34);
 }
 .app-toast.soft .app-toast-icon {
-  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
+  background: var(--sy-accent-a20);
   color: var(--sy-accent-soft);
 }
 

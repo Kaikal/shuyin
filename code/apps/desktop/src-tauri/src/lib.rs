@@ -7,6 +7,8 @@
 
 pub mod db;
 pub mod hotkeys;
+#[cfg(target_os = "ios")]
+pub mod ios_openurl;
 pub mod liveactivity;
 pub mod net;
 #[cfg(desktop)]
@@ -1480,6 +1482,23 @@ fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
     let _ = std::fs::write(inbox.join("pending.json"), obj.to_string());
 }
 
+/// 把 iOS 冷启动攒下的 URL 摆到 inbox。
+///
+/// 通知观察者（`ios_openurl`）注册在 `UIApplicationMain` 之前，那时手里还没有
+/// AppHandle，所以只能先收着；这里补上落盘那一步。
+///
+/// 两个调用点都留着（`setup` + `take_open_file`）：前者是正常时序，
+/// 后者兜住「通知比 setup 更晚到」和「前端重新回前台再取一次」这两种情况。
+/// `stage_opened_file` 本身幂等（同名文件覆盖、pending.json 覆盖），重复不坏事。
+#[cfg(target_os = "ios")]
+fn flush_cold_open(app: &AppHandle) {
+    for raw in ios_openurl::drain() {
+        if let Ok(u) = tauri::Url::parse(&raw) {
+            stage_opened_file(app, &u);
+        }
+    }
+}
+
 /// 运行期事件：目前只接 Apple 平台的「用疏音打开」。
 ///
 /// Tauri 在 macOS / iOS 上把 openURL 转成 `RunEvent::Opened`，URL 是 `file://`。
@@ -1502,6 +1521,9 @@ fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
 /// 事件必丢；文件放着不怕，前端启动/回到前台取一次就有。
 #[tauri::command]
 fn take_open_file(app: AppHandle) -> Option<serde_json::Value> {
+    /* iOS 冷启动的文件 URL 是观察者收着、这里才落盘的（见 flush_cold_open） */
+    #[cfg(target_os = "ios")]
+    flush_cold_open(&app);
     let f = open_file_inbox(&app)?.join("pending.json");
     let text = std::fs::read_to_string(&f).ok()?;
     let _ = std::fs::remove_file(&f);
@@ -2923,6 +2945,14 @@ pub fn run() {
             }));
             append_log(app.handle(), "app.start");
 
+            /*
+             * iOS 冷启动「用疏音打开」：URL 是 `ios_openurl` 的观察者收着的
+             * （它注册在 UIApplicationMain 之前，那时还没有 AppHandle），
+             * 到这里才有 handle 能落盘。`take_open_file` 里还会兜一次。
+             */
+            #[cfg(target_os = "ios")]
+            flush_cold_open(app.handle());
+
             /* 灵动岛 / 锁屏实时活动（仅 iOS 有实际动作）。
              * 放在这里是为了尽早接管上次残留的那条 activity——否则 App
              * 重启后锁屏会同时挂着新旧两条。 */
@@ -3375,5 +3405,13 @@ pub fn run() {
      * 「build 之后空回调」，换成带回调的版本不改变任何现有行为，
      * 只是给 Apple 平台留一个接收「用疏音打开」的入口。
      */
+    /*
+     * iOS 冷启动打开文件的 URL 只出现在 launchOptions / UISceneConnectionOptions
+     * 里，tao 这两处都不读（见 ios_openurl.rs 顶部那张表）。
+     * 观察者必须赶在 `UIApplicationMain` 之前挂上——而它在下面这行内部才被调用。
+     */
+    #[cfg(target_os = "ios")]
+    ios_openurl::install();
+
     app.run(|app_handle, event| on_run_event(app_handle, event));
 }

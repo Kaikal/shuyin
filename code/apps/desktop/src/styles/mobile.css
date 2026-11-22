@@ -79,7 +79,7 @@ html[data-shell='phone'] .sidebar {
   gap: 4px;
   border: 1px solid rgba(255, 255, 255, 0.055);
   border-radius: 38px;
-  background: color-mix(in srgb, var(--sy-bg-base) 88%, transparent);
+  background: var(--sy-bg-base-a88);
   backdrop-filter: blur(20px) saturate(180%) brightness(1.05);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.10);
   transition: none;
@@ -139,7 +139,7 @@ html[data-shell='phone'] .playbar {
   gap: 8px;
   border: 1px solid rgba(255, 255, 255, 0.055);
   border-radius: 18px;
-  background: color-mix(in srgb, var(--sy-bg-base) 90%, transparent);
+  background: var(--sy-bg-base-a90);
   backdrop-filter: blur(20px) saturate(180%) brightness(1.05);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.10);
   overflow: hidden;
@@ -886,7 +886,7 @@ html[data-shell='phone'] .track-row .col-dur { display: none; }
 
 /* 序号没了，「正在播放」改用左侧一道强调色竖线，比看不见的 eq 动画清楚 */
 html[data-shell='phone'] .track-row.playing {
-  background: color-mix(in srgb, var(--sy-accent) 9%, transparent);
+  background: var(--sy-accent-a09);
   box-shadow: inset 2px 0 0 var(--sy-accent);
 }
 

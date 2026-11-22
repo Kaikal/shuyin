@@ -20,6 +20,9 @@ html[data-shell='car'] {
   --hd-bg-base: #0a0b0f;
   --hd-bg-elevated: #14161c;
   --hd-bg-rail: #080a0d;
+  /* 导轨毛玻璃的 90% 档：写成 rgba 而不是 color-mix，WebView 104 不认后者，
+     整条 background 会被判无效（导轨直接没有底色，页面内容透上来） */
+  --hd-bg-rail-a90: rgba(8, 10, 13, 0.9);
   --hd-bg-sheet: #171a21;
 
   --hd-surface-1: rgba(255, 255, 255, 0.04);
@@ -79,6 +82,8 @@ html[data-shell='car'][data-dark='false'] {
   --hd-bg-base: var(--sy-bg-base);
   --hd-bg-elevated: var(--sy-bg-elevated);
   --hd-bg-rail: var(--sy-bg-base);
+  /* 浅色主题的 90% 档由 ThemeProvider 按当前 bg-base 算好（见 --sy-bg-base-a90） */
+  --hd-bg-rail-a90: var(--sy-bg-base-a90);
   --hd-bg-sheet: var(--sy-bg-elevated);
 
   --hd-surface-1: rgba(0, 0, 0, 0.035);
@@ -106,7 +111,7 @@ html[data-shell='car'][data-dark='false'] {
 }
 /*
  * 浅色主题下这条边必须写死 rgba：`--hd-line-strong` 在浅色块里是
- * `color-mix(in srgb, #000 14%, transparent)`，WebView 104 不认，
+ * `rgba(0, 0, 0, 0.14)`，WebView 104 不认，
  * 结果 border-color 变成 IACVT 回落到 currentColor——菜单会描一圈白亮边。
  */
 html[data-shell='phone'][data-dark='false'] .ctx-menu,
@@ -185,7 +190,7 @@ html[data-shell='phone'] .sidebar {
   border-top: 1px solid var(--hd-line-subtle);
   border-radius: 0;
   /* 不能写死 rgba(12,14,19,.94)：浅色主题下就是一条黑带压在浅页面上 */
-  background: color-mix(in srgb, var(--hd-bg-rail) 90%, transparent);
+  background: var(--hd-bg-rail-a90);
   backdrop-filter: blur(24px) saturate(1.2);
   -webkit-backdrop-filter: blur(24px) saturate(1.2);
   box-shadow: none;
@@ -5290,7 +5295,7 @@ html[data-shell='phone'] .imm-chip:hover:not([aria-pressed='true']) {
   background: var(--sy-chip-bg-hover);
 }
 html[data-shell='phone'] .imm-tool:hover {
-  background: color-mix(in srgb, var(--sy-text-1) 5%, transparent);
+  background: var(--sy-text-1-a05);
 }
 
 /* 列表行：触摸上「点过的那一行」会留一条底 */

@@ -16,8 +16,16 @@ import { invoke, isTauri } from './bridge'
 
 /** 缩略图边长（px） */
 const SIZE = 72
-/** ContentState 的软上限：留 400B 给文字字段 */
-const MAX_B64 = 3600
+/**
+ * base64 软上限。
+ *
+ * ContentState 整体 4KB，而这一份几乎是全部占用。以前留 400B 给文字，
+ * 2026-11-22 加了歌词行之后不够了：歌名/歌手/专辑 + 一句最多 40 字（JSON 里
+ * 中文会变成 `\uXXXX`，每字 6 字节 ≈ 240B）＋字段名，加起来能顶到 4KB 边缘。
+ * 超了 `Activity.request` 会直接抛错（整条灵动岛都不出现），所以压到 3000。
+ * 72×72 / q0.55 正常在 1.5~2.5KB，3000 仍有富余；真压不下会退到 q0.38。
+ */
+const MAX_B64 = 3000
 
 /** 上一次的结果。切歌/暂停会反复调这个，同一张封面没必要重算 */
 let cachedPath = ''

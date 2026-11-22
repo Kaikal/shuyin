@@ -45,3 +45,4 @@ code/apps/mobile/android/.gradle/
 code/apps/mobile/ios/Pods/
 **/.cxx/
 **/.externalNativeBuild/
+.tmplog/

@@ -188,6 +188,33 @@ private struct Controls: View {
 }
 
 /* ------------------------------------------------------------------ */
+/* 歌词行                                                               */
+/* ------------------------------------------------------------------ */
+
+/// 当前正在唱的那一句。
+///
+/// 两个刻意的决定：
+///   · 空串时**什么都不画**（`if` 包住，别塞一个空 `Text`——VStack 会为它留一整行空白，
+///     没歌词的纯音乐就会凭空多出一条空隙）。
+///   · 长句用 `minimumScaleFactor` 压字号，不截成省略号：歌词被截掉后半句，
+///     比小一号字难看得多。
+private struct LyricLine: View {
+    let text: String
+    var centered = false
+
+    var body: some View {
+        if !text.isEmpty {
+            Text(text)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(syText1.opacity(0.9))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* 锁屏卡片                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -227,6 +254,13 @@ private struct LockScreenView: View {
                 ProgressBar(state: state)
                 TimeLabel(state: state, compact: true)
             }
+
+            /*
+             * 歌词放在进度条**下面**：
+             * 上面那块是「封面 + 歌名 + 歌手」，一眼是「在放什么」；
+             * 下面这块是「唱到哪」，跟着进度条走更顺。
+             */
+            LyricLine(text: state.line)
 
             if #available(iOS 17.0, *) {
                 HStack {
@@ -277,7 +311,9 @@ struct ShuyinLiveActivityWidget: Widget {
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    VStack(spacing: 12) {
+                    VStack(spacing: 10) {
+                        /* 展开态整块居中排，歌词居中比左对齐更像「字幕」 */
+                        LyricLine(text: context.state.line, centered: true)
                         ProgressBar(state: context.state)
                         if #available(iOS 17.0, *) {
                             Controls(state: context.state)

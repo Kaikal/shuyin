@@ -15,7 +15,7 @@
   margin-left: 5px;
   padding: 0;
   border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--sy-text-3) 55%, transparent);
+  border: 1px solid var(--sy-text-3-a55);
   background: transparent;
   color: var(--sy-text-3);
   font-size: 10px;
@@ -28,7 +28,7 @@
 .help-dot.on {
   color: var(--sy-accent);
   border-color: var(--sy-accent);
-  background: color-mix(in srgb, var(--sy-accent) 12%, transparent);
+  background: var(--sy-accent-a12);
 }
 .help-dot:focus-visible { outline: 2px solid var(--sy-accent-soft); outline-offset: 1px; }
 
@@ -89,7 +89,7 @@
   border: 1px solid var(--sy-surface-border);
   background:
     linear-gradient(100deg,
-      color-mix(in srgb, var(--sy-accent) 16%, var(--sy-surface)) 0%,
+      var(--sy-accent-a16) 0%,
       var(--sy-surface) 62%);
   color: inherit;
   font: inherit;
@@ -99,7 +99,7 @@
   transition: border-color var(--sy-dur-fast), transform var(--sy-dur-fast), box-shadow var(--sy-dur-fast);
 }
 .home-band:hover {
-  border-color: color-mix(in srgb, var(--sy-accent) 42%, var(--sy-surface-border));
+  border-color: var(--sy-accent-a42);
   box-shadow: var(--sy-shadow-card-hover);
 }
 .home-band:focus-visible { outline: 2px solid var(--sy-accent-soft); outline-offset: 3px; }
@@ -508,8 +508,8 @@
   margin: 8px 0 0;
   padding: 7px 12px;
   border-radius: var(--sy-radius-small);
-  background: color-mix(in srgb, var(--sy-accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--sy-accent) 26%, transparent);
+  background: var(--sy-accent-a12);
+  border: 1px solid var(--sy-accent-a26);
   color: var(--sy-text-2);
   font-size: 11.5px;
   line-height: 1.5;
@@ -518,8 +518,8 @@
 }
 .home-msg.bad,
 .lib-toast.bad {
-  background: color-mix(in srgb, var(--sy-error) 14%, transparent);
-  border-color: color-mix(in srgb, var(--sy-error) 34%, transparent);
+  background: var(--sy-error-a14);
+  border-color: var(--sy-error-a34);
   color: var(--sy-error);
 }
 /* 曲库里的轻提示要浮在内容上，不占行高 */
@@ -612,7 +612,7 @@
   backdrop-filter: blur(6px);
   white-space: nowrap;
 }
-.home-badge.online { background: color-mix(in srgb, var(--sy-accent) 78%, #000); }
+.home-badge.online { background: var(--sy-accent); }
 
 .home-play {
   position: absolute;
@@ -652,7 +652,7 @@
   white-space: nowrap;
   overflow: hidden;
 }
-.home-miss { color: color-mix(in srgb, var(--sy-error) 86%, var(--sy-text-3)); }
+.home-miss { color: var(--sy-error); }
 
 .home-empty {
   padding: 26px 20px;
@@ -741,7 +741,7 @@
   min-width: 0;
 }
 .plp-row:hover { background: var(--sy-row-hover); }
-.plp-row.live { background: color-mix(in srgb, var(--sy-accent) 10%, transparent); }
+.plp-row.live { background: var(--sy-accent-a10); }
 .plp-idx { width: 22px; flex: none; font-size: 10.5px; color: var(--sy-text-3); text-align: right; }
 .plp-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .plp-title { font-size: 12.5px; color: var(--sy-text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -818,7 +818,7 @@
   min-width: 0;
 }
 .atp-pickrow:hover { background: var(--sy-row-hover); }
-.atp-pickrow.on { background: color-mix(in srgb, var(--sy-accent) 10%, transparent); }
+.atp-pickrow.on { background: var(--sy-accent-a10); }
 .atp-pickrow .cbx { flex: none; pointer-events: none; }
 .atp-pickmain { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
 .atp-pickname { font-size: 12px; color: var(--sy-text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -841,8 +841,8 @@
   border-bottom: 1px solid var(--sy-line);
   min-width: 0;
 }
-.hk-row.rec { background: color-mix(in srgb, var(--sy-accent) 8%, transparent); }
-.hk-row.bad .hk-kbd { border-color: color-mix(in srgb, var(--sy-error) 55%, transparent); color: var(--sy-error); }
+.hk-row.rec { background: var(--sy-accent-a08); }
+.hk-row.bad .hk-kbd { border-color: var(--sy-error-a55); color: var(--sy-error); }
 .hk-name { font-size: 12px; color: var(--sy-text-2); width: 140px; flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hk-keys { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hk-kbd {
@@ -925,8 +925,8 @@
 }
 .scope-ctl .chip.on {
   color: var(--sy-accent-soft);
-  border-color: color-mix(in srgb, var(--sy-accent) 45%, transparent);
-  background: color-mix(in srgb, var(--sy-accent) 14%, transparent);
+  border-color: var(--sy-accent-a45);
+  background: var(--sy-accent-a14);
 }
 
 .cloud-env { margin-top: 10px; }
@@ -998,7 +998,7 @@
   max-width: 100%;
   padding: 7px 12px 7px 10px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--sy-bg-elevated) 96%, transparent);
+  background: var(--sy-bg-elevated-a96);
   border: 1px solid var(--sy-surface-border);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
   color: var(--sy-text-1);
@@ -1008,8 +1008,8 @@
   pointer-events: none;
   animation: toast-drop 180ms var(--sy-ease-panel);
 }
-.toast-item.bad { border-color: color-mix(in srgb, var(--sy-error) 40%, var(--sy-line)); }
-.toast-item.ok { border-color: color-mix(in srgb, var(--sy-accent) 38%, var(--sy-line)); }
+.toast-item.bad { border-color: var(--sy-error-a45); }
+.toast-item.ok { border-color: var(--sy-accent-a38); }
 .ti-icon {
   width: 15px;
   height: 15px;
@@ -1018,11 +1018,11 @@
   place-items: center;
   border-radius: 999px;
   font: 700 10px/1 var(--sy-font-num);
-  background: color-mix(in srgb, var(--sy-text-1) 12%, transparent);
+  background: var(--sy-text-1-a12);
   color: var(--sy-text-2);
 }
-.toast-item.bad .ti-icon { background: color-mix(in srgb, var(--sy-error) 20%, transparent); color: var(--sy-error); }
-.toast-item.ok .ti-icon { background: color-mix(in srgb, var(--sy-accent) 22%, transparent); color: var(--sy-accent-soft); }
+.toast-item.bad .ti-icon { background: var(--sy-error-a20); color: var(--sy-error); }
+.toast-item.ok .ti-icon { background: var(--sy-accent-a22); color: var(--sy-accent-soft); }
 .ti-text { min-width: 0; overflow-wrap: anywhere; }
 
 /* ---------- 歌单详情：多选 / 右键 ---------- */
@@ -1044,8 +1044,8 @@
 .plp-cbx { flex: none; opacity: 0.45; transition: opacity var(--sy-dur-fast); }
 .plp-row:hover .plp-cbx,
 .plp-row.selected .plp-cbx { opacity: 1; }
-.plp-row.selected { background: color-mix(in srgb, var(--sy-accent) 13%, transparent); }
-.plp-row.selected:hover { background: color-mix(in srgb, var(--sy-accent) 19%, transparent); }
+.plp-row.selected { background: var(--sy-accent-a13); }
+.plp-row.selected:hover { background: var(--sy-accent-a19); }
 .plp-row { cursor: default; }
 
 /* 「我的」右上角的登录按钮：邮箱长了要截断，不许把标题栏顶变形 */
@@ -1094,7 +1094,7 @@ html[data-shell='phone'] .home-head .home-acct.on:active { background: var(--sy-
  * 其余尺寸完全沿用 .home-card，混在网格里才不显得「插进来一块」。
  */
 .home-card.is-fav .home-badge {
-  background: color-mix(in srgb, var(--sy-accent) 82%, #000);
+  background: var(--sy-accent);
   color: #fff;
 }
 .home-card.is-fav .home-cover::after {
@@ -1102,7 +1102,7 @@ html[data-shell='phone'] .home-head .home-acct.on:active { background: var(--sy-
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sy-accent) 32%, transparent);
+  box-shadow: inset 0 0 0 1px var(--sy-accent-a32);
   pointer-events: none;
 }
 

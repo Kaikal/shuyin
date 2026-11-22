@@ -33,7 +33,7 @@ import { useSpectrumOn } from './lib/uiPrefs'
 import { useSpectrumPos } from './lib/spectrumPos'
 import { useTheme } from './lib/ThemeProvider'
 import { bridge, isAndroid, type IncomingFile } from './lib/bridge'
-import { useShell } from './lib/shellMode'
+import { isIOS, useShell } from './lib/shellMode'
 import { statPing } from './lib/stats'
 import { onNative, setBackHandler } from './lib/native/android'
 import { confirm } from './lib/confirm'
@@ -683,8 +683,9 @@ export function App() {
    * - **音源脚本**（.js）→ 必须问一句，别人的文件不该悄悄改配置。
    */
   useEffect(() => {
-    /* 只有移动端和 macOS 有「用疏音打开」这条系统入口（Windows 没做注册表关联） */
-    if (!isAndroid && !bridge.isMac) return
+    /* 「用疏音打开」这条系统入口：安卓一直有；iOS / macOS 由 tao 的
+       RunEvent::Opened + 冷启动观察者（见 ios_openurl.rs）共同兜住 */
+    if (!isAndroid && !bridge.isMac && !isIOS) return
     let alive = true
     const seen = new Set<string>()
 

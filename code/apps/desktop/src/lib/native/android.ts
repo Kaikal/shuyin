@@ -25,6 +25,8 @@ export interface AndroidAppInfo {
   car: boolean
   sdk: number
   device: string
+  /** 厂商（Build.MANUFACTURER）。老包没有这个字段，判空即可 */
+  brand?: string
   downloads: string
 }
 

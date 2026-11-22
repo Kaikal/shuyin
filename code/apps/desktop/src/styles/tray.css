@@ -29,13 +29,13 @@ html.tray-mode #root { display: inline-block; }
   font: 400 12.5px/1.45 var(--sy-font-cn);
   /* 和 body 一样：左上角一层极淡的强调色光斑，再压一层 158° 渐变 */
   background:
-    radial-gradient(120% 92% at 6% -18%, color-mix(in srgb, var(--sy-accent) 17%, transparent), transparent 62%),
+    radial-gradient(120% 92% at 6% -18%, var(--sy-accent-a17), transparent 62%),
     linear-gradient(158deg, var(--sy-bg-elevated), var(--sy-bg-base));
-  border: 1px solid color-mix(in srgb, var(--sy-text-1) 13%, transparent);
+  border: 1px solid var(--sy-text-1-a13);
   box-shadow:
     0 22px 52px -14px rgba(0, 0, 0, 0.72),
     0 4px 14px rgba(0, 0, 0, 0.34),
-    inset 0 1px 0 color-mix(in srgb, var(--sy-text-1) 9%, transparent);
+    inset 0 1px 0 var(--sy-text-1-a09);
   /* 从托盘往上长：入场从下往上来，方向才对 */
   animation: tm-in 150ms var(--sy-ease-panel);
 }
@@ -62,14 +62,14 @@ html.tray-mode #root { display: inline-block; }
   place-items: center;
   box-shadow:
     0 5px 16px rgba(0, 0, 0, 0.38),
-    inset 0 0 0 1px color-mix(in srgb, var(--sy-text-1) 14%, transparent);
+    inset 0 0 0 1px var(--sy-text-1-a14);
 }
 .tm-cover.empty {
   background:
     linear-gradient(145deg,
-      color-mix(in srgb, var(--sy-accent) 42%, transparent),
-      color-mix(in srgb, var(--sy-accent) 10%, transparent));
-  color: color-mix(in srgb, var(--sy-text-1) 72%, transparent);
+      var(--sy-accent-a42),
+      var(--sy-accent-a10));
+  color: var(--sy-text-1-a72);
 }
 .tm-meta { min-width: 0; flex: 1; }
 .tm-title {
@@ -105,7 +105,7 @@ html.tray-mode #root { display: inline-block; }
   margin: 0 2px 3px;
   padding: 6px 8px 10px;
   border-radius: 11px;
-  background: color-mix(in srgb, var(--sy-text-1) 4.5%, transparent);
+  background: var(--sy-text-1-a05);
   border: 1px solid var(--sy-line);
 }
 .tm-ctrl {
@@ -126,7 +126,7 @@ html.tray-mode #root { display: inline-block; }
   cursor: pointer;
   transition: background 120ms var(--sy-ease-soft), color 120ms var(--sy-ease-soft);
 }
-.tm-btn:hover { background: color-mix(in srgb, var(--sy-text-1) 7%, transparent); color: var(--sy-text-1); }
+.tm-btn:hover { background: var(--sy-text-1-a07); color: var(--sy-text-1); }
 .tm-btn:disabled { opacity: 0.34; cursor: default; background: none; }
 .tm-play {
   width: 30px;
@@ -134,7 +134,7 @@ html.tray-mode #root { display: inline-block; }
   border-radius: 999px;
   background: var(--sy-accent);
   color: #fff;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--sy-accent) 42%, transparent);
+  box-shadow: 0 4px 14px var(--sy-accent-a42);
 }
 .tm-play:hover { background: var(--sy-accent-soft); color: #fff; }
 .tm-play:disabled { background: var(--sy-line); box-shadow: none; color: var(--sy-text-3); }
@@ -151,7 +151,7 @@ html.tray-mode #root { display: inline-block; }
   bottom: 4px;
   height: 2px;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--sy-text-1) 9%, transparent);
+  background: var(--sy-text-1-a09);
   overflow: hidden;
 }
 .tm-prog i {
@@ -175,7 +175,7 @@ html.tray-mode #root { display: inline-block; }
 .tm-sep {
   height: 1px;
   margin: 6px 9px;
-  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  background: var(--sy-text-1-a07);
 }
 .tm-item {
   appearance: none;
@@ -199,7 +199,7 @@ html.tray-mode #root { display: inline-block; }
   opacity: 0.78;
   transition: opacity 110ms var(--sy-ease-soft), color 110ms var(--sy-ease-soft);
 }
-.tm-item:hover { background: color-mix(in srgb, var(--sy-text-1) 6%, transparent); color: var(--sy-text-1); }
+.tm-item:hover { background: var(--sy-text-1-a06); color: var(--sy-text-1); }
 .tm-item:hover svg { opacity: 1; color: var(--sy-accent-soft); }
 .tm-item:disabled { opacity: 0.38; cursor: default; background: none; }
 .tm-item:disabled:hover svg { color: currentColor; }
@@ -221,15 +221,15 @@ html.tray-mode #root { display: inline-block; }
   border-radius: 999px;
   letter-spacing: 0.02em;
   color: var(--sy-text-3);
-  background: color-mix(in srgb, var(--sy-text-1) 7%, transparent);
+  background: var(--sy-text-1-a07);
 }
 .tm-tag.on {
   color: var(--sy-accent-soft);
-  background: color-mix(in srgb, var(--sy-accent) 20%, transparent);
+  background: var(--sy-accent-a20);
 }
 .tm-quit { color: var(--sy-text-3); }
 .tm-quit:hover {
-  background: color-mix(in srgb, var(--sy-error) 15%, transparent);
+  background: var(--sy-error-a15);
   color: var(--sy-error);
 }
 .tm-quit:hover svg { color: var(--sy-error); opacity: 1; }

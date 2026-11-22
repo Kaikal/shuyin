@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>疏音 · 安静、干净的本地音乐播放器</title>
-<meta name="description" content="疏音是一个本地优先的音乐播放器：扫描你自己的音乐库，接入你自己的平台账号，配上五段均衡器与空间音效。Windows、Android 手机、车机与平板同一套体验。">
+<meta name="description" content="疏音是一个本地优先的音乐播放器：扫描你自己的音乐库，接入你自己的平台账号，配上五段均衡器与空间音效。Windows、macOS、Android 手机、iPhone、车机与平板同一套体验。">
 <meta name="theme-color" content="#08080A">
 <meta property="og:title" content="疏音 · 安静、干净的本地音乐播放器">
 <meta property="og:description" content="本地曲库、多平台歌单、专业音效，收在一个干净安静的播放器里。">
@@ -112,6 +112,14 @@
     transition: background .2s ease, border-color .2s ease;
   }
   .nav-cta:hover { background: rgba(253, 138, 108, .14); border-color: rgba(253, 138, 108, .45); }
+
+  /*
+   * 窄屏导航：桌面那五个锚点在小屏上塞不下（原来直接 display:none，等于把
+   * 功能 / 平台 / FAQ 三个入口全丢了，手机上只剩一个「下载」）。改成汉堡：
+   * 面板绝对定位挂在导航下方，浮在内容上而不是把页面往下顶。
+   */
+  .nav-burger { display: none; }
+  .nav-menu { display: none; }
 
   /* ---------------------------------------------------------------- */
   /* Hero                                                              */
@@ -399,9 +407,11 @@
   /* ---------------------------------------------------------------- */
   /* 平台                                                              */
   /* ---------------------------------------------------------------- */
+  /* 六端（Windows / 安卓手机 / 车机 / 平板 / iPhone / macOS）排成两行三列，
+     比一行六个更松，图标和那行小字也塞得下 */
   .platforms {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 14px;
   }
   .plat {
@@ -429,12 +439,18 @@
   /* ---------------------------------------------------------------- */
   /* 下载                                                              */
   /* ---------------------------------------------------------------- */
+  /*
+   * 六列底网格 + 卡片跨列：前四个卡各占 1/3（一行三个），最后两张 Apple 卡各占
+   * 1/2（一行两个）。这样 5 张卡排成「3 + 2」，第二行两张正好铺满，不会有
+   * 一行末尾留一个大空洞。
+   */
   .dl-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 16px;
   }
   .dl {
+    grid-column: span 2;
     display: flex;
     flex-direction: column;
     padding: 26px 24px 24px;
@@ -442,6 +458,7 @@
     border: 1px solid var(--line);
     background: linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.015));
   }
+  .dl.wide { grid-column: span 3; }
   .dl.main {
     border-color: rgba(253, 138, 108, .34);
     background: linear-gradient(180deg, rgba(253, 138, 108, .09), rgba(255,255,255,.012));
@@ -464,6 +481,8 @@
   .dl.main .dl-ico { background: rgba(253, 138, 108, .16); color: var(--accent); }
   .dl-ico svg { width: 20px; height: 20px; }
   .dl h3 { margin: 0; font-size: 16px; font-weight: 600; }
+  /* 标题右侧的小标签（未签名等）：h3 是块级文本，inline-flex 的 badge 要手动对齐基线 */
+  .dl h3 .badge { margin-left: 7px; vertical-align: 1px; font-weight: 500; }
   .dl-meta {
     display: flex;
     flex-wrap: wrap;
@@ -601,30 +620,141 @@
     h1 { font-size: 44px; }
   }
 
+  /*
+   * 平板 / 手机：文案优先。
+   *
+   * 原先这里用 order:-1 把唱片提到最前，390px 屏上一块 300px 高的唱片把首屏
+   * 吃满——标题和两个下载按钮全被挤到第二屏，落地页最该点的东西要滑一下才看得见。
+   * 改成文案在前、唱片跟着按钮当收尾，唱片缩到 200px 以内，波形条直接收掉
+   * （纯装饰，手机上只占高度）。
+   */
   @media (max-width: 860px) {
     .nav-links { display: none; }
-    .hero { padding: 56px 0 48px; }
-    .hero-in { grid-template-columns: minmax(0, 1fr); }
-    .stage { order: -1; height: 300px; }
-    .disc { width: min(260px, 66%); }
-    .sec { padding: 64px 0; }
+    .nav-burger {
+      display: grid;
+      place-items: center;
+      width: 36px; height: 36px;
+      padding: 0;
+      margin-left: 8px;
+      border-radius: 10px;
+      border: 1px solid var(--line-hi);
+      background: var(--card-hi);
+      color: var(--fg);
+      cursor: pointer;
+      flex: none;
+    }
+    .nav-burger svg { width: 18px; height: 18px; }
+    .nav-menu {
+      display: block;
+      position: absolute;
+      left: 0; right: 0;
+      top: 100%;
+      padding: 4px 0 8px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      /* 不透明：半透明时底下的 H1 会透出来，看着像没盖住 */
+      background: var(--bg);
+      box-shadow: 0 18px 40px rgba(0, 0, 0, .55);
+    }
+    .nav-menu[hidden] { display: none; }
+    .nav-menu a {
+      display: block;
+      padding: 13px 24px;
+      font-size: 15px;
+      color: var(--fg-2);
+    }
+    .nav-menu a:active { color: var(--fg); background: rgba(255, 255, 255, .05); }
+
+    .nav-cta { margin-left: auto; }
+
+    h1 { font-size: 38px; }
+    .hero { padding: 44px 0 44px; }
+    .hero-in { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .stage { order: 0; height: auto; margin-top: 40px; }
+    .stage-glow { width: 260px; height: 260px; filter: blur(24px); }
+    .disc { width: min(200px, 58%); }
+    .arm { width: 42%; }
+    .waves { display: none; }
+
+    .sec { padding: 62px 0; }
+    .sec-head { margin-bottom: 34px; }
     .dl-grid { grid-template-columns: minmax(0, 1fr); }
+    .dl, .dl.wide { grid-column: auto; }
     .stats-in { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .stat { padding: 20px 18px 20px 0; }
     .stat:nth-child(2n) { border-right: 0; }
     .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   }
 
-  @media (max-width: 560px) {
+  /*
+   * 手机（≤600）。两处结构性改动：
+   *
+   * 1. 特性条 2×2 → 单列。两列时「六个平台」那格要写
+   *    Windows / macOS / 安卓 / iPhone / 车机 / 平板，170px 宽折成三行，
+   *    跟旁边那格高度对不齐，整条看起来是乱的。
+   * 2. 平台卡 1 列 → 2 列 × 3 行。单列 6 张要 720px，手机上光平台区就滑掉一屏。
+   */
+  @media (max-width: 600px) {
     .wrap { padding: 0 18px; }
-    h1 { font-size: 34px; }
-    h2 { font-size: 25px; }
-    .lede { font-size: 15.5px; }
-    .cta-row .btn { flex: 1 1 100%; justify-content: center; }
-    .features, .platforms { grid-template-columns: minmax(0, 1fr); }
-    .sec { padding: 52px 0; }
-    .sec-head { margin-bottom: 32px; }
+    .nav-in { height: 56px; gap: 10px; }
+    .brand { font-size: 15px; }
+    .brand img { width: 24px; height: 24px; }
+
+    h1 { font-size: 31px; line-height: 1.28; }
+    h2 { font-size: 23px; }
+    .lede { font-size: 15px; line-height: 1.72; }
+    .eyebrow { font-size: 12px; }
+
+    .hero { padding: 32px 0 40px; }
+    .cta-row { gap: 10px; }
+    .cta-row .btn { flex: 1 1 100%; justify-content: center; height: 50px; }
+    .fineprint { gap: 8px 14px; font-size: 12px; }
+    .stage { margin-top: 32px; }
+    .disc { width: min(180px, 54%); }
+
+    .stats-in { grid-template-columns: minmax(0, 1fr); }
+    .stat {
+      padding: 14px 0;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .stat:last-child { border-bottom: 0; }
+    .stat b { display: inline; font-size: 15.5px; margin: 0 8px 0 0; }
+    .stat span { font-size: 12.5px; }
+
+    .sec { padding: 48px 0; }
+    .sec-head { margin-bottom: 26px; }
+    .sec-tag { margin-bottom: 10px; }
+
+    .features { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .feat { padding: 16px 16px 18px; border-radius: 14px; }
+    .feat-ico { width: 32px; height: 32px; border-radius: 9px; margin-bottom: 11px; }
+    .feat-ico svg { width: 16px; height: 16px; }
+    .feat h3 { font-size: 14.5px; margin-bottom: 5px; }
+    .feat p { font-size: 13px; line-height: 1.6; }
+
+    .platforms { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .plat { padding: 12px; gap: 9px; border-radius: 12px; }
+    .plat-ico { width: 30px; height: 30px; border-radius: 8px; }
+    .plat-ico svg { width: 15px; height: 15px; }
+    .plat b { font-size: 13px; line-height: 1.35; }
+    .plat span { display: block; font-size: 11px; line-height: 1.35; }
+
+    .dl-grid { gap: 12px; }
+    .dl { padding: 16px; border-radius: 16px; }
+    .dl-top { margin-bottom: 12px; gap: 9px; }
+    .dl-ico { width: 34px; height: 34px; border-radius: 10px; }
+    .dl-ico svg { width: 17px; height: 17px; }
+    .dl h3 { font-size: 15px; }
+    .dl-note { font-size: 12.5px; margin-bottom: 16px; }
+    .dl .btn { height: 44px; }
+
     .wave-sm { display: none; }
+  }
+
+  /* 手指点按不要出蓝色高亮块，按下反馈各自由 :active 处理 */
+  .btn, .nav-cta, .nav-burger, .nav-menu a, .plat, .feat, summary {
+    -webkit-tap-highlight-color: transparent;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -649,6 +779,15 @@
       <a href="#faq">常见问题</a>
     </div>
     <a class="nav-cta" href="#download">下载</a>
+    <button class="nav-burger" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="nav-menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+    </button>
+  </div>
+  <div class="nav-menu" id="nav-menu" hidden>
+    <a href="#features">功能</a>
+    <a href="#platforms">平台支持</a>
+    <a href="#download">下载</a>
+    <a href="#faq">常见问题</a>
   </div>
 </nav>
 
@@ -658,7 +797,7 @@
     <div>
       <div class="eyebrow">
         <i class="dot"></i>
-        <span data-dl-headline>v0.6.104 · 已支持平板大屏</span>
+        <span data-dl-headline>v0.6.111 · 熄屏与锁屏播放</span>
       </div>
       <h1>音乐，回到<br><span class="hl">你自己</span>手上。</h1>
       <p class="lede">
@@ -771,8 +910,8 @@
       <span>60Hz 到 14kHz，逐段可调</span>
     </div>
     <div class="stat">
-      <b>四端一致</b>
-      <span>Windows / 安卓手机 / 车机 / 平板</span>
+      <b>六个平台</b>
+      <span>Windows / macOS / 安卓 / iPhone / 车机 / 平板</span>
     </div>
   </div>
 </div>
@@ -863,14 +1002,14 @@
       <div class="sec-head">
         <div class="sec-tag">Platforms</div>
         <h2>装在哪儿都能用</h2>
-        <p class="sec-desc">Windows 与 Android 共用同一份前端，设置、歌单、播放习惯都跟着你走。</p>
+        <p class="sec-desc">同一份前端跑在 Windows、macOS、安卓与 iPhone 上，设置、歌单、播放习惯都跟着你走。</p>
       </div>
       <div class="platforms">
         <div class="plat">
           <div class="plat-ico">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="8" height="7" rx="1"/><rect x="13" y="4" width="8" height="7" rx="1"/><rect x="3" y="13" width="8" height="7" rx="1"/><rect x="13" y="13" width="8" height="7" rx="1"/></svg>
           </div>
-          <div><b>Windows</b><span>Windows 10 / 11 · x64</span></div>
+          <div><b>Windows</b><span>Windows 10 / 11</span></div>
         </div>
         <div class="plat">
           <div class="plat-ico">
@@ -889,6 +1028,18 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 20.5h8"/></svg>
           </div>
           <div><b>平板</b><span>横竖屏自适应排版</span></div>
+        </div>
+        <div class="plat">
+          <div class="plat-ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2.5" width="11" height="19" rx="2.6"/><path d="M10.5 18.5h3"/></svg>
+          </div>
+          <div><b>iPhone</b><span>iOS 16.2+ · 需自签名</span></div>
+        </div>
+        <div class="plat">
+          <div class="plat-ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="11" rx="1.8"/><path d="M2 19h20"/></svg>
+          </div>
+          <div><b>macOS</b><span>Apple / Intel 通用</span></div>
         </div>
       </div>
     </div>
@@ -951,10 +1102,53 @@
               <div class="dl-meta"><span data-dl-ver="windows">v0.5.25</span><span>·</span><span data-dl-size="windows">5.6 MB</span></div>
             </div>
           </div>
-          <p class="dl-note">支持桌面歌词、全局媒体键与本地曲库。桌面版功能更新慢于安卓，正在对齐中。</p>
+          <p class="dl-note">支持桌面歌词、全局媒体键与本地曲库。安装包没有做数字签名，Windows 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。</p>
           <a class="btn btn-ghost" data-dl="windows" href="#download">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/></svg>
             下载安装包
+          </a>
+        </article>
+
+        <!--
+          Apple 两端的包都是未签名的，卡片上必须写清楚：
+          用户下载后装不上，比下载不到更糟。文案按「说清楚要做什么」写，不做承诺。
+        -->
+        <article class="dl wide">
+          <div class="dl-top">
+            <div class="dl-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2.5" width="11" height="19" rx="2.6"/><path d="M10.5 18.5h3"/></svg>
+            </div>
+            <div>
+              <h3>iPhone 版<span class="badge gray">未签名</span></h3>
+              <div class="dl-meta"><span data-dl-ver="ios">v0.5.25</span><span>·</span><span data-dl-size="ios">4.6 MB</span></div>
+            </div>
+          </div>
+          <p class="dl-note">
+            只提供未签名 IPA。装之前要先用自己的 Apple ID 签一次名——Sideloadly、爱思助手、AltStore 都行，
+            教程在<a href="#faq" style="color:var(--accent)">常见问题</a>里。签名后的 App 有效期 7 天，到期重签即可。
+          </p>
+          <a class="btn btn-ghost" data-dl="ios" href="#download">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/></svg>
+            下载 IPA
+          </a>
+        </article>
+
+        <article class="dl wide">
+          <div class="dl-top">
+            <div class="dl-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="11" rx="1.8"/><path d="M2 19h20"/></svg>
+            </div>
+            <div>
+              <h3>macOS 版<span class="badge gray">未签名</span></h3>
+              <div class="dl-meta"><span data-dl-ver="macos">v0.5.25</span><span>·</span><span data-dl-size="macos">11 MB</span></div>
+            </div>
+          </div>
+          <p class="dl-note">
+            Apple 芯片与 Intel 通用。首次打开会被 Gatekeeper 拦下：在访达里右键图标选「打开」，
+            或到「系统设置 → 隐私与安全性」点「仍要打开」。macOS 26 也能用。</p>
+          <a class="btn btn-ghost" data-dl="macos" href="#download">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 19h16"/></svg>
+            下载 dmg
           </a>
         </article>
       </div>
@@ -982,14 +1176,28 @@
           <summary>不上架应用商店，怎么安装？</summary>
           <p>
             安卓端下载 APK 后直接安装即可，系统可能会提示「未知来源应用」，在安装界面允许一次即可。
-            Windows 端下载的是 Tauri 打包的安装程序，体积比 Electron 方案小很多，也不需要额外装运行库。
+            Windows 端下载的是 Tauri 打包的安装程序，体积比 Electron 方案小很多，也不需要额外装运行库；
+            安装包没做数字签名，SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」。
+            macOS 端是 dmg，拖进「应用程序」后首次打开要右键 →「打开」。
+          </p>
+        </details>
+        <details>
+          <summary>iPhone 上怎么安装？</summary>
+          <p>
+            疏音没有 Apple 开发者账号，所以提供的是未签名 IPA，需要你自己签一次名。
+            电脑上装 Sideloadly（或爱思助手），手机用数据线连上电脑，把下载的 IPA 拖进去，
+            填自己的 Apple ID，点开始就行。免费 Apple ID 签出来的 App 有效期 7 天，到期重新签一次即可，
+            本地曲库、歌单和收藏都在沙箱里，不会因为重签丢失。
+            <br>
+            灵动岛与锁屏「正在播放」需要 iOS 16.2 及以上；灵动岛的外观只有 iPhone 14 Pro 及之后的机型才有，
+            其余机型显示为锁屏上的实时活动卡片，功能是同一套。
           </p>
         </details>
         <details>
           <summary>我的数据会被上传吗？</summary>
           <p>
-            不会。曲库索引、播放记录、收藏都只存在本机。云同步是可选项，而且用的是你自己的云环境——
-            数据在你自己的账号下，疏音没有中转服务器。
+            曲库索引、播放记录、收藏、主题、音效参数都只存在本机。云同步是可选项，用的是你自己的云环境，
+            数据在你自己的账号下——疏音没有中转服务器，也没有账号体系，不注册就能用。
           </p>
         </details>
         <details>
@@ -1000,10 +1208,11 @@
           </p>
         </details>
         <details>
-          <summary>为什么桌面版版本号比安卓低？</summary>
+          <summary>为什么各平台的版本号不一样？</summary>
           <p>
-            两个端的历史版本线不同。最近一轮改动（平板大屏排版、五段均衡器、切后台不停播）先落在安卓上，
-            桌面端正在对齐，版本号会在下一次发版时接上。
+            各端是从不同时间点接进来的，版本号各走一条线：安卓迭代最久，桌面端和 iOS 端起点更晚，
+            所以数字不能横向比较。另外桌面端有几项 Windows 专属能力（壁纸嵌入、全局快捷键、托盘点歌）
+            在 macOS 上没有对应的系统接口，功能不是完全等价——这一点以各自的功能说明为准，不看版本号。
           </p>
         </details>
       </div>
@@ -1045,6 +1254,38 @@
     window.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
   })();
+
+  /*
+   * 窄屏汉堡菜单。
+   *
+   * 面板用 [hidden] 控制而不是只管 class：不加这个属性，键盘 Tab 和读屏还会
+   * 摸到收起状态下的链接。点任意锚点后立刻收起，否则面板会盖在刚跳过去的内容上。
+   * 点面板外部也收起——手机上手指一滑就离开导航，留着面板挡视线。
+   */
+  (function () {
+    var burger = document.querySelector('.nav-burger');
+    var menu = document.getElementById('nav-menu');
+    if (!burger || !menu) return;
+
+    function setOpen(open) {
+      menu.hidden = !open;
+      burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    burger.addEventListener('click', function () {
+      setOpen(menu.hidden);
+    });
+
+    menu.addEventListener('click', function (e) {
+      if (e.target.closest('a')) setOpen(false);
+    });
+
+    document.addEventListener('click', function (e) {
+      if (menu.hidden) return;
+      if (menu.contains(e.target) || burger.contains(e.target)) return;
+      setOpen(false);
+    });
+  })();
 </script>
 
 <script>
@@ -1052,7 +1293,7 @@
    * 下载地址全部来自同目录的 downloads.json —— 页面本身不携带安装包。
    *
    * 这样页面和安装包可以分开托管：页面放静态托管（几十 KB，流量可忽略），
-   * 安装包放 Gitee / GitHub 的发行版（几十 MB，不占托管额度）。发版时只改
+   * 安装包放 Gitee 的发行版（几十 MB，不占托管额度）。发版时只改
    * downloads.json 一个文件，不用动这个 HTML。
    *
    * 取不到配置时按钮降级成灰态，而不是跳到 404 —— 先传页面、后配地址也不会出丑。
@@ -1105,7 +1346,7 @@
                 var mir = document.createElement('a');
                 mir.className = 'dl-mirror';
                 mir.href = it.mirror;
-                mir.textContent = 'GitHub 慢？走 Gitee 国内线路';
+                mir.textContent = '下不动？换备用线路';
                 el.parentNode.insertBefore(mir, el.nextSibling);
               }
             }

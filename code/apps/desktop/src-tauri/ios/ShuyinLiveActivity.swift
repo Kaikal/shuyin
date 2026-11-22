@@ -30,6 +30,9 @@ enum ShuyinLive {
         let album: String
         let art: String
         let playing: Bool
+        /// 当前那句歌词。**可选**是有意的：旧前端/Rust 没带这个字段时，
+        /// 只是锁屏少一行词，不该让整条 activity 解码失败（那会连封面歌名都没了）。
+        let line: String?
         let position: Double
         let duration: Double
         let anchor: Double
@@ -41,6 +44,7 @@ enum ShuyinLive {
                 album: album,
                 art: art,
                 playing: playing,
+                line: line ?? "",
                 position: position,
                 duration: duration,
                 anchor: anchor

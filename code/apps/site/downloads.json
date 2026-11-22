@@ -1,5 +1,5 @@
 {
-  "base": "https://github.com/Kaikal/shuyin/releases/download",
+  "base": "https://gitee.com/ghpgitee/shuyin-update/releases/download",
   "headline": "v0.6.111 · 熄屏与锁屏播放修复",
   "items": [
     {
@@ -7,23 +7,39 @@
       "version": "0.6.111",
       "tag": "v0.6.111",
       "file": "shuyin-android-0.6.111.apk",
-      "size": 4179744,
-      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-android-0.6.111.apk"
+      "size": 4165215,
+      "mirror": ""
     },
     {
       "id": "car",
       "version": "0.6.111",
       "tag": "v0.6.111",
       "file": "shuyin-car-0.6.111.apk",
-      "size": 4179724,
-      "mirror": "https://gitee.com/ghpgitee/shuyin-update/raw/master/apk/shuyin-car-0.6.111.apk"
+      "size": 4165347,
+      "mirror": ""
     },
     {
       "id": "windows",
       "version": "0.5.25",
       "tag": "v0.5.25",
       "file": "shuyin-windows-0.5.25.exe",
-      "size": 5890407,
+      "size": 5929455,
+      "mirror": ""
+    },
+    {
+      "id": "ios",
+      "version": "0.5.25",
+      "tag": "v0.5.25",
+      "file": "shuyin-ios-0.5.25.ipa",
+      "size": 4816453,
+      "mirror": ""
+    },
+    {
+      "id": "macos",
+      "version": "0.5.25",
+      "tag": "v0.5.25",
+      "file": "shuyin-macos-0.5.25.dmg",
+      "size": 10751042,
       "mirror": ""
     }
   ]

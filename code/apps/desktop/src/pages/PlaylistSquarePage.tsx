@@ -17,7 +17,7 @@
  * 「还有没有下一页」由平台层算好（`hasMore`），这一页不自己猜。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { PlatformBusyError } from '@shuyin/lx-provider'
+import { PlatformBusyError, HttpError } from '@shuyin/lx-provider'
 import type { HotPlaylistItem, PlatformSource, PlaylistDetail, RankListItem } from '@shuyin/lx-provider'
 import { apiFor, dailyRecommend, platformName } from '../lib/online'
 import { useAccount } from '../lib/platformAccount'
@@ -148,13 +148,21 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   /** 读上次选的平台（没选过就网易云——推荐位最稳，不用登录也有内容） */
+  const [platReady, setPlatReady] = useState(false)
   useEffect(() => {
-    void settings.get<PlatformSource>(KEYS.squarePlatform).then(v => {
-      if (v && HOT_PLATFORMS.includes(v)) setPlatform(v)
-    })
+    void settings.get<PlatformSource>(KEYS.squarePlatform)
+      .then(v => {
+        if (v && HOT_PLATFORMS.includes(v)) setPlatform(v)
+      })
+      .catch(() => { /* 读不到就用默认的网易云 */ })
+      /* 读盘失败也必须放行，否则这一页永远不加载 */
+      .finally(() => setPlatReady(true))
   }, [])
 
-  const load = useCallback(async (p: PlatformSource, next: number, append: boolean) => {
+  /* 自引用重试用：`load` 里要再调自己，直接用标识符会被 TDZ/依赖检查缠住 */
+  const loadRef = useRef<((p: PlatformSource, next: number, append: boolean, retry?: number) => Promise<void>) | null>(null)
+
+  const load = useCallback(async (p: PlatformSource, next: number, append: boolean, retry = 0) => {
     const api = apiFor(p)
     if (!api?.getHotPlaylists) {
       setErr('该平台暂不支持热门歌单')
@@ -173,6 +181,7 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
       setList([])
       seen.current = new Set()
     }
+    let retryLater = false
     try {
       const r = await api.getHotPlaylists(next, PAGE_SIZE)
       if (id !== req.current) return
@@ -195,26 +204,57 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
       setPage(next)
     } catch (e) {
       if (id !== req.current) return
+      /*
+       * 首屏偶发失败先**自己再要一次**（1.5 秒后）。
+       *
+       * 平台风控最常见的形态就是「第一次回空 / 503，隔一两秒再来就好了」——
+       * 用户「第一次打开报错、点重试又好了」遇到的就是这个。自动重试成功的话
+       * 他什么都看不见；只有第二次也失败才亮红条。
+       *
+       * 只对首页重试：翻页重试会让底部「正在加载更多…」闪两次。
+       */
+      if (!append && retry < 1) {
+        retryLater = true
+        /* 重试是同一次「首屏加载」的延续：不清 list、不亮红条、不停 loading，
+           用户看到的一直是骨架屏，直到成功或第二次也失败 */
+        window.setTimeout(() => { void loadRef.current?.(p, next, append, retry + 1) }, 1500)
+        return
+      }
       if (e instanceof PlatformBusyError) {
         setErr('这个平台暂时被限流了，等一两分钟再试')
+      } else if (e instanceof HttpError) {
+        /*
+         * 平台把底层状态码抛上来时，原文是「请求失败 503：<HTML 片段>」——
+         * 用户看到一屏乱码，也不知道能不能自救。按状态码分成两句人话：
+         * 5xx / 204（风控惯用「200 + 空 body」）是可以直接点重试的，
+         * 4xx 是接口变了或参数不对，重试没用。
+         */
+        setErr(e.status >= 500 || e.status === 204
+          ? `${platformName(p)}这会儿有点忙，点「重试」再要一次`
+          : `${platformName(p)}返回了异常（${e.status}），稍后再试`)
       } else {
         setErr(e instanceof Error ? e.message : String(e))
       }
       if (!append) setList([])
     } finally {
       moreBusy.current = false
-      if (id === req.current) {
+      /* 要自动重试就别关 loading：关一下再开，屏幕上会闪一帧空白 */
+      if (id === req.current && !retryLater) {
         setLoading(false)
         setMore(false)
       }
     }
   }, [])
+  /* 让 catch 里那 1.5 秒后的重试能拿到最新的 load（useCallback 的引用） */
+  loadRef.current = load
 
-  /* 首次 + 切平台：重新从第一页拉 */
+  /* 首次 + 切平台：重新从第一页拉。等上次选的平台读出来再发，
+     否则会先按默认的网易云打一次白工的请求（见 platReady 的说明） */
   useEffect(() => {
+    if (!platReady) return
     void load(platform, 1, false)
     scrollRef.current?.scrollTo({ top: 0 })
-  }, [platform, load])
+  }, [platform, load, platReady])
 
   /*
    * 网络回来就自动重取一次。
@@ -228,24 +268,37 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
     return () => window.removeEventListener('online', up)
   }, [platform, load])
 
-  /* 排行榜和歌单是两次独立请求：榜单慢/挂了不该拦住歌单 */
+  /*
+   * 排行榜和歌单是两次独立请求：榜单慢/挂了不该拦住歌单。
+   *
+   * **但要错开**：三家国内平台的推荐接口都有「同一秒内连续请求就判成爬虫、
+   * 回 200 + 空 body」的风控，而进广场的一瞬间本来会同时打出三发
+   * （热门歌单 / 排行榜 / 每日推荐）。实测网易云热门歌单「第一次必失败、
+   * 点重试就好」就是撞上了这个窗口。让热门歌单先走，另外两发各往后排一点。
+   */
   useEffect(() => {
+    if (!platReady) return
     const api = apiFor(platform)
     setRanks([])
     setRankOpen(false)
-    if (!api?.getRanklists) return
+    const getRanks = api?.getRanklists?.bind(api)
+    if (!getRanks) return
     let dead = false
-    api.getRanklists()
-      .then(r => { if (!dead) setRanks(r.list) })
-      .catch(() => { if (!dead) setRanks([]) })
-    return () => { dead = true }
-  }, [platform])
+    const timer = window.setTimeout(() => {
+      if (dead) return
+      getRanks()
+        .then(r => { if (!dead) setRanks(r.list) })
+        .catch(() => { if (!dead) setRanks([]) })
+    }, 350)
+    return () => { dead = true; window.clearTimeout(timer) }
+  }, [platform, platReady])
 
   /* 每日推荐：默认**登录之后才有**，没登录和平台不支持时整块不出现。
      手机 App 里不登录就没有每日推荐，这边拿公共推荐流顶替只会让人
      拿它跟 App 逐首对照。例外是酷我（`dailyWithoutLogin: true`）：
      它的日推是免登录榜单池洗出来的，不登录也放行。 */
   useEffect(() => {
+    if (!platReady) return
     setDaily(null)
     const api = apiFor(platform)
     const okDaily = !!api?.getDailyRecommend
@@ -253,12 +306,16 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
     if (!okDaily) { setDailyLoad(false); return }
     setDailyLoad(true)
     let dead = false
-    dailyRecommend(platform)
-      .then(d => { if (!dead) { setDaily(d); setDailyLoad(false) } })
-      // 取不到就整块不显示：这一段不是主内容，不弹错误，也不拿别的歌单顶替
-      .catch(() => { if (!dead) setDailyLoad(false) })
-    return () => { dead = true }
-  }, [platform, account?.cookie])
+    /* 排在热门歌单和排行榜之后（见排行榜那段的风控说明） */
+    const timer = window.setTimeout(() => {
+      if (dead) return
+      dailyRecommend(platform)
+        .then(d => { if (!dead) { setDaily(d); setDailyLoad(false) } })
+        // 取不到就整块不显示：这一段不是主内容，不弹错误，也不拿别的歌单顶替
+        .catch(() => { if (!dead) setDailyLoad(false) })
+    }, 700)
+    return () => { dead = true; window.clearTimeout(timer) }
+  }, [platform, account?.cookie, platReady])
 
   /*
    * 「为你推荐」这一段已经从**歌单广场**撤掉。
