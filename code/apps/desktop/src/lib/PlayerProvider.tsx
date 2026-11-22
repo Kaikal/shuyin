@@ -127,6 +127,17 @@ interface PlayerCtx {
   /** 播放失败提示（一次性；UI 读走后自动清理） */
   lastError: string | null
   clearError(): void
+  /**
+   * **用户按「停止」**：把这一轮取链连同它派生出来的自动行为一起撤掉。
+   *
+   * 取链失败之后，前端会自己排两件事：6 秒后×2 的「网回来再试」，以及 3 秒后的
+   * 「自动切下一首」。如果一首都播不了（iOS 没导音源、断网），这两件事会互相
+   * 接着来，用户看到的是「一直在加载 / 自己一首首往下跳」，界面上却没有任何
+   * 能把它停下来的按钮——`clearError` 只是把红条收掉，机器还在底下转。
+   * 这个函数是那颗真正能停的按钮：清定时器、作废在途结果、禁掉后续自动动作、
+   * 再让原生停掉。
+   */
+  stopPlayback(): void
   /** 当前曲目的歌词（本地 lrc/内嵌 → 在线兜底），全应用共用一份 */
   lyrics: LyricsDoc | null
   lyricsLoading: boolean
@@ -840,7 +851,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
            * 一次失败就把整条队列往下刷 5 首，用户看到的是「一打开就自己乱跳」。
            * 启动失败就静静停在当前这首，点播放会重来一遍，那次是真有准备的。
            */
-          const canSkip = !opts?.restore && queueLenRef.current > 1 && pullFail.current <= 5 && skipToNext.current != null
+          /*
+           * 用户已经按过暂停 / 停止：**不许再自己往下跳**。
+           *
+           * 这一条是「停不下来」的另一半：失败分支排的 3 秒跳歌倒计时是独立定时器，
+           * 用户在那 3 秒里按了暂停并不会把它收掉，于是歌自己换掉、下一首继续
+           * 转圈失败、再排下一跳。`autoCancel` 就是「用户最后一下是停」，它既然
+           * 立着，这里就不能排（真要让它在加载完之后播，用户再点一下就行）。
+           */
+          const canSkip = !opts?.restore && !autoCancel.current
+            && queueLenRef.current > 1 && pullFail.current <= 5 && skipToNext.current != null
           /* 取链失败也要留痕：不然「点了下一首就没声音」只能靠猜是网络还是音源 */
           void bridge.trace(
             `loadfail ep=${ep} idx=${index} why=${why} pull=${pullFail.current} skip=${canSkip ? 1 : 0}`
@@ -2371,6 +2391,45 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const clearError = useCallback(() => setLastError(null), [])
 
+  /**
+   * 用户按「停止」：真的把机器停下来。
+   *
+   * 为什么需要它（2026-11-22 iOS 实测反馈）：一首播不了的歌会让前端自己排两条
+   * 自动动作——「6 秒后重试（共两次）」和「3 秒后自动切下一首」。两条都排在
+   * `startLoad` 的失败分支里，跟界面上那条红提示**没有联动**：用户点「关闭」
+   * 只是把文字收掉，几秒后它又自己开始加载、又失败、又跳下一首，一串歌排着队
+   * 转圈，而他没有任何按钮能让它停。这里一次性把这几样都掐掉：
+   *   · 定时器（自动跳歌 / 自动重试 / 转圈兜底）；
+   *   · 在途的取链结果（`onlineSeq` 递增后，回来那一轮自己作废）；
+   *   · 迟到的 `play_url`（`bumpEpoch` + `autoCancel`，原生也强制静音）；
+   *   · 原生的播放器（`stop`）。
+   * 之后要听歌就正常点一首，`resumeIntent()` 会把暂停锁解开。
+   */
+  const stopPlayback = useCallback(() => {
+    autoCancel.current = true
+    bumpEpoch()
+    onlineSeq.current += 1
+    window.clearTimeout(skipTimer.current)
+    skipTimer.current = 0
+    window.clearTimeout(resumeGuard.current)
+    resumeGuard.current = 0
+    failRetry.current = null
+    retryTries.current = { key: '', n: 0 }
+    playWant.current = null
+    /*
+     * 「已加载」这一笔要抹掉：原生那边刚被 stop 掉了，播放器已经不在。
+     * 留着它，用户再点播放会走「原生手里就是这首 → 一个 resume 就够了」那条捷径，
+     * 而 resume 落到一个没有音源的播放器上什么都不会发生 —— 又一次「点了没反应」。
+     */
+    loadedRef.current = null
+    stopLoading()
+    snapRef.current = { ...snapRef.current, playing: false }
+    setSnapshot(s => (s.playing ? { ...s, playing: false } : s))
+    setLastError(null)
+    void bridge.trace('stop user')
+    void bridge.stop()
+  }, [bumpEpoch, stopLoading])
+
   /* ---------------- 动作 ---------------- */
 
   const playList = useCallback((tracks: LocalTrack[], index: number) => {
@@ -2529,6 +2588,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!nowPlaying && (loadingRef.current || (live?.want === true && live?.playing !== true))) {
       playWant.current = { want: false, until: performance.now() + 800 }
       autoCancel.current = true
+      /* 这一下也是「停」：把失败分支排的自动跳歌 / 自动重试一并撤掉，
+         否则转圈停了、3 秒后它又自己换一首继续转（见 startLoad 的 canSkip） */
+      window.clearTimeout(skipTimer.current)
+      skipTimer.current = 0
+      failRetry.current = null
       snapRef.current = { ...snapRef.current, playing: false }
       setSnapshot(s => (s.playing ? { ...s, playing: false } : s))
       void bridge.pause(ep, 'toggle:cancel-loading')
@@ -2586,6 +2650,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
          */
         const start = resumePos.current || (snapRef.current.position > 0 ? snapRef.current.position : 0)
         resumePos.current = 0
+        /* 用户按了播放 = 要出声：解开暂停锁（按过「停止」之后锁是立着的，
+           不解的话这一轮会老老实实取链、然后静音，又是「点了没反应」） */
+        resumeIntent()
         loadedRef.current = trackKey(t)
         lastPlayedIndex.current = queueState.index
         setSnapshot(s => ({ ...s, playing: true, position: start || s.position }))
@@ -2621,9 +2688,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
        * 置上这个标记，那一轮只建播放器不出声（见 autoCancel）。
        */
       autoCancel.current = true
+      /* 暂停 = 别再自动换歌：上一首失败排的 3 秒跳歌倒计时在这里撤掉 */
+      window.clearTimeout(skipTimer.current)
+      skipTimer.current = 0
+      failRetry.current = null
       void bridge.pause(ep, 'toggle:pause')
     }
-  }, [snapshot.duration, queueState, bumpEpoch])
+  }, [snapshot.duration, queueState, bumpEpoch, resumeIntent])
 
   const seek = useCallback((secs: number) => {
     setSnapshot(s => ({ ...s, position: secs, }))
@@ -2970,7 +3041,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     muted, toggleMute, nudgeVolume,
     setScrubbing: (b: boolean) => { scrubRef.current = b },
     addToQueue, addManyToQueue, reorder, remove, removeTracks, clear, refreshLibrary, scan, rescan, removeTrack,
-    lastError, clearError, lyrics, lyricsLoading, reloadLyrics,
+    lastError, clearError, stopPlayback, lyrics, lyricsLoading, reloadLyrics,
     sleep, setSleep, audioGuard, setAudioGuard,
   }), [queueState, snapshot, scanning, scanProgress, library, libraryVersion, lastScanAt, lastRoots,
     lastSkipped, lastTruncated, scanScope, loading,
@@ -2980,7 +3051,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     muted, toggleMute, nudgeVolume,
     addToQueue, addManyToQueue, reorder, remove,
     removeTracks, clear,
-    refreshLibrary, scan, rescan, removeTrack, lastError, clearError, lyrics, lyricsLoading, reloadLyrics,
+    refreshLibrary, scan, rescan, removeTrack, lastError, clearError, stopPlayback, lyrics, lyricsLoading, reloadLyrics,
     sleep, setSleep, audioGuard, setAudioGuard])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

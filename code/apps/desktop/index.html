@@ -2,7 +2,17 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      viewport-fit=cover 是 iOS 全屏的前提，不能省。
+
+      iOS 的 WKWebView 在没有 viewport-fit=cover 时会自己把网页内容裁进安全区
+      （状态栏下方到 Home 指示条上方），而它自己的底色是白的：于是 iPhone 上
+      上下各露一条白边、整页被压小一圈（2026-11-22 用户截图）。声明 cover 之后
+      网页铺满整块屏，env(safe-area-inset-*) 也才开始返回真实值，
+      样式里的安全区变量（手机壳顶栏、播放页、底部 TAB 都在用）才生效。
+      安卓 WebView 上 env() 恒为 0，这条声明对它没有副作用（安全区由安卓壳写 sy-safe 变量）。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>疏音</title>
     <style>
       /* 启动页固定底色在 HTML 层就位，先于 React 挂载，避免白闪 */

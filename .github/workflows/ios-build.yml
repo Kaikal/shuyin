@@ -54,12 +54,97 @@ jobs:
       - name: Generate iOS project (tauri ios init)
         run: pnpm -F shuyin-desktop tauri ios init --ci
 
-      - name: Patch Info.plist (后台播放音频)
+      - name: Patch Info.plist (中文名 / 状态栏 / 后台音频)
         run: |
-          PLIST=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" | head -1)
+          PLIST=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*" | head -1)
           echo "plist: $PLIST"
-          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PLIST" 2>/dev/null || true
+          python3 - "$PLIST" <<'EOF'
+          import plistlib, sys
+          p = sys.argv[1]
+          d = plistlib.load(open(p, 'rb'))
+          # 桌面/安卓那边的应用名是中文（tl.title=疏音），iOS 只认 Info.plist：
+          # 不写 CFBundleDisplayName 就退回 CFBundleName=Shuyin，桌面上显示成英文
+          d['CFBundleDisplayName'] = '疏音'
+          d['CFBundleName'] = '疏音'
+          # 开发区域跟着改：否则系统弹窗（权限、分享）按英文出
+          d['CFBundleDevelopmentRegion'] = 'zh_CN'
+          d['CFBundleLocalizations'] = ['zh-Hans', 'en']
+          # 页面是全屏深色，状态栏必须用浅色字，否则黑字压黑底看不见
+          d['UIViewControllerBasedStatusBarAppearance'] = False
+          d['UIStatusBarStyle'] = 'UIStatusBarStyleLightContent'
+          modes = d.get('UIBackgroundModes') or []
+          if 'audio' not in modes:
+              modes.append('audio')
+          d['UIBackgroundModes'] = modes
+          plistlib.dump(d, open(p, 'wb'))
+          print('displayName =', d['CFBundleDisplayName'], '| region =', d['CFBundleDevelopmentRegion'])
+          EOF
+
+      - name: Force our app icon into the iOS project
+        run: |
+          ROOT=apps/desktop/src-tauri/gen/apple
+          SRC=apps/desktop/src-tauri/icons/1024x1024.png
+          echo "icon source: $(ls -l "$SRC")"
+          echo "--- 现有 AppIcon 资源（处理前）"
+          find "$ROOT" -name "AppIcon*.png" | head -30
+          find "$ROOT" -type d -name "AppIcon.appiconset"
+          python3 - "$ROOT" "$SRC" <<'EOF'
+          import json, os, re, subprocess, sys
+          root, src = sys.argv[1], sys.argv[2]
+
+          def resize(px, out):
+              subprocess.run(['sips', '-z', str(px), str(px), src, '--out', out],
+                             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+          done = 0
+          # ① 资产目录：按 Contents.json 的 size x scale 把每张都换成我们的图
+          for dirpath, _dirs, _files in os.walk(root):
+              if not dirpath.endswith('.appiconset'):
+                  continue
+              cj = os.path.join(dirpath, 'Contents.json')
+              if not os.path.exists(cj):
+                  continue
+              try:
+                  c = json.load(open(cj, encoding='utf-8'))
+              except Exception as e:
+                  print('skip', cj, e)
+                  continue
+              for im in c.get('images', []):
+                  fn = im.get('filename')
+                  if not fn:
+                      continue
+                  try:
+                      w = float(im.get('size', '0x0').split('x')[0])
+                      s = float(im.get('scale', '1x').rstrip('x'))
+                  except Exception:
+                      continue
+                  px = int(round(w * s))
+                  if px > 0:
+                      resize(px, os.path.join(dirpath, fn))
+                      done += 1
+          # ② 模板散在资源目录里的 AppIcon60x60@2x.png 这类：名字里带尺寸
+          #    这类是 CFBundleIconFiles 的主路径（真机桌面用的就是它），
+          #    iPhone 是 3x 屏，缺 @3x 就只能拿 @2x 拉伸，所以顺手补齐兄弟尺寸。
+          pat = re.compile(r'^AppIcon(\d+)x(\d+)@(\d)x(.*)\.png$')
+          for dirpath, _dirs, files in os.walk(root):
+              if '.appiconset' in dirpath:
+                  continue
+              for fn in list(files):
+                  m = pat.match(fn)
+                  if not m:
+                      continue
+                  w, h, suffix = m.group(1), m.group(2), m.group(4)
+                  for s in ('1', '2', '3'):
+                      px_w = int(round(float(w) * int(s)))
+                      if px_w > 1024:
+                          continue
+                      name = 'AppIcon' + w + 'x' + h + '@' + s + 'x' + suffix + '.png'
+                      resize(px_w, os.path.join(dirpath, name))
+                      done += 1
+          print('已换成疏音图标的张数:', done)
+          EOF
+          echo "--- 处理后"
+          find "$ROOT" -name "AppIcon*.png" -exec ls -l {} \; | head -30
 
       - name: Disable code signing in project
         run: |
@@ -86,6 +171,18 @@ jobs:
       - name: Build for device (unsigned; export step allowed to fail)
         run: |
           pnpm -F shuyin-desktop tauri ios build --ci --target aarch64 --export-method debugging || true
+
+      - name: Verify app bundle (name / icon / status bar)
+        run: |
+          APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
+          echo "app: $APP"
+          for k in CFBundleDisplayName CFBundleName CFBundleDevelopmentRegion UIStatusBarStyle CFBundleIcons; do
+            printf "%s = " "$k"
+            /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null || echo "(缺失)"
+          done
+          echo "--- 包内图标文件"
+          ls -l "$APP"/AppIcon*.png 2>/dev/null || echo "(没有散图，图标走 Assets.car)"
+          ls -l "$APP"/Assets.car 2>/dev/null || true
 
       - name: Package unsigned IPA
         run: |

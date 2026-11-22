@@ -955,7 +955,18 @@ export function App() {
               <button className="app-toast-act" onClick={() => { p.clearError(); p.switchSource() }}>换源</button>
             </>
           )}
-          <button onClick={p.clearError} aria-label="关闭提示">关闭</button>
+          {/*
+            * 最后那颗是**真停止**，不是「把字收起来」。
+            *
+            * 以前这里是「关闭」，点了只清文案：失败分支排的「3 秒后自动切下一首」
+            * 和「6 秒后重试×2」都还在，于是歌自己一首首往下跳、每首都转圈失败，
+            * 用户按完关闭发现根本没停（2026-11-22 iOS 反馈：播不了也停不下来）。
+            * 现在交给 stopPlayback：清定时器 + 作废在途结果 + 原生 stop。
+            */}
+          <button
+            onClick={p.stopPlayback}
+            title="停止加载，并撤掉自动重试 / 自动下一首"
+          >停止</button>
         </div>
       )}
       {/* 非阻断提示：自动降档 / 自动换平台。有错误条时让位，别两条叠一起 */}
