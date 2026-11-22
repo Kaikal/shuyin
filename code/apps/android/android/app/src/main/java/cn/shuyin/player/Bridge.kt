@@ -42,11 +42,75 @@ class Bridge(private val web: WebView) {
         Thread(r, "shuyin-bridge").apply { isDaemon = true }
     }
 
+    /**
+     * **控制命令专用车道。**
+     *
+     * 用户按暂停/续播/切歌，走的是 `Bridge.call` → `dispatch` → `startService`。
+     * 以前这条路和取链、搜索、直链探活、整曲下载**共用一个 12 线程池**，
+     * 于是出现一个在真机上量到的现象（2026-11-15）：
+     *
+     *   · 已缓冲完的歌：按下 → 原生执行 = **25~50ms**
+     *   · 切歌后 1s 内（取链高峰）：按下 → 原生执行 = **800~2600ms**
+     *
+     * 这段时间里池子被几十个阻塞的 HTTP 请求占满（每条 `resolvePlayUrl` 内部
+     * 还有三条泳道，一次切歌就是十几个请求），而「整曲缓存下载」的
+     * `download_track` 会**占着一条线程几十秒不放**。用户听到的就是
+     * 「按了暂停，声音又唱了一两秒才停」——按钮早就乐观翻面了，命令还在排队。
+     *
+     * 所以给控制命令单开一条线程，并把优先级抬到最高：它永远不排队，
+     * 也永远抢在网络线程前面。这几条命令本身只做「发一个 Intent」或「读一个快照」，
+     * 都是微秒级，占不住线程。
+     *
+     * **必须是单线程（FIFO），不能开 2 条**：用户「切歌之后立刻按暂停」会连着发
+     * `play_url`（autoplay=true）和 `pause` 两条命令，两条并发执行时顺序不保证——
+     * 一旦 pause 先落地、`open autoplay=true` 后落地，声音就又自己响起来了，
+     * 正是这轮要修的那个形状。
+     */
+    private val ctrl = Executors.newSingleThreadExecutor() { r ->
+        Thread(r, "shuyin-ctrl").apply {
+            isDaemon = true
+            priority = Thread.MAX_PRIORITY
+        }
+    }
+
+    /**
+     * 下载专用车道，2 条。
+     *
+     * `download_track` 是**阻塞到整个文件传完**的（3~10MB，弱网几十秒），
+     * 放在共享池里等于长期占用一条线程名额：缓存 8 首就是 8 条线程被吃掉，
+     * 取链那边能用的线程瞬间少一半。分开之后两条路互不影响。
+     */
+    private val dlExec = Executors.newFixedThreadPool(2) { r ->
+        Thread(r, "shuyin-dl").apply { isDaemon = true }
+    }
+
+    /**
+     * 走 [ctrl] 的命令：都是「用户按了一下，必须立刻生效」的。
+     *
+     * 判据不是命令大小，而是**延时的可见性**：暂停慢 1 秒用户就听出来了，
+     * 而一次搜索慢 1 秒只是「加载久一点」。
+     */
+    private val CONTROL = setOf(
+        "pause", "resume", "stop", "seek", "set_volume",
+        "play_file", "play_url", "player_state", "spectrum",
+    )
+
     /** 下载进度表：dest → [已写, 总量] */
     private val dl = ConcurrentHashMap<String, LongArray>()
 
     init {
         PlaybackService.emit = { name, json -> emit(name, json) }
+        /*
+         * 音量保护的真值要在 WebView 起来之前就恢复。
+         *
+         * 只靠前端挂载时下发的话，冷启动那几秒（尤其是「启动接着上次播放」自动起播）
+         * 会按默认值走一遍——用户明明关掉了保护，第一首却还是淡入的。
+         */
+        try {
+            AudioEngine.guard = web.context
+                .getSharedPreferences("player", android.content.Context.MODE_PRIVATE)
+                .getBoolean("audio_guard", true)
+        } catch (_: Throwable) { /* 读不到就按默认开 */ }
     }
 
     /* ---------------- 与 JS 的协议 ---------------- */
@@ -71,7 +135,16 @@ class Bridge(private val web: WebView) {
         } catch (_: Exception) {
             JSONObject()
         }
-        pool.execute {
+        /*
+         * 分车道：控制命令 / 下载 / 其余（取链、搜索、扫描……）。
+         * 见 [ctrl] 与 [dlExec] 的注释——「暂停要等几秒」就是混道造成的。
+         */
+        val lane = when {
+            cmd in CONTROL -> ctrl
+            cmd == "download_track" -> dlExec
+            else -> pool
+        }
+        lane.execute {
             try {
                 val out = dispatch(cmd, args)
                 reply(id, true, encode(out))
@@ -134,6 +207,8 @@ class Bridge(private val web: WebView) {
                 "index" to a.optInt("index", -1),
                 "startAt" to a.optDouble("startAt", 0.0),
                 "autoplay" to a.optBoolean("autoplay", true),
+                /* 用户意图代号：比当前旧的加载只准备、不出声（见 PlaybackService.intentEpoch） */
+                "epoch" to a.optLong("epoch", 0L),
             )
             null
         }
@@ -145,11 +220,36 @@ class Bridge(private val web: WebView) {
                 "durationHint" to a.optDouble("durationHint", 0.0),
                 "startAt" to a.optDouble("startAt", 0.0),
                 "autoplay" to a.optBoolean("autoplay", true),
+                "epoch" to a.optLong("epoch", 0L),
             )
             null
         }
-        "pause" -> { send(PlaybackService.ACT_PAUSE); null }
-        "resume" -> { send(PlaybackService.ACT_RESUME); null }
+        /*
+         * `why` 只是日志：排查「自己停下来了」时，光看 `src=frontend pause` 分不清
+         * 是「换歌前的按住」（startLoad）、「用户点的那一下」（toggle）还是兜底里的
+         * 取消。带上发起方，lock.log 里一眼能对上（2026-11-15 又绕了一轮）。
+         */
+        "pause" -> {
+            send(
+                PlaybackService.ACT_PAUSE,
+                "epoch" to a.optLong("epoch", 0L),
+                "why" to a.optString("why", ""),
+            )
+            null
+        }
+        "resume" -> {
+            send(
+                PlaybackService.ACT_RESUME,
+                "epoch" to a.optLong("epoch", 0L),
+                "why" to a.optString("why", ""),
+            )
+            null
+        }
+        /* 前端把关键节点写进 lock.log：两端日志同一条时间轴，才查得动时序问题 */
+        "trace" -> {
+            LockScreen.trace("js " + a.optString("msg", ""))
+            null
+        }
         "stop" -> { send(PlaybackService.ACT_STOP); null }
         "seek" -> { send(PlaybackService.ACT_SEEK, "secs" to a.optDouble("positionSecs", 0.0)); null }
         "set_volume" -> {
@@ -157,6 +257,33 @@ class Bridge(private val web: WebView) {
             null
         }
         "player_state" -> PlaybackService.snapshot
+        /*
+         * 定时关闭。
+         *
+         * **不经过 PlaybackService 的 intent**：这个定时器要在「还没开始播」时也能设
+         * （用户先设 30 分钟再挑歌），而那时服务根本不存在，intent 会把它拉起来、
+         * 又没有任何音源可放，通知栏先闪一张空卡片。真值放在 [SleepTimer]，
+         * 服务那边每 250ms 对一次表（见 PlaybackService.checkSleep）。
+         */
+        "sleep_set" -> {
+            if (a.optBoolean("track", false)) SleepTimer.setEndOfTrack()
+            else SleepTimer.setMinutes(a.optInt("minutes", 0))
+            SleepTimer.state()
+        }
+        "sleep_state" -> SleepTimer.state()
+        /*
+         * 音量保护开关（起播淡入 / 暂停淡出 / 被压低后缓慢回升）。
+         * 真值在 [AudioEngine.guard]，全局静态：换歌重建播放器不受影响。
+         */
+        "audio_guard" -> {
+            val on = a.optBoolean("on", true)
+            AudioEngine.guard = on
+            try {
+                web.context.getSharedPreferences("player", android.content.Context.MODE_PRIVATE)
+                    .edit().putBoolean("audio_guard", on).apply()
+            } catch (_: Throwable) { /* 存不下也不影响本次会话 */ }
+            on
+        }
         /*
          * 频谱：40 段，0..1。
          *
@@ -216,7 +343,14 @@ class Bridge(private val web: WebView) {
          * 整段不经过 JS。返回 null 就够了，前端不等结果。
          */
         "next_prefetch" -> {
-            PlaybackService.instance?.setPrefetch(a.optJSONArray("items") ?: org.json.JSONArray())
+            val items = a.optJSONArray("items") ?: org.json.JSONArray()
+            /*
+             * 服务没起来就先存着，别丢。前端一挂载就算预告，那时常常还没播，
+             * service 尚未 start——原来这里 `instance?.` 一空就整表扔掉，
+             * 后面队列不再变化也就不会重发，原生手里一首都没有（播完即停）。
+             */
+            val svc = PlaybackService.instance
+            if (svc != null) svc.setPrefetch(items) else PlaybackService.pendingPrefetch = items
             null
         }
         "smtc_update" -> {
@@ -235,7 +369,7 @@ class Bridge(private val web: WebView) {
         /* ---- 悬浮歌词（其他应用上层）---- */
         // 当前句 / 下一句 / 本句进度 / 行序奇偶：窗口没开时原生只存不发
         "float_lyric" -> {
-            /* 锁屏页铺多行用的 ±2 上下文（固定 5 条，中间那条是当前句） */
+            /* 锁屏页铺多行用的 ±3 上下文（固定 7 条，中间那条是当前句） */
             val around = ArrayList<String>(NowPlaying.AROUND_N)
             a.optJSONArray("around")?.let { arr ->
                 for (i in 0 until arr.length()) around.add(arr.optString(i, ""))
@@ -248,7 +382,33 @@ class Bridge(private val web: WebView) {
                 a.optBoolean("playing", false),
                 a.optString("title"),
                 around,
+                /* 原生有歌词时间轴时，锁屏那份镜像由自己按播放位置算（更准），
+                   这里只喂悬浮窗，不再回头覆盖 */
+                mirror = !NowPlaying.hasTimeline(),
             )
+            null
+        }
+        /*
+         * 整首歌词的时间轴（一次性，换歌 / 歌词到达时才推）。
+         *
+         * `lines: [{t: 秒, x: 文本}]`，按时间升序。原生拿它 + 播放器位置自己算
+         * 当前句和句内进度——锁屏页的歌词从此不再受前端提交阈值与浏览器节流影响。
+         */
+        "lyric_timeline" -> {
+            val lines = a.optJSONArray("lines")
+            if (lines == null || lines.length() == 0) {
+                NowPlaying.clearTimeline()
+            } else {
+                val n = lines.length()
+                val ts = LongArray(n)
+                val xs = Array(n) { "" }
+                for (i in 0 until n) {
+                    val o = lines.optJSONObject(i) ?: continue
+                    ts[i] = (o.optDouble("t", 0.0) * 1000).toLong()
+                    xs[i] = o.optString("x", "")
+                }
+                NowPlaying.setTimeline(ts, xs)
+            }
             null
         }
         // 开/关（未授权时会跳系统设置页）。返回「切完之后」的开关态，
@@ -258,17 +418,49 @@ class Bridge(private val web: WebView) {
         "float_lyric_state" -> FloatingLyrics.stateJson()
 
         /* ---- 锁屏播放页 ---- */
-        // 立刻打开一次（手动预览；不点亮屏幕，也不会因为开关一变就自己跳过去）
-        "lock_show" -> { LockScreenActivity.preview(Sy.app); null }
-        // 开关态 + 是不是小米 + 小米那边「锁屏显示」放不放行（设置页拿它决定要不要提示）
-        "lock_state" -> LockScreenActivity.stateJson(Sy.app)
+        // 立刻预览一次（手动打开；不点亮屏幕，也不会因为开关一变就自己跳过去）
+        "lock_show" -> { MainActivity.inst?.previewLockPanel(); null }
+        // 开关态 + 是不是小米 + 小米「锁屏显示」放不放行 + 上次拉起有没有被系统拦
+        "lock_state" -> LockScreen.stateJson(Sy.app)
         "lock_toggle" -> {
-            val on = !LockScreenActivity.enabled(Sy.app)
-            LockScreenActivity.setEnabled(Sy.app, on)
-            LockScreenActivity.stateJson(Sy.app)
+            val on = !LockScreen.enabled(Sy.app)
+            /*
+             * 悬浮窗（SAW）没给就**不许打开**（用户 2026-11-21 拍板）。
+             *
+             * 跨应用熄屏拉起靠 SAW 豁免 ROM 的「后台弹出界面」——华为平板实测
+             * 没给时 startActivity 显示成功、锁屏页永远不出来。开一个必然
+             * 不工作的功能还不如把开关按住，顺便把用户带到授权页。
+             */
+            if (on && !android.provider.Settings.canDrawOverlays(Sy.app)) {
+                LockScreen.requestOverlayPerm(Sy.app)
+                LockScreen.stateJson(Sy.app).put("needPermission", true)
+            } else {
+                LockScreen.setEnabled(Sy.app, on)
+                /* 关掉的那一刻用户不该还留在这一屏上（他刚说了不要） */
+                if (!on) MainActivity.inst?.hideLockPanel(false)
+                LockScreen.stateJson(Sy.app)
+            }
         }
-        // 打开系统里「锁屏显示」那一页（小米的权限编辑器）
-        "lock_perm_open" -> JSONObject().put("ok", LockScreenActivity.openPermissionEditor(Sy.app))
+        // 跳系统「显示在其他应用上层」授权页（锁屏页跨应用拉起的前置条件）
+        "overlay_perm_open" -> { LockScreen.requestOverlayPerm(Sy.app); null }
+        // 打开系统里「锁屏显示」那一页（小米的权限编辑器 / 其他系统的应用详情）
+        "lock_perm_open" -> JSONObject().put("ok", LockScreen.openPermissionEditor(Sy.app))
+        /*
+         * 诊断用：现在的歌词镜像 + 熄屏拉起的前置条件。
+         *
+         * release 包在华为不出 logcat，只能靠这个命令把时间轴有没有生效、
+         * 上一次拉起有没有被拦读出来。
+         */
+        "lock_diag" -> JSONObject().apply {
+            put("cur", NowPlaying.cur)
+            put("next", NowPlaying.next)
+            put("pos", NowPlaying.pos)
+            put("prog", NowPlaying.prog.toDouble())
+            put("around", org.json.JSONArray(NowPlaying.around))
+            put("timeline", NowPlaying.hasTimeline())
+            put("enabled", LockScreen.enabled(Sy.app))
+            put("fg", MainActivity.foregroundNow())
+        }
 
         /* ---- 播放页全屏化：隐藏 / 恢复系统栏 ---- */
         // 前端进播放页时 hide=true，退出时 hide=false；隐藏后安全区重算（top→0），
@@ -298,6 +490,62 @@ class Bridge(private val web: WebView) {
 
         /* ---- 版本 / 外链（更新弹窗用，和桌面端 check_update / open_url 对齐）---- */
         "app_version" -> BuildConfig.VERSION_NAME
+        /*
+         * 电池优化白名单（Doze）。
+         *
+         * 为什么必须在设置里给入口：在线曲目是边下边放的，而 Doze 一进入就会
+         * **掐掉后台网络**（wakelock 挡不住，它管的是 CPU 和 WiFi 低功耗，不是网络策略）。
+         * 用户遇到的就是「放着放着停了，本地缓存的歌一点事没有」——因为本地不需要网。
+         * 加入白名单后 Doze 不再限制本应用，这是唯一能根治的一步。
+         */
+        "battery_state" -> JSONObject().put(
+            "ignoring",
+            (Sy.app.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
+                .isIgnoringBatteryOptimizations(Sy.app.packageName),
+        )
+        "battery_open" -> {
+            val pkg = Sy.app.packageName
+            val flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            /*
+             * 「为这个包请求忽略电池优化」的对话框。原生安卓会弹一个「是否允许」的确认框，
+             * 但**华为/荣耀把这个 action 直接重定向到「应用信息」页**（EMUI 14.0.0.770 实测），
+             * 那里一个开关都没有，用户点完只会更迷。
+             */
+            val direct = Intent(
+                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:$pkg"),
+            ).addFlags(flags)
+            /* 「电池优化」列表页：左上角可切「所有应用」，有搜索框，找到疏音点进去选「允许」 */
+            val list = Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                .addFlags(flags)
+            /* 最后的兜底：应用信息页（用户从「耗电详情」也能摸到） */
+            val info = Intent(
+                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:$pkg"),
+            ).addFlags(flags)
+
+            val mfr = (android.os.Build.MANUFACTURER + " " + android.os.Build.BRAND).lowercase()
+            val emui = mfr.contains("huawei") || mfr.contains("honor")
+            fun open(i: Intent): Boolean = try {
+                Sy.app.startActivity(i)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+            /*
+             * 华为先给列表页（那个重定向没救），其余 ROM 先给确认框（少两步）。
+             * 前一个打不开再试下一个，全灭才落到应用信息页。
+             */
+            val order = if (emui) listOf(list, direct, info) else listOf(direct, list, info)
+            order.any { open(it) }
+        }
+        /*
+         * 「解锁后回到锁屏前的应用」这一组已经撤了（连同 PACKAGE_USAGE_STATS 与 PrevApp.kt）。
+         *
+         * 根因：安卓没有「退回上一个应用」的 API，`moveTaskToBack` 语义就是按 Home；
+         * 想还原只能读使用情况访问的应用切换记录，真机上判不准（华为浏览器被判成
+         * 「不可返回」，照样落桌面），还要额外一个系统权限。见 `LockScreen` 里的说明。
+         */
         "open_url" -> {
             val u = a.optString("url")
             if (!u.startsWith("http://") && !u.startsWith("https://")) {
@@ -584,6 +832,7 @@ class Bridge(private val web: WebView) {
                 is Boolean -> i.putExtra(k, v)
                 is Float -> i.putExtra(k, v)
                 is Double -> i.putExtra(k, v)
+                is Long -> i.putExtra(k, v)
             }
         }
         try {

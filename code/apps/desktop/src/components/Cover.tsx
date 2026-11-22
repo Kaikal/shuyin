@@ -2,9 +2,10 @@
  * 封面组件：有真实封面（Rust 导出缓存文件）时显示图片；
  * 否则用确定性多段线性渐变占位（同一曲目跨会话颜色稳定）。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { LocalTrack } from '@shuyin/core'
 import { coverUrlOf } from '../lib/coverUrl'
+import { forgetCover, mediaCacheVersion, subscribeMediaCache } from '../lib/mediaCache'
 
 const PALETTES: Array<[string, string, string]> = [
   ['#2E3F73', '#131A2A', '#0B0E16'],
@@ -49,7 +50,14 @@ export function Cover({ track, size, radius, fill }: {
    * `fill` 的场合没有固定 px，同样按 300 估（黑胶标签实际就在这个量级）。
    */
   const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 3) : 1
-  const url = coverUrlOf(track.cover, Math.round((fill ? 300 : size) * dpr))
+  /*
+   * 封面落盘完成后要**重新取一次地址**：`coverUrlOf` 会优先给本地那份，
+   * 但它是同步查表——不订阅的话，这一帧用的是远端地址，缓存好的本地图
+   * 反而要等下一次重渲染才用上（离线时那一次可能永远等不到）。
+   */
+  const cacheVer = useSyncExternalStore(subscribeMediaCache, mediaCacheVersion, mediaCacheVersion)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const url = useMemo(() => coverUrlOf(track.cover, Math.round((fill ? 300 : size) * dpr)), [track.cover, size, fill, dpr, cacheVer])
   /** 小图那一档：大图拿不到时退一步（QQ 部分老专辑没有 800 那档，会 404） */
   const small = coverUrlOf(track.cover, 500)
   const dim = fill ? '100%' : size
@@ -86,7 +94,17 @@ export function Cover({ track, size, radius, fill }: {
   }, [url, small, n])
 
   const retry = () => {
-    if (!url || n >= 2) return
+    if (!url) return
+    /*
+     * 这张是**本地缓存**那份（不是 http 地址）却加载失败 —— 文件被清缓存删掉了。
+     * 丢掉索引，`coverUrlOf` 下次就会回落到远端地址；硬重试同一个本地路径
+     * 只会三次全失败，然后一直是一块渐变。
+     */
+    if (track.cover && !/^https?:/i.test(url)) {
+      forgetCover(track.cover)
+      return
+    }
+    if (n >= 2) return
     const target: string = url
     const from = n
     if (timer.current) window.clearTimeout(timer.current)

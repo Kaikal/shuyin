@@ -12,11 +12,14 @@
  */
 import { usePlayer } from '../lib/PlayerProvider'
 import { useDownloads } from '../lib/DownloadsProvider'
+import { favRecOf, useFavs } from '../lib/favTracks'
+import { rememberCover } from '../lib/mediaCache'
 import { platformName, toLocalTrack } from '../lib/online'
 import { queueToast } from '../lib/queueToast'
+import { toast } from '../lib/toast'
 import type { SearchSong } from '@shuyin/lx-provider'
 import { ContextMenu, type MenuItem } from './ContextMenu'
-import { IconDownload, IconNext, IconPlay, IconPlus } from './icons'
+import { IconDownload, IconHeart, IconHeartFilled, IconNext, IconPlay, IconPlus } from './icons'
 
 interface Props {
   x: number
@@ -28,8 +31,10 @@ interface Props {
 export function OnlineSongMenu({ x, y, song, onClose }: Props) {
   const p = usePlayer()
   const dl = useDownloads()
+  const favs = useFavs()
   const track = toLocalTrack(song)
   const label = [song.name, song.singer.join(' / ')].filter(Boolean).join(' - ')
+  const faved = favs.has(track.id)
 
   const task = dl.taskOf(track.id)
   const done = task?.status === 'done'
@@ -56,6 +61,25 @@ export function OnlineSongMenu({ x, y, song, onClose }: Props) {
     { id: 'play', label: '立即播放', icon: <IconPlay width={13} height={13} />, onSelect: () => p.playOne(track) },
     { id: 'next', label: '下一首播放', icon: <IconNext width={13} height={13} />, onSelect: () => { queueToast([track], p.queueState.queue, 'next'); p.addToQueue(track, 'next') } },
     { id: 'queue', label: '加入播放列表', icon: <IconPlus width={13} height={13} />, onSelect: () => { queueToast([track], p.queueState.queue, 'end'); p.addToQueue(track, 'end') } },
+    /*
+     * 收藏（「我喜欢的音乐」）。
+     *
+     * 以前在线曲目只有播放页那颗心能收藏，**搜索结果 / 歌单详情里的长按菜单没有**——
+     * 用户想收藏一首搜索结果，只能先点开播一遍。这里补上，和本地曲库的右键菜单对齐。
+     * 存的是**完整记录**（`favRecOf`），断网也能把这张表画出来。
+     */
+    {
+      id: 'fav',
+      label: faved ? '取消喜欢' : '添加到喜欢',
+      icon: faved ? <IconHeartFilled width={13} height={13} /> : <IconHeart width={13} height={13} />,
+      onSelect: () => {
+        void favs.toggle(favRecOf(track)).then(on => {
+          /* 收藏了就把封面存一份：断网时「我喜欢的音乐」里也得有图 */
+          if (on) rememberCover(song.img, 0)
+          toast(on ? `已添加到喜欢：${song.name}` : `已从喜欢中移除：${song.name}`, { ok: on })
+        })
+      },
+    },
     { id: 'div', divider: true, label: '', onSelect: () => {} },
     {
       id: 'dl',

@@ -23,6 +23,16 @@ object Http {
      * 图片走那条路必坏；这里单独留一个字节级的口子，只给原生内部用。
      * 任何失败都返回 null（封面拿不到就退回没有图，不值得为此报错）。
      */
+    /**
+     * 出网 UA，**必须和播放器（AudioEngine）一致**。
+     *
+     * 平台直链普遍按 UA 拦：探测用一副身份、播放用另一副，就会出现
+     * 「校验过了播不了」或者反过来「能播却被判坏」。2026-11 之前 probe 写的是
+     * `(Linux; Android) Shuyin`（没有系统版本号），和播放器的
+     * `(Linux; Android <version>) Shuyin` 不是同一个串。
+     */
+    private fun ua(): String = "Mozilla/5.0 (Linux; Android ${android.os.Build.VERSION.RELEASE}) Shuyin"
+
     fun bytes(url: String, timeoutMs: Int = 8_000): ByteArray? {
         if (!url.startsWith("http://") && !url.startsWith("https://")) return null
         return try {
@@ -30,7 +40,7 @@ object Http {
             conn.connectTimeout = timeoutMs
             conn.readTimeout = timeoutMs
             conn.instanceFollowRedirects = true
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) Shuyin")
+            conn.setRequestProperty("User-Agent", ua())
             try {
                 if (conn.responseCode !in 200..299) null
                 else conn.inputStream.use { input ->
@@ -189,9 +199,11 @@ object Http {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
         conn.instanceFollowRedirects = true
-        conn.connectTimeout = 12_000
-        conn.readTimeout = 12_000
+        /* 和播放器同一副身份见 `ua()`；原来是默认的 Android UA，平台一按 UA 拦就对不上 */
+        conn.connectTimeout = 8_000
+        conn.readTimeout = 8_000
         conn.useCaches = false
+        conn.setRequestProperty("User-Agent", ua())
         // 16KB：带封面的 ID3 常常超过 2KB，只读一点连第一帧都摸不到
         conn.setRequestProperty("Range", "bytes=0-16383")
 

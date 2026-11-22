@@ -19,7 +19,7 @@ import { longPressProps } from '../lib/longPress'
 import { toast } from '../lib/toast'
 import { queueToast } from '../lib/queueToast'
 import {
-  IconCheck, IconClose, IconDownload, IconNext, IconPlay, IconPlus, IconTrash,
+  IconCheck, IconClose, IconNext, IconPlay, IconPlus, IconTrash,
 } from '../components/icons'
 
 interface Props {
@@ -157,15 +157,6 @@ export function FavPage({ onBack }: Props) {
                   >
                     <IconNext />
                   </button>
-                  {online && (
-                    <button
-                      className="icon-btn"
-                      title="下载这首歌"
-                      onClick={e => { e.stopPropagation(); toast('下载入口在播放页') }}
-                    >
-                      <IconDownload />
-                    </button>
-                  )}
                 </div>
               </div>
             )

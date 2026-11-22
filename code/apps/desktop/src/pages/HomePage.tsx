@@ -17,6 +17,7 @@ import { nicknameText, type HotPlaylistItem, type PlatformSource, type PlaylistD
 import { usePlayer } from '../lib/PlayerProvider'
 import { usePlaylists, mosaicOf, type LocalPlaylist } from '../lib/localPlaylists'
 import { useFavs, favTracksOf } from '../lib/favTracks'
+import { useHistory, historyTracksOf } from '../lib/history'
 import { bridge } from '../lib/bridge'
 import { matchSongs, parsePlaylist } from '../lib/playlistImport'
 import { KEYS, settings } from '../lib/settings'
@@ -69,6 +70,8 @@ interface Props {
   onOpenLibrary(): void
   /** 打开「我喜欢的音乐」= 收藏的歌曲（我的歌单里第一张固定卡） */
   onOpenFavs(): void
+  /** 打开「播放历史」= 最近播放（横条卡片点进来） */
+  onOpenHistory(): void
 }
 
 const IMPORT_HELP = [
@@ -81,7 +84,7 @@ const IMPORT_HELP = [
   '导入后会立刻和本地曲库匹配，匹配不上的歌不会丢——记在歌单里，等曲库补上再对。',
 ].join('\n')
 
-export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibrary, onOpenFavs }: Props) {
+export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibrary, onOpenFavs, onOpenHistory }: Props) {
   const p = usePlayer()
   const pl = usePlaylists()
   /** 登录入口就在这一页，不用专门跑设置 */
@@ -154,6 +157,19 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
   const [refreshTick, setRefreshTick] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
   const { list: platList, errors: platErrors } = usePlatformPlaylists(accounts, refreshTick)
+  /*
+   * 网络回来就自动重取一次。
+   *
+   * 「第一次没联网进来，之后一直加载失败」有一半是这条造成的：这一页的数据
+   * 只在挂载 / 登录态变化 / 手点刷新时才拉，离线那一次失败后如果不重启、不切页，
+   * 屏幕上就一直挂着那排错误。监听 `online` 是**最省事的自愈**——用户连上网，
+   * 页面自己就恢复，不用他去找「刷新」在哪。
+   */
+  useEffect(() => {
+    const up = () => setRefreshTick(t => t + 1)
+    window.addEventListener('online', up)
+    return () => window.removeEventListener('online', up)
+  }, [])
   /*
    * 平台歌单的本地偏好：藏起来哪些、按什么顺序摆。
    *
@@ -372,7 +388,7 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
   const favTracks = useMemo(() => favTracksOf(favs.list, p.library), [favs.list, p.library])
   const favMosaic = useMemo(() => mosaicOf(favTracks, 4), [favTracks])
   const favMeta = useMemo(() => {
-    if (!favTracks.length) return ''
+    if (!favTracks.length) return '还没有收藏的歌'
     const total = favTracks.reduce((n, t) => n + (t.duration || 0), 0)
     return `${favTracks.length} 首 · ${fmtTime(total)}`
   }, [favTracks])
@@ -382,6 +398,15 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
     if (p.lastScanAt) parts.push('上次扫描 ' + relTime(p.lastScanAt))
     return parts.join(' · ')
   }, [p.library.length, p.scanScope, p.lastScanAt])
+
+  /* 播放历史横条卡：记录在 history.ts（真正出声才记），这里只管展示 */
+  const hist = useHistory()
+  const histTracks = useMemo(() => historyTracksOf(hist.list, p.library), [hist.list, p.library])
+  const histMosaic = useMemo(() => mosaicOf(histTracks, 4), [histTracks])
+  const histMeta = useMemo(() => {
+    if (!histTracks.length) return '放过的歌都会收进这里'
+    return `${histTracks.length} 首 · 最近：${histTracks[0].title}`
+  }, [histTracks])
 
   useEffect(() => {
     void (async () => setProfile(await loadProfile()))()
@@ -806,6 +831,45 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
           </span>
         </div>
 
+        {/*
+         * 播放历史：和「本地音乐」同一条横带样式，排在它下面。
+         * 记录侧（真正出声才记、去重、上限 200）在 history.ts；这里只管展示。
+         * 空历史照样显示一条——但 meta 换成引导文案，不放播放键。
+         */}
+        <div
+          className="home-band"
+          role="button"
+          tabIndex={0}
+          title="打开播放历史"
+          onClick={onOpenHistory}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenHistory() } }}
+        >
+          <span className="home-band-cover">
+            <span className="home-cover-blank"><IconMusicNote width={24} height={24} /></span>
+            {histMosaic.length > 0 && (
+              <span className={'home-mosaic n' + histMosaic.length}>
+                {histMosaic.map((src, i) => <img key={i} src={src} alt="" decoding="async" />)}
+              </span>
+            )}
+          </span>
+          <span className="home-band-main">
+            <span className="home-band-name">播放历史</span>
+            <span className="home-band-meta">{histMeta}</span>
+          </span>
+          <span className="home-band-acts">
+            {histTracks.length > 0 && (
+              <button
+                className="home-band-play"
+                aria-label="播放最近听过的歌"
+                onClick={e => { e.stopPropagation(); p.playList(histTracks, 0) }}
+              >
+                <IconPlay width={13} height={13} /> <span className="home-band-play-t">播放全部</span>
+              </button>
+            )}
+            <span className="home-band-more">查看全部 →</span>
+          </span>
+        </div>
+
         {/* 「今天听什么」：各平台按你口味推的歌混成一条，点一下就能直接连着听 */}
         {mix && mix.songs.length > 0 && (
           <div
@@ -949,7 +1013,14 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                  * 凭证过期 / 类型不对（酷狗老存档）→ 给「重新登录」；
                  * 平台这条路走不通（接口没有）→ 只能给「导入歌单」。
                  * 判据是错误文案自己说了要重登，不是猜平台名。
+                 *
+                 * 两种情况都先给一颗「重试」：绝大多数「取不到」其实是断网 /
+                 * 弱网那一次请求没跑完（见 `minePlaylists`：失败不再缓存），
+                 * 重发一次就好了，不该让人为了这个去重登。
                  */}
+                <button className="ghost-btn" onClick={() => void doRefresh()}>
+                  <IconRefresh width={12} height={12} /> 重试
+                </button>
                 {/重登/.test(platErrors[s] ?? '') ? (
                   <button className="ghost-btn" onClick={() => void relogin(s)}>
                     <IconUser width={12} height={12} /> 重新登录
@@ -961,7 +1032,12 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                 )}
               </div>
             ))}
-            {pl.lists.length === 0 && platShown.length === 0 && favTracks.length === 0 ? (
+            {/*
+             * 全空时只给「新建歌单」引导卡，不再顶掉整组内容：
+             * 「我喜欢的音乐」固定卡**永远显示**（用户 2026-11-20 拍板，
+             * 对齐主流播放器——那张卡是收藏的落点，空着也得在）。
+             */}
+            {pl.lists.length === 0 && platShown.length === 0 && (
               <div className="home-empty">
                 <div className="t">还没有歌单</div>
                 <div className="s">新建一个，把喜欢的歌归到一起</div>
@@ -970,8 +1046,8 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                   <button className="ghost-btn" onClick={() => void doImport()}><IconUpload width={13} height={13} /> 导入歌单</button>
                 </div>
               </div>
-            ) : (
-              <>
+            )}
+            <>
                 {/*
                  * 分组标题只在「这一组真的有东西」时出现。
                  *
@@ -979,25 +1055,29 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                  * 登了四个平台之后一屏十几张卡，谁家的只能看角标那行小字，
                  * 想找「酷我那个歌单」要挨个认封面。分组之后平台名是标题，扫一眼就到。
                  */}
-                {(favTracks.length > 0 || pl.lists.length > 0) && (
-                  <div className="home-group" data-shut={groupsShut.includes('local') ? 'true' : undefined}>
-                    <div className="home-group-head">
-                      {/* 「本地」这组也跟着能收：和平台组同一套手感，不然只有一个
-                          能收一个不能收，用户会以为是坏的 */}
-                      <button
-                        type="button"
-                        className="hg-toggle"
-                        aria-expanded={!groupsShut.includes('local')}
-                        title={groupsShut.includes('local') ? '展开「本地」' : '收起「本地」'}
-                        onClick={e => { e.stopPropagation(); toggleGroup('local') }}
-                      >
-                        <span className="hg-chev" data-open={groupsShut.includes('local') ? undefined : 'true'} aria-hidden="true" />
-                        <span className="hg-name">本地</span>
-                        <span className="home-group-n">
-                          {pl.lists.length + (favTracks.length > 0 ? 1 : 0)}
-                        </span>
-                      </button>
-                    </div>
+                {/*
+                 * 「本地」这组**永远显示**：第一格是「我喜欢的音乐」固定卡，
+                 * 哪怕一首都没收藏（用户 2026-11-20 拍板，和主流播放器对齐——
+                 * 那张卡是收藏的落点，没了它新用户根本不知道心该点哪儿）。
+                 */}
+                <div className="home-group" data-shut={groupsShut.includes('local') ? 'true' : undefined}>
+                  <div className="home-group-head">
+                    {/* 「本地」这组也跟着能收：和平台组同一套手感，不然只有一个
+                        能收一个不能收，用户会以为是坏的 */}
+                    <button
+                      type="button"
+                      className="hg-toggle"
+                      aria-expanded={!groupsShut.includes('local')}
+                      title={groupsShut.includes('local') ? '展开「本地」' : '收起「本地」'}
+                      onClick={e => { e.stopPropagation(); toggleGroup('local') }}
+                    >
+                      <span className="hg-chev" data-open={groupsShut.includes('local') ? undefined : 'true'} aria-hidden="true" />
+                      <span className="hg-name">本地</span>
+                      <span className="home-group-n">
+                        {pl.lists.length + 1}
+                      </span>
+                    </button>
+                  </div>
                     {!groupsShut.includes('local') && (
                     <SortableGrid
                       className={gridCls}
@@ -1018,65 +1098,61 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                         if (hit) setMenu({ x: at.x, y: at.y, list: hit })
                       }}
                       /*
-                       * 本地这一组的第一格是「我喜欢的音乐」（固定卡，不可拖），
+                       * 本地这一组的第一格是「我喜欢的音乐」（固定卡，不可拖，**永远在**），
                        * 所以网格下标要减 1 才对应 `pl.lists` 的位置。
                        *
-                       * `lead` 必须按「固定卡到底在不在」算：没有收藏的时候
-                       * 第一格就是歌单 A，一律减 1 会让每次拖动都只挪半格——
-                       * 实测「拖 A 到 C 的位置」最后停在 B、A、C。
                        * `minIndex` 顺带挡住「拖到固定卡那一格」：它不会挪走，
                        * 歌单最多排到第二位。
                        */
-                      minIndex={favTracks.length > 0 ? 1 : 0}
+                      minIndex={1}
                       onReorder={(from, to) => {
-                        const lead = favTracks.length > 0 ? 1 : 0
-                        pl.reorder(from - lead, to - lead)
+                        pl.reorder(from - 1, to - 1)
                       }}
                     >
-                {/*
-                 * 第一张固定卡：我喜欢的音乐。
-                 *
-                 * 它不是一个真歌单（没有 Playlist 对象，也不落盘成歌单），
-                 * 而是收藏集合的一个视图 —— 播放页/长按面板里点的那颗心，
-                 * 落点就是这里。所以不给「编辑 / 删除」，也不走右键菜单。
-                 * 整理态下它照样站着不动（`data-fixed`），只是别拖它。
-                 */}
-                      {favTracks.length > 0 && (
-                        <div
-                          className="home-card is-fav"
-                          data-skey="fav"
-                          data-fixed="true"
-                          role="button"
-                          tabIndex={0}
-                          title={`我喜欢的音乐 · ${favTracks.length} 首`}
-                          onClick={() => { if (tidy) return; onOpenFavs() }}
-                          onKeyDown={e => { if (e.key === 'Enter') onOpenFavs() }}
-                        >
-                          <div className="home-cover">
-                            <span className="home-cover-blank"><IconMusicNote width={22} height={22} /></span>
-                            {favMosaic.length > 0 && (
-                              <div className={'home-mosaic n' + favMosaic.length}>
-                                {favMosaic.map((src, i) => <img key={i} src={src} alt="" decoding="async" />)}
-                              </div>
-                            )}
-                            <span className="home-badge fav">收藏</span>
-                            <button className="home-play" aria-label="播放我喜欢的音乐"
-                              onClick={e => { e.stopPropagation(); p.playList(favTracks, 0) }}>
-                              <IconPlay width={14} height={14} />
-                            </button>
-                          </div>
-                          <div className="home-card-name">我喜欢的音乐</div>
-                          <div className="home-card-meta">{favMeta}</div>
-                          {/* 列表模式下封面变小、封面里的播放键就没地方站了：整行右侧单独给一颗 */}
-                          <button
-                            className="home-row-play" data-nodrag=""
-                            aria-label="播放我喜欢的音乐"
-                            onClick={e => { e.stopPropagation(); p.playList(favTracks, 0) }}
-                          >
-                            <IconPlay width={15} height={15} />
+                      {/*
+                       * 第一张固定卡：我喜欢的音乐。**空了也显示**。
+                       *
+                       * 它不是一个真歌单（没有 Playlist 对象，也不落盘成歌单），
+                       * 而是收藏集合的一个视图 —— 播放页/长按面板里点的那颗心，
+                       * 落点就是这里。所以不给「编辑 / 删除」，也不走右键菜单。
+                       * 整理态下它照样站着不动（`data-fixed`），只是别拖它。
+                       */}
+                      <div
+                        className="home-card is-fav"
+                        data-skey="fav"
+                        data-fixed="true"
+                        role="button"
+                        tabIndex={0}
+                        title={`我喜欢的音乐 · ${favMeta}`}
+                        onClick={() => { if (tidy) return; onOpenFavs() }}
+                        onKeyDown={e => { if (e.key === 'Enter') onOpenFavs() }}
+                      >
+                        <div className="home-cover">
+                          <span className="home-cover-blank"><IconMusicNote width={22} height={22} /></span>
+                          {favMosaic.length > 0 && (
+                            <div className={'home-mosaic n' + favMosaic.length}>
+                              {favMosaic.map((src, i) => <img key={i} src={src} alt="" decoding="async" />)}
+                            </div>
+                          )}
+                          <span className="home-badge fav">收藏</span>
+                          <button className="home-play" aria-label="播放我喜欢的音乐"
+                            disabled={favTracks.length === 0}
+                            onClick={e => { e.stopPropagation(); p.playList(favTracks, 0) }}>
+                            <IconPlay width={14} height={14} />
                           </button>
                         </div>
-                      )}
+                        <div className="home-card-name">我喜欢的音乐</div>
+                        <div className="home-card-meta">{favMeta}</div>
+                        {/* 列表模式下封面变小、封面里的播放键就没地方站了：整行右侧单独给一颗 */}
+                        <button
+                          className="home-row-play" data-nodrag=""
+                          aria-label="播放我喜欢的音乐"
+                          disabled={favTracks.length === 0}
+                          onClick={e => { e.stopPropagation(); p.playList(favTracks, 0) }}
+                        >
+                          <IconPlay width={15} height={15} />
+                        </button>
+                      </div>
                       {pl.lists.map(l => {
                         const tracks = pl.tracksOf(l, p.library)
                         const mosaic = mosaicOf(tracks, 4)
@@ -1158,7 +1234,6 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                     </SortableGrid>
                     )}
                         </div>
-                      )}
                 {/*
                  * 登录平台账号之后，自己在那边的歌单**按平台分开摆**——
                  * 「我的歌单」本来就该是「我建的歌单」，不限本地还是线上。
@@ -1315,7 +1390,6 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
                 })}
                 </SortableSections>
               </>
-            )}
           </section>
 
           {pl.favs.length > 0 && (
@@ -1624,7 +1698,9 @@ function usePlatformPlaylists(
       if (!first.error) return first
       await new Promise(r => window.setTimeout(r, 1200))
       if (dead) return first
-      return minePlaylists(s)
+      /* 重试必须绕过缓存：离线那次的失败不会再写进缓存（见 minePlaylists），
+         但之前成功过一次的 10 分钟缓存还在，force 才能拿到真结果 */
+      return minePlaylists(s, { force: true })
     }
     void Promise.all(srcs.map(async s => [s, await pullOnce(s)] as const))
       .then(pairs => {

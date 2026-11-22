@@ -16,8 +16,9 @@
  *      所以单独存一张 `id → { ext, at, size }` 的索引表。
  */
 import { bridge } from './bridge'
+import { waitIdle } from './idle'
 import { settings } from './settings'
-import { titleMismatch } from './titleMatch'
+import { titleMismatch, versionMismatch } from './titleMatch'
 
 interface CacheEntry {
   /** 文件扩展名（含点），如 `.mp3` */
@@ -26,6 +27,13 @@ interface CacheEntry {
   at: number
   /** 字节数，0 表示还没写完 */
   size: number
+  /**
+   * 这份缓存出链时的音质档位（320k / flac …）。
+   *
+   * 缓存按「曲目 id」只存一份——音质切过之后，这份文件是哪个档位只有这里知道。
+   * 播放缓存命中时 UI 用它显示选中态；没有这个字段的旧缓存按 null 处理。
+   */
+  q?: string
 }
 
 const INDEX_KEY = 'cache.audioIndex'
@@ -110,7 +118,8 @@ export async function cachedAudio(trackId: string, expectSec = 0, expectTitle = 
    */
   if (expectTitle) {
     const t = await bridge.localAudioTags(p).catch(() => ({ title: '', artist: '' }))
-    if (titleMismatch(t.title, expectTitle)) return dropWrong()
+    /* 版本也要判：缓存里那一份可能是 DJ 版 / 伴奏，名字明明「包含」原版歌名 */
+    if (titleMismatch(t.title, expectTitle) || versionMismatch(t.title, expectTitle)) return dropWrong()
   }
   return p
 }
@@ -130,7 +139,7 @@ export async function cachedAudio(trackId: string, expectSec = 0, expectTitle = 
  * 恢复播放时才不会有一堆下载跟当前这首抢带宽。播放中的单首补缓存照旧
  * 不用 await（`void warmCache(...)`）。
  */
-export function warmCache(trackId: string, url: string, delay = 6000): Promise<number> {
+export function warmCache(trackId: string, url: string, delay = 6000, quality?: string): Promise<number> {
   if (!bridge.isNative || !url) return Promise.resolve(0)
   if (index.has(trackId) || warming.has(trackId)) return Promise.resolve(0)
   warming.add(trackId)
@@ -140,11 +149,22 @@ export function warmCache(trackId: string, url: string, delay = 6000): Promise<n
       void (async () => {
         let wrote = 0
         try {
+          /*
+           * **用户还在摸屏幕就先别下。**
+           *
+           * 整曲下载是一次阻塞式的原生任务（`download-track`），中途不可取消：
+           * 一旦在用户滑列表 / 切歌的时候起来，就得一直等到它下完，
+           * 那几十毫秒一次的主线程抖动就是这么来的。用户 2026-11-15 的原话：
+           * 「预加载在用户交互的时候要暂停，否则容易出现卡顿」。
+           *
+           * `waitIdle` 会一直等到手停下来（含硬上限，别让它永远不跑）。
+           */
+          await waitIdle(700)
           const slot = await bridge.cacheSlot(trackId, ext)
           if (!slot) return
           const n = await bridge.downloadTrack(url, slot)
           if (n > 0) {
-            index.set(trackId, { ext, at: Date.now(), size: n })
+            index.set(trackId, { ext, at: Date.now(), size: n, q: quality })
             persist()
             wrote = n
           }
@@ -169,6 +189,33 @@ export const audioCacheSize = () => bridge.cacheSize().catch(() => 0)
 export async function hasCachedAudio(trackId: string): Promise<boolean> {
   await boot()
   return index.has(trackId)
+}
+
+/**
+ * 缓存里这份音频的音质档位（没有缓存 / 旧索引没记过 → null）。
+ *
+ * 播放缓存命中时不走取链，`onlineQuality` 以前一直没人设置——音质下拉
+ * 「没有对应选中」（用户 2026-11-20）就是它。现在命中路径拿这个值补上。
+ */
+export async function cachedAudioQuality(trackId: string): Promise<string | null> {
+  await boot()
+  return index.get(trackId)?.q ?? null
+}
+
+/**
+ * 丢掉这一首的缓存（索引 + 文件）。
+ *
+ * 只在「确认要用新档位重新取链」之后调：音质切换成功落链时，旧的低档位文件
+ * 换成新的（同一首歌只存一份）。**不要**在切换前就丢——离线时新档位取不到链，
+ * 旧的缓存还是唯一的可播资源。
+ */
+export async function dropCachedAudio(trackId: string): Promise<void> {
+  await boot()
+  const e = index.get(trackId)
+  if (!e) return
+  index.delete(trackId)
+  persist()
+  void bridge.cacheDrop(trackId, e.ext).catch(() => false)
 }
 
 /** 清空缓存：删目录 + 清索引，返回释放的字节数 */

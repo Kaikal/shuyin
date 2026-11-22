@@ -8,6 +8,7 @@
  */
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { isTauri } from './bridge'
+import { cachedCoverUrl } from './mediaCache'
 
 /** CDN 上真正拿得到的两档：列表 / 播放页大图 */
 const SMALL = 500
@@ -50,5 +51,12 @@ function sized(url: string, px: number): string {
 export function coverUrlOf(cover: string | null | undefined, needPx?: number): string | undefined {
   if (!cover) return undefined
   if (!/^https?:\/\//i.test(cover)) return isTauri ? convertFileSrc(cover) : undefined
+  /*
+   * 本地存过一份就用本地那张（断网时这是唯一能画出来的图，见 `mediaCache`）。
+   * 放在尺寸归一化**之前**：本地文件已经是某一档尺寸了，再改 URL 也改不到它。
+   * 本地副本坏了由 `<Cover>` 调 `forgetCover` 清掉，下一次渲染自动回落到远端。
+   */
+  const local = cachedCoverUrl(cover)
+  if (local) return local
   return sized(cover, needPx && needPx > SMALL ? BIG : SMALL)
 }

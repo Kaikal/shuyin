@@ -86,6 +86,20 @@
             invokeLog('js.warn', msg)
             return
           }
+          /*
+           * 界面已经渲染出来之后，运行期错误**不许**再弹这层全屏遮罩。
+           *
+           * 这层遮罩是不透明的、z-index 99999、铺满整屏，而且只在桌面上有「按 Ctrl+R」
+           * 这条路可走 —— 手机上没有任何办法把它关掉。于是任何一次偶发的脚本异常
+           * （一次取链回调、一个空指针）都会把整个 App 变成一页报错文字，用户看到的
+           * 就是「界面卡住了、点什么都没反应」。启动阶段的兜底保留（root 里还是空的），
+           * 那种情况确实需要把原因写在脸上。
+           */
+          var mounted = document.getElementById('root')
+          if (mounted && mounted.childElementCount > 0) {
+            invokeLog('js.error', msg + ' @' + (e.filename || '') + ':' + (e.lineno || 0))
+            return
+          }
           show('启动时发生脚本错误', msg + '\n' +
             (e.filename || '') + ':' + (e.lineno || 0) + ':' + (e.colno || 0) +
             (e.error && e.error.stack ? '\n\n' + e.error.stack : ''))

@@ -660,7 +660,7 @@ export function Sidebar({ page, onNavigate, trackCount, onOpenNow, onOpenLibrary
   trackCount: number
   /** 车机导轨的第一项「正在播放」：打开沉浸播放页 */
   onOpenNow?(): void
-  /** 车机导轨的第二项「媒体库」：进我的页并展开本地曲库 */
+  /** 车机导轨的第二项「我的」：进完整的首页（本地曲库/推荐都在里面） */
   onOpenLibrary?(): void
   nowOpen?: boolean
 }) {
@@ -673,8 +673,10 @@ export function Sidebar({ page, onNavigate, trackCount, onOpenNow, onOpenLibrary
     { id: 'downloads', label: '下载', icon: <IconDownloads width={17} height={17} /> },
     { id: 'settings', label: '设置', icon: <IconCog width={17} height={17} /> },
   ]
-  /* 车机导轨（设计稿 10/11）：只有四格——正在播放 / 媒体库 / 搜索 / 设置。
-     歌单广场、下载在车里没有必要，方向盘也只管上下一首。 */
+  /* 车机导轨：正在播放 / 我的 / 搜索 / 歌单广场 / 设置。
+     最初只留四格（歌单广场/下载被砍），用户实测炸了——每日推荐、猜你喜欢
+     全在「我的」和「歌单广场」里，砍页面等于砍功能。现在全量恢复；
+     下载仍然不进导轨（车里插着 USB 听本地，主动下载场景不存在）。 */
   const car = shell === 'car'
   return (
     <aside className={'sidebar themed' + (collapsed ? ' collapsed' : '') + (car ? ' car-rail' : '')}>
@@ -690,21 +692,27 @@ export function Sidebar({ page, onNavigate, trackCount, onOpenNow, onOpenLibrary
       <nav className="sb-nav" aria-label="主导航">
         {car ? (
           <>
-            {/* 播放页是全屏浮层，压在上面时「媒体库」仍然满足 page === 'home'——
-                两格会同时亮起（像两个入口都在等你点）。正在播放优先。 */}
+            {/* 播放页是全屏浮层：它开着时其它格子全部让位（`!nowOpen`）。
+                以前只给「媒体库」加了这条守卫，搜索/设置照常亮——
+                实机实测（2026-11-21）开播放页后「正在播放 + 设置」两格同时亮起。
+                「正在播放优先」得是对**所有**格子成立，不是只对一格。 */}
             <button className={'sb-item' + (nowOpen ? ' active' : '')} onClick={() => onOpenNow?.()} title="正在播放">
               <IconMusicNote width={26} height={26} />
               <span className="sb-label">正在播放</span>
             </button>
-            <button className={'sb-item' + (!nowOpen && page === 'home' ? ' active' : '')} onClick={() => onOpenLibrary?.()} title="媒体库">
-              <IconPlaylist width={26} height={26} />
-              <span className="sb-label">媒体库</span>
+            <button className={'sb-item' + (!nowOpen && page === 'home' ? ' active' : '')} onClick={() => onOpenLibrary?.()} title="我的">
+              <IconUser width={26} height={26} />
+              <span className="sb-label">我的</span>
             </button>
-            <button className={'sb-item' + (page === 'search' ? ' active' : '')} onClick={() => onNavigate('search')} title="搜索">
+            <button className={'sb-item' + (!nowOpen && page === 'search' ? ' active' : '')} onClick={() => onNavigate('search')} title="搜索">
               <IconSearch width={26} height={26} />
               <span className="sb-label">搜索</span>
             </button>
-            <button className={'sb-item' + (page === 'settings' ? ' active' : '')} onClick={() => onNavigate('settings')} title="设置">
+            <button className={'sb-item' + (!nowOpen && page === 'playlist' ? ' active' : '')} onClick={() => onNavigate('playlist')} title="歌单广场">
+              <IconPlaylist width={26} height={26} />
+              <span className="sb-label">歌单广场</span>
+            </button>
+            <button className={'sb-item' + (!nowOpen && page === 'settings' ? ' active' : '')} onClick={() => onNavigate('settings')} title="设置">
               <IconSliders width={26} height={26} />
               <span className="sb-label">设置</span>
             </button>

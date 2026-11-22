@@ -2,9 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 在线播放会话持 WifiLock：本机熄屏后 WiFi 会休眠（实测 75s 后 ping 全丢），
+         换歌那几秒没有 ExoPlayer 的网锁，取链全报 Unable to resolve host，播完就停 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 只用于「跳系统对话框请求加入电池优化白名单」：Doze 一进就掐后台网络，在线歌必停 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 长按拿起歌单卡时轻震一下（排序的「拿起来了」反馈）。安装期权限，不弹授权框 -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
@@ -25,18 +29,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 音乐锁屏：息屏时用「全屏意图通知」让系统自己拉起锁屏页（后台 startActivity 点不亮屏） -->
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
-    <!-- 把已经建好的锁屏页任务提到前台。普通权限，装上即有。
-         息屏那一刻应用多半在后台，`startActivity` 会被 Android 10+ 的
-         「后台不许启动 Activity」拦掉（真机日志 `Abort background activity starts`）；
-         而 `moveTaskToFront` 只是把已有任务的层级调上来，不走那道闸门 ——
-         但它自己要求 REORDER_TASKS，没有这个声明就是一条 Permission Denial。 -->
-    <uses-permission android:name="android.permission.REORDER_TASKS" />
+    <!--
+        跨应用锁屏拉起的兜底：直接 startActivity 被 ROM 的「后台弹出界面」appop
+        拦掉时（1.2s 无回执），由系统闹钟代发一颗 PendingIntent 再试一次
+        （见 PlaybackService.screenRx / LockActivity.alarmPending）。
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- 悬浮歌词：「显示在其他应用上层」。特殊权限，装上不生效，
-         首次开启时会跳系统设置页让用户手动允许（见 FloatingLyrics）。 -->
+         首次开启时会跳系统设置页让用户手动允许（见 FloatingLyrics）。
+         持有它同时豁免「后台不许启动 Activity」限制——跨应用锁屏的
+         直接 startActivity 靠的就是这条。 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!--
@@ -104,6 +108,30 @@
             </intent-filter>
         </activity>
 
+        <!--
+            锁屏播放页的「跨应用宿主」（2026-11-18 晚）。
+
+            用户在别的应用里熄屏时，主窗口在后台、showWhenLocked 挂了也看不见；
+            老做法把主任务 moveTaskToFront 拉上来，退场只有 moveTaskToBack（=按 Home），
+            实测解锁必落桌面。现在改成独立 Activity：
+              · 自有 taskAffinity + excludeFromRecents：主任务一个像素都不动；
+              · showWhenLocked 让它盖在 keyguard 上（API 27+ 生效，运行时另有旧标志兜底）；
+              · 退场 finish() —— 独立任务整个消失，压在底下的原应用亮回来。
+            界面复用 LockScreenPanel（纯原生、宿主无关）。应用内熄屏仍走主窗口里的
+            那一层（见 LockScreenPanel 注释），两条路互不干扰。
+        -->
+        <activity
+            android:name=".LockActivity"
+            android:exported="false"
+            android:theme="@style/LockTheme"
+            android:launchMode="singleTask"
+            android:taskAffinity="cn.shuyin.player.lock"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            tools:targetApi="27" />
+
         <!-- 平台登录：内嵌各家的官方登录页，从 CookieManager 取凭证。
              不 export，只能由应用自己拉起。 -->
         <activity
@@ -113,16 +141,10 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- 锁屏播放页：showWhenLocked 让它压在系统锁屏之上（悬浮窗做不到），
-             息屏那一刻由 PlaybackService 的 ACTION_SCREEN_OFF 监听拉起。 -->
-        <activity
-            android:name=".LockScreenActivity"
-            android:exported="false"
-            android:launchMode="singleInstance"
-            android:excludeFromRecents="true"
-            android:showWhenLocked="true"
-            android:theme="@style/LockTheme"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale" />
+        <!-- 锁屏播放页已并入 MainActivity（见 LockScreenPanel）：
+             它是主窗口里的一层覆盖视图，窗口标志在运行时按开关动态挂，
+             所以这里不再留独立 Activity —— 少一个 Activity，就少一套会跟播放器
+             脱节的状态，也少一次「后台启动被系统拦掉」。 -->
 
         <service
             android:name=".PlaybackService"

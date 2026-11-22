@@ -403,9 +403,34 @@ export interface LxInitPayload {
 /* 错误                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 「出链成功，但**落地校验**没过」——而且没过的是**软指标**。
+ *
+ * 软指标 = 时长对不上、平均码率越界、校验超时/连不上。
+ * 硬指标（文件标签里明明白白写着另一首歌 / 另一个版本）**不走这个类**，
+ * 那种绝不放行：宁可让用户点「换源」，也不能把别人唱的歌放出来。
+ *
+ * 为什么需要它：探测一次直链要真实网络往返（安卓侧 connect+read 各 12s，
+ * 外面再套 6s 超时）。网络慢的时候，一条完全能播的地址会因为「探测超时」
+ * 被判成这一档失败，三档全超时 → 这首「没有可用音源」。用户观感就是
+ * 「洛雪能播，你这儿播不了」——而洛雪根本不做这步校验。
+ *
+ * 所以策略是**严格优先、失败兜底**：带着 `allowUnverified` 再要一次时，
+ * 把最后一个「出链成功但校验没过」的地址交出去，并在结果里标 `unverified`。
+ */
+export class SoftVerifyError extends Error {
+  readonly url: string
+  readonly quality: string
+  constructor(url: string, quality: string, message: string) {
+    super(message)
+    this.name = 'SoftVerifyError'
+    this.url = url
+    this.quality = quality
+  }
+}
+
 /** 所有已启用音源都拿不到链接 */
-export class NoPlayableSourceError extends Error {
-  readonly source: PlatformSource
+export class NoPlayableSourceError extends Error {  readonly source: PlatformSource
   readonly attempts: Array<{ sourceId: string; sourceName: string; error: string }>
   /** 人话总结（一句话说清「为什么播不了」） */
   readonly brief: string

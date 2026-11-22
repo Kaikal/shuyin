@@ -755,10 +755,8 @@ html[data-shell='phone'] .imm-act.off { opacity: 0.45; }
 html[data-shell='phone'] .imm-act > span { white-space: nowrap; }
 
 html[data-shell='phone'] .imm-act-dl { display: flex; flex-direction: column; align-items: center; gap: 7px; }
-html[data-shell='phone'] .imm-act-dl .chip-pop {
-  bottom: auto;
-  top: calc(100% + 8px);
-}
+/* 弹出方向不再硬编码：ChipMenu 打开时会量四周空间自己翻（up/down），
+   这里以前写死的「永远向下」会把贴底按钮的列表顶到屏幕外（2026-11-21） */
 
 html[data-shell='phone'] .imm-dl-done { position: relative; }
 
@@ -2002,9 +2000,24 @@ html[data-shell='phone'] .set-tab.on {
   font-weight: 600;
 }
 
-/* 关于：手机上收成一行（版本号 + 箭头），点开是弹窗 */
-html[data-shell='phone'] .settings-page .about,
-html[data-shell='phone'] .settings-page [data-sec='about'] .set-row { display: none; }
+/*
+ * 关于：以前手机把整页收成一行（「关于疏音 v0.6.111 ›」），点开才是弹窗，
+ * 页面看着空荡荡。现在没有弹窗了，品牌头 / 项目主页 / 检查更新直接铺在页面上，
+ * 所以这里不再藏 `.set-row`，只按手机把字号和图标块抬一档。
+ */
+html[data-shell='phone'] .ab-name { font-size: 17px; }
+html[data-shell='phone'] .ab-tag { font-size: 11.5px; }
+html[data-shell='phone'] .ab-mark { width: 50px; height: 50px; border-radius: 15px; }
+html[data-shell='phone'] .ab-sub { font-size: 11px; }
+html[data-shell='phone'] .ext-link { padding: 10px 11px; }
+html[data-shell='phone'] .ext-ico { width: 34px; height: 34px; border-radius: 11px; }
+html[data-shell='phone'] .ext-name { font-size: 14px; }
+html[data-shell='phone'] .ext-url { font-size: 11px; }
+/* 触摸屏上「点过的那一行」会粘住悬停底色，复位成基准底 */
+html[data-shell='phone'] .ext-link:hover {
+  background: var(--sy-surface);
+  border-color: var(--sy-surface-border);
+}
 
 .hd-about-row {
   width: 100%;
@@ -2700,12 +2713,14 @@ html[data-shell='car'] .imm-art { display: contents; }
    被自动排进 'cover' / 'ctl' 那几格，压出莫名其妙的横线。 */
 html[data-shell='car'] .imm-lyric { display: none; }
 
-/* 车机上不摆歌词 / 操作行 / 胶囊：一屏只留「封面 + 信息 + 控制」 */
+/* 车机上不摆歌词 / 操作行 / 胶囊：一屏只留「封面 + 信息 + 控制」。
+   .imm-tools 不藏**全屏歌词页里那一条**（imm-solo-foot 里）——它是歌词页
+   唯一的「回到播放页」入口，藏了就出不去了；只藏封面 grid 里那条。 */
 html[data-shell='car'] .imm-tabrow-solo,
 html[data-shell='car'] .imm-acts,
 html[data-shell='car'] .imm-lyric-body,
 html[data-shell='car'] .imm-pills,
-html[data-shell='car'] .imm-tools,
+html[data-shell='car'] .imm-grid .imm-tools,
 html[data-shell='car'] .imm-meta-line,
 html[data-shell='car'] .imm-lyrbar,
 html[data-shell='car'] .imm-head { display: none; }
@@ -2722,6 +2737,21 @@ html[data-shell='car'] .imm-cover {
   justify-self: start;
   width: 356px;
   aspect-ratio: 1;
+}
+/*
+ * 黑胶唱片同理（用户：车机的唱片是**椭圆**的）。
+ * `.imm-art` 在车机上是 display:contents，`.imm-disc` 直接成为网格项：
+ * 网格项默认 align-self:stretch，把「跨两行的 cover 格」高度整个拉满，
+ * 而它 width 固定、height 又被拉伸顶死 → aspect-ratio 失效 → 圆变椭圆。
+ * 和上面方形封面同一套修法：居中、不拉伸、宽度钉死、比例交给 aspect-ratio。
+ */
+html[data-shell='car'] .imm-disc {
+  grid-area: cover;
+  align-self: center;
+  justify-self: start;
+  width: 356px;
+  aspect-ratio: 1;
+  height: auto;
 }
 html[data-shell='car'] .imm-cover .cover-art {
   width: 100% !important;
@@ -2760,6 +2790,39 @@ html[data-shell='car'] .imm-m-sub .imm-m-rest {
 }
 /* 手机上「歌手 · 专辑 · 格式」之间的分隔点；车机上分成两行，点要收掉 */
 html[data-shell='car'] .imm-m-sep { display: none; }
+
+/*
+ * 车机唱片页的两行歌词（当前句亮 + 下一句暗）：车机上没有歌词列也没有
+ * 歌词页，这就是车里唯一的歌词。各限一行、超出省略——开车时是「瞟一眼」
+ * 的信息，不该换行占高。无词时整块压暗占位，避免切歌时信息块跳高。
+ */
+html[data-shell='car'] .imm-car-lyr {
+  margin-top: 26px;
+  max-width: 620px;
+  overflow: hidden;
+}
+html[data-shell='car'] .imm-car-lyr .icl {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-shell='car'] .imm-car-lyr .icl.cur {
+  font-size: 21px;
+  line-height: 1.45;
+  color: var(--hd-text-1);
+}
+html[data-shell='car'] .imm-car-lyr .icl.next {
+  margin-top: 6px;
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--hd-text-3);
+}
+html[data-shell='car'] .imm-car-lyr .icl-empty {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--hd-text-3);
+}
+html[data-shell='car'] .imm-car-lyr[data-empty='true'] .icl-empty { opacity: 0.7; }
 
 html[data-shell='car'] .imm-ctl {
   grid-area: ctl;
@@ -3218,19 +3281,17 @@ html[data-shell='phone'] .page {
 }
 
 /*
- * 跟手滑动期间（lib/pageSwipe 挂 `data-swiping`）：
- *   · 页面自己的入场动画要停 —— 二层页面的 `page-push`（右移 26px + 淡入）
- *     和横向位移叠在一起，滑到一半会「闪一下」；
- *   · 位移全程走合成层；`touch-action: pan-y` 是兜底，别让浏览器把这次拖动
- *     判成滚动（真机上是 300ms 左右的连续拖动）。
+ * 跟手滑动期间以前会在 `.page-host` 上挂 `data-swiping`：
+ *   · 停掉二层页面的 `page-push` 入场动画（横向位移叠上去会「闪一下」）；
+ *   · 兜底 `touch-action: pan-y`，别让浏览器把这次拖动判成滚动。
+ *
+ * 两条都不需要了：
+ *   · 竖屏横滑时 `usePageSwipe` 的 `enabled` 已经把二层页面（`.page-keep.push`）
+ *     全部排除，那条动画规则永远命中不了；
+ *   · 横向一旦锁定就每帧 `preventDefault()`，浏览器不会半路抢去滚页面。
+ * 而给 `.page-host` 写属性会让**五页所有内容**重算一次样式（真机 20~30ms），
+ * 正好卡在手指刚动的那一帧上——这就是「不跟手」。属性已撤，规则一并删掉。
  */
-html[data-shell='phone'] .page-host[data-swiping='true'] {
-  /* 兜底：真机上是 300ms 左右的连续拖动，别让浏览器把它判成滚动 */
-  touch-action: pan-y;
-}
-html[data-shell='phone'] .page-host[data-swiping='true'] .page-keep.push {
-  animation: none !important;
-}
 
 
 /* 播放页页头：52 → 44（返回键 44 高，正好等于一行），下方胶囊行 14 → 12 */
@@ -4058,6 +4119,32 @@ html[data-shell='phone'] .folia[data-flat='true'] .fw[data-s='passed'] {
     0 0 24px var(--sy-accent-a20),
     0 2px 26px rgba(0, 0, 0, 0.34);
 }
+/*
+ * 手机 / 平板 WebView：逐字染色的颜色与辉光**瞬时切换**，不再做逐帧过渡。
+ *
+ * text-shadow（两层 18/54px 辉光）和 color 的 transition 会让「唱到的那个字」
+ * 在 180~340ms 的过渡期里**每一帧都重绘整行**——字一个接一个亮，
+ * 重绘根本停不下来：平板 gfxinfo 实测 21% 掉帧、Slow issue draw commands
+ * 一半都来自它（2026-11-21，「歌词染色一卡一卡」）。
+ * transform（弹出/落位）和 opacity 保留过渡——它们走合成器，不触发重绘。
+ * 颜色瞬切在视觉上没有可感知的差别：那个字本来就在 260ms 里弹起来，
+ * 颜色在弹起的第 1 帧就到位了。
+ */
+html[data-shell='phone'] .folia .fw {
+  transition:
+    transform 430ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 240ms var(--sy-ease-soft);
+}
+html[data-shell='phone'] .folia .fw[data-s='active'] {
+  transition:
+    transform 260ms cubic-bezier(0.2, 1.7, 0.45, 1),
+    opacity 120ms linear;
+}
+html[data-shell='phone'] .folia .fw[data-s='passed'] {
+  transition:
+    transform 380ms cubic-bezier(0.22, 0.9, 0.3, 1),
+    opacity 300ms var(--sy-ease-soft);
+}
 
 /* ---------- 评论面板 ----------
  * 这层只做排版，不遮不裁：评论本身是 `.cm-wrap`（overflow-y:auto），
@@ -4227,14 +4314,12 @@ html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line.active 
  * 逐字推进的效果保留。
  */
 html[data-shell='phone'] .imm-mp-lyricbody .lyrics .lyric-text.kara {
-  background-image: linear-gradient(
-    90deg,
-    var(--hd-accent-text) 0%,
-    var(--hd-accent-text) calc(var(--kara, 0) * 100% - 0.5%),
-    var(--hd-text-1) calc(var(--kara, 0) * 100% + 2%)
-  );
-  -webkit-text-fill-color: transparent;
-  filter: none;
+  /* 染色已改成双层滑入（见 pages.css 的 .lyric-text.kara），这里只换配色：
+     唱过 = 强调色，没唱 = 正文色。旧的渐变方案整行每帧重绘，低端机上掉帧 */
+  color: var(--hd-text-1);
+}
+html[data-shell='phone'] .imm-mp-lyricbody .lyrics .lyric-text.kara .kara-fill {
+  color: var(--hd-accent-text);
 }
 html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line:hover { opacity: 1; }
 html[data-shell='phone'] .imm-mp-lyricbody .lyrics.immersive .lyric-line.active:hover { opacity: 1; }
@@ -5388,6 +5473,26 @@ html[data-shell='phone'][data-wide='1'] .page {
   left: max(0px, calc((100% - var(--tab-content)) / 2));
   padding-left: var(--tab-pad);
   padding-right: var(--tab-pad);
+  /*
+   * 底部预留只留到**标签栏上方**，不再把播放条那 68px 也全宽让出来。
+   *
+   * 基础规则的预留是「标签栏 + 播放条 + 22」的全宽带——手机上条子横贯全屏，
+   * 让是应该的；平板上条子是居中的 600 胶囊，两侧大片空间跟着空着，
+   * 内容却在 166px 处就被截断（用户 2026-11-20：「迷你播放条没覆盖的地方，
+   * 后面的内容还是显示被遮挡了」）。这里只留标签栏 + 10px，
+   * 让内容滚进胶囊两侧；中间那 600px 滚动时从胶囊背后穿过，
+   * 胶囊自带 20px 毛玻璃，穿过去的内容是虚的，不抢眼。
+   * （多选工具条等 fixed 浮层有自己的 bottom，不跟 .page 走，不受影响。）
+   */
+  bottom: calc(var(--phone-tab) + 10px + var(--safe-bottom));
+  /*
+   * 页尾必须能滚出胶囊：盒子底沿只让到标签栏上方（86px），而胶囊顶在
+   * ~152px——设置页最后一行永远卡在胶囊背后（胶囊背景近实底，挡得死死的，
+   * 用户 2026-11-21：「迷你播放栏会挡着后面的按钮」）。内部 padding 补上
+   * 胶囊那段高度，滚到底时最后一行完整露在胶囊上方；滚动途中内容从胶囊
+   * 两侧穿过（胶囊范围外仍可见），两边不耽误。
+   */
+  padding-bottom: calc(var(--phone-dock) + 8px);
 }
 
 /* 页面大标题：手机 26 在平板上显得单薄 */

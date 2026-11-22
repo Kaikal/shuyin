@@ -122,7 +122,14 @@ const LyricRow = memo(function LyricRow({
       }}
       onKeyDown={e => { if (e.key === 'Enter' && timed && time >= 0) onSeek?.(time) }}
     >
-      <span className={'lyric-text' + (kara ? ' kara' : '')}>{text}</span>
+      {/* KTV 染色 v3：底层暗色整句 + .kara-fill 强调色同句文字用 clip-path
+          从左往右揭示（见 pages.css）。v2 的滑入方案在 wrap 跑马灯模式下
+          会重影（fill 滑入层与位移中的底层文字叠印），clip-path 不需要
+          裁切祖先、fill 永远对齐，两端兼容；合成器裁切，文字光栅只做一次 */}
+      <span className={'lyric-text' + (kara ? ' kara' : '')}>
+        {text}
+        {kara && <span className="kara-fill" aria-hidden="true">{text}</span>}
+      </span>
       {timed && time >= 0 && <span className="lyric-time num">{fmtTime(time)}</span>}
     </div>
   )

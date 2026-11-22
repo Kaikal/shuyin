@@ -451,7 +451,6 @@ html[data-dark='false'] .glass .on-glass { text-shadow: none; }
 }
 .toggle[aria-checked='true'] { background: color-mix(in srgb, var(--sy-text-1) 22%, transparent); }
 .toggle[aria-checked='true']::after { transform: translateX(16px); background: var(--sy-text-1); }
-
 .slider {
   -webkit-appearance: none;
   appearance: none;

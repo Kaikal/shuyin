@@ -25,6 +25,14 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.app.Activity
+import android.app.KeyguardManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.PowerManager
+import android.os.SystemClock
+import android.widget.FrameLayout
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -50,7 +58,70 @@ private val EMPTY_PNG: ByteArray = Base64.decode(
 class MainActivity : Activity() {
 
     private lateinit var web: WebView
+
+    /** 界面容器：WebView + 锁屏播放页（覆盖层） */
+    private lateinit var rootView: FrameLayout
+
+    private var lockPanel: LockScreenPanel? = null
+
+    /** 当前是不是在前台（熄屏时判断「该不该弹锁屏页」用） */
+    @Volatile
+    private var resumed = false
+
+    /** 最近一次 onPause 的时刻：熄屏广播常常比 onPause 晚到，得认这一下 */
+    @Volatile
+    private var pausedAt = 0L
+
+    /**
+     * 「熄屏时被服务从后台拉起来」还没铺面板。
+     *
+     * onCreate 里窗口刚建好、`NowPlaying` 可能还没同步，所以标志先挂上，
+     * 等第一次 onResume 再决定要不要铺——那时播放状态一定是准的。
+     */
+    private var pendingLockNow = false
+
+    /**
+     * 这一屏是「熄屏时被服务从后台拉起来」才铺的（不是用户自己切回来的）。
+     *
+     * 用户 2026-11-17：「在别的应用里锁屏，锁屏页出来了，解锁后自己进了疏音」。
+     * 这是必然的——面板是主窗口里的一层，服务为了让它在锁屏上出现，把整个任务
+     * 拉到了前台；解锁之后锁屏旗子摘掉，露出来的就是主界面。
+     *
+     * 所以记一笔「这一趟是被拉起来的」，解锁时再把任务退回后台，用户回到他原本
+     * 待着的那个应用。**只在这一种情况下退**：用户本来就是从疏音里熄屏的
+     * （走 `onScreenOff` 那条），解锁后当然应该回到疏音。
+     */
+    private var pulledForLock = false
+
+    /**
+     * 解锁早鸟探测：比 `ACTION_USER_PRESENT` 早一步把面板收掉、把任务退回后台。
+     *
+     * 华为这条广播要等解锁动画**走完**才发，而窗口在动画第一帧就已经露出来了。
+     * 2026-11-17 用户录屏逐帧对时：22:47:10.4 屏幕上已经是疏音搜索页，
+     * 11.27 才收到 USER_PRESENT —— 中间那 0.9 秒就是「解锁后应用弹一下再退出」。
+     * 亮屏后每 110ms 问一次 `isKeyguardLocked()`，它跟着 keyguard 消失立刻变，
+     * 比广播早得多；连续两拍都是「已解锁」才动手，防 ROM 亮屏瞬间的假信号。
+     */
+    private val unlockProbe = Runnable { probeUnlock() }
+    private var probeFrom = 0L
+    private var probeTries = 0
+    private var probeHits = 0
+
+    /** 为了退场不露相把整棵视图树藏了，等窗口真的不可见（onStop）再亮回来 */
+    private var restoreOnStop = false
+
+    /** 锁屏页自己要求的全屏（与前端 `sysbars` 的 barsHidden 分开记，别互相覆盖） */
+    private var lockBars = false
+
     private var bridge: Bridge? = null
+
+    /**
+     * 这一次「渲染进程崩了 → 重建」已经重试了几次。
+     *
+     * 页面正常加载完就清零（见 `onPageFinished`）：崩一次重建一次是正常的自愈，
+     * 但同一份页面连续崩两次说明重建也救不了，再把用户往闪屏里推就没意义了。
+     */
+    private var webRebuilds = 0
 
     /** SAF 选文件的等待者：pick_playlist_file 是同步命令模型，安卓的选文件是异步回调，中间靠这个搭桥 */
     private var pickResolve: ((String?) -> Unit)? = null
@@ -76,6 +147,74 @@ class MainActivity : Activity() {
         /** 当前活动实例：Bridge 的命令跑在线程池里，要弹权限框必须回到它身上 */
         @Volatile
         var inst: MainActivity? = null
+
+        /**
+         * 熄屏时「从后台把主窗口拉回来」带的那颗标志。
+         *
+         * 用户在别的应用里熄屏时，这一层窗口根本不在前台，光挂 `showWhenLocked`
+         * 没用——必须先把任务拉回来。拉回来之后要不要弹面板，靠这颗 extra 分辨。
+         */
+        const val EXTRA_LOCK_NOW = "lock_now"
+
+        /**
+         * 「该铺锁屏页」这颗 extra 的**发出时刻**（`elapsedRealtime`）。
+         *
+         * 熄屏拉起那条路里有一手是 AlarmManager 代发的 PendingIntent（700ms 后）。
+         * 锁屏状态下系统会把它压后执行，**可能压到用户解锁之后**才送到——那时
+         * 窗口已经在前台了，extra 还是真的，一收到就铺一屏锁屏页盖在应用上
+         * （用户的原话：「点桌面图标，打开的是锁屏页」）。
+         * 带上时间戳，过期的一律当没收到。
+         */
+        const val EXTRA_LOCK_AT = "lock_at"
+
+        /** 熄屏拉起那颗 extra 的有效期：超过这么久的迟到通知不再铺面板 */
+        private const val LOCK_NOW_TTL_MS = 3000L
+
+
+        /**
+         * 主窗口现在算不算「在用户眼前」。
+         *
+         * 熄屏广播（SCREEN_OFF）经常比 `onPause` 晚几百毫秒，所以给 1.2 秒宽限；
+         * 超过说明用户早就切走了，那种情况窗口不在前台、也看不见。
+         */
+        fun foregroundNow(): Boolean {
+            val a = inst ?: return false
+            if (a.resumed) return true
+            return a.pausedAt > 0 && android.os.SystemClock.uptimeMillis() - a.pausedAt < 1200
+        }
+
+        /**
+         * 严格版：**此刻**窗口就在前台。
+         *
+         * 只用在「事后抽查」上（熄屏拉起后 1.2 秒回看窗口到没到），那种场合不能有
+         * `foregroundNow` 那条 1.2 秒宽限——刚 onPause 的窗口会被算成看得见，
+         * 结论就变成「没被拦」，恰恰是最需要报出来的时候。
+         */
+        fun visibleNow(): Boolean = inst?.resumed == true
+
+        /**
+         * 窗口自己处理熄屏的时刻。
+         *
+         * 熄屏这件事**两边都在听**：Activity 的那份负责铺面板，服务的那份负责
+         * 把后台窗口拉回来。可华为的 `ACTION_SCREEN_OFF` 会来两趟（系统广播一趟、
+         * `onPause` 里发现屏幕已黑再兜一趟），第二趟到服务时窗口已经 onPause，
+         * `foregroundNow()` 过了 1.2 秒宽限就变成 false —— 服务以为窗口不在前台，
+         * 又去 `startActivity` + `moveTaskToFront` + 挂一个 700ms 的闹钟 PendingIntent
+         * 把任务栈重排一遍。真机日志（19:09:12 / 19:09:14）就是这个时序，
+         * 用户看到的是「解锁后落到桌面」「点图标进来却弹着锁屏页」。
+         *
+         * 所以：窗口只要**真的铺了面板**（或面板本来就开着），就记一笔，服务端看到就跳过。
+         */
+        @Volatile
+        private var screenOffAt = 0L
+
+        fun markScreenOffHandled() {
+            screenOffAt = android.os.SystemClock.uptimeMillis()
+        }
+
+        /** 最近 5 秒内窗口已经处理过熄屏（面板已铺好），服务端别再拉任务 */
+        fun screenOffHandled(): Boolean =
+            screenOffAt > 0 && android.os.SystemClock.uptimeMillis() - screenOffAt < 5000
 
         /**
          * 冷启动时「其他应用打开」送进来的文件。
@@ -274,6 +413,41 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         /* singleTask：应用已经在后台时，新的「打开方式」走这里而不是 onCreate */
         setIntent(intent)
+        /*
+         * 熄屏时被服务拉回来的（窗口还活着、只是在后台）：直接铺面板。
+         * 不能等 onResume —— 那时窗口已经画了一帧主界面出去了。
+         */
+        if (intent?.getBooleanExtra(EXTRA_LOCK_NOW, false) == true) {
+            intent.removeExtra(EXTRA_LOCK_NOW)
+            /* 拉起这件事本身成功了就先记账：迟到的 extra 不该被算成「系统拦截」 */
+            LockScreen.markAck()
+            if (lockNowWanted(intent)) {
+                applyLockWindow(true)
+                if (LockScreen.enabled(this) && NowPlaying.playing) {
+                    showLockPanel(preview = false)
+                    if (lockPanel?.shown != true) applyLockWindow(false)
+                    else pulledForLock = true
+                } else {
+                    applyLockWindow(false)
+                }
+            } else {
+                applyLockWindow(false)
+                /*
+                 * 这一次是**我们自己**发出去的「熄屏拉起」，只是迟到（或者屏幕已经解锁）。
+                 *
+                 * 那一发 `startActivity` / 那颗迟到的闹钟 PendingIntent 已经把任务带到
+                 * 前台了，extra 虽被忽略，窗口却留在前台 —— 用户看到的就是
+                 * 「解锁后过一会儿应用自己又打开了」。所以这里要把任务退回去。
+                 *
+                 * 只在「窗口原本在后台」时退：用户正用着应用的时候收到一颗历史 extra，
+                 * 不能把他踢出去。
+                 */
+                if (!resumed) {
+                    LockScreen.trace("lock_now 无效且窗口原在后台 → 任务退回后台")
+                    dropTaskNow(hideWeb = true)
+                }
+            }
+        }
         handleIncoming(intent)
     }
 
@@ -363,8 +537,40 @@ class MainActivity : Activity() {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
 
-        web = WebView(this)
-        setContentView(web)
+        /*
+         * 容器从「直接 setContentView(web)」换成一个 FrameLayout：
+         * 锁屏播放页是叠在它上面的一层（见 [LockScreenPanel]）。
+         * 这一层是懒加载的 —— 没开锁屏页、或者从没熄过屏的用户，
+         * 根本不会 inflate 那份布局，内存和首帧都不受影响。
+         */
+        rootView = FrameLayout(this)
+        setContentView(rootView)
+        /*
+         * **永远让 Chromium 认为「页面可见」。**
+         *
+         * WebView 把「窗口可见性」当页面可见性：有别的 Activity 盖上来时窗口变
+         * GONE，Chromium 就把文档标成 hidden，JS 定时器整组冻住——当年独立
+         * LockActivity 时代实测「6 秒一次的 setInterval 一次都不跑，
+         * performance.now() 照走」就是这个。现在跨应用熄屏会拉起那个独立
+         * 锁屏 Activity（见 LockActivity），主窗口被它盖住，这一手必须兜住：
+         * 自动切歌整条链（take 直链 → play_url）捏在 JS 里，冻了就是
+         * 「锁屏听完一首就停在两首之间」。
+         *
+         * 代价是应用在后台时 JS 照跑（渲染合成仍会被 INVISIBLE 挡住，不费 GPU），
+         * 对音乐播放器这是想要的：预告表、暂停预缓存本来就需要后台的 JS 定时器。
+         */
+        web = object : WebView(this) {
+            override fun onWindowVisibilityChanged(visibility: Int) {
+                super.onWindowVisibilityChanged(View.VISIBLE)
+            }
+        }
+        rootView.addView(
+            web,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
 
         web.settings.apply {
             javaScriptEnabled = true
@@ -409,11 +615,47 @@ class MainActivity : Activity() {
                 if (url.host != "appassets.androidplatform.net") return null
                 val path = url.path ?: "/"
                 if (path.startsWith("/cover/")) return coverResponse(path.removePrefix("/cover/"))
+                if (path.startsWith("/cachefile")) return cacheFileResponse(url)
                 return assetResponse(if (path == "/" || path.isBlank()) "www/index.html" else "www" + path)
+            }
+
+            /**
+             * 渲染进程崩了：**默认行为是把整个应用一起杀掉**。
+             *
+             * 真机日志（华为 ALN-AL00 / EMUI 14，2026-11-17）：
+             *   `Abort message: '[FATAL:crashpad_client_linux.cc(798)] Render process
+             *    (25079)'s crash wasn't handled by all associated webviews,
+             *    triggering application crash.'`
+             * 之后 `Process cn.shuyin.player has died: prcp FGS` —— 播放中的
+             * 前台服务、预告表、锁屏页一起没了，用户听到的就是「放着放着突然停」。
+             *
+             * 返回 true 表示「我处理了」，系统就不会再杀进程；播放本身在
+             * `PlaybackService` 里，跟 WebView 无关，还能继续响。界面靠重建
+             * Activity 恢复（页面重新加载后，前端会走原生恢复那条路把队列和
+             * 进度接管回来）。
+             *
+             * 连续崩就认输：同一份页面对同一台机器反复崩，重建只会让用户看到
+             * 反复闪屏；留一份音频在那儿放，比来回闪强。
+             */
+            @android.annotation.TargetApi(26)
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: android.webkit.RenderProcessGoneDetail?,
+            ): Boolean {
+                val crashed = detail?.didCrash() == true
+                LockScreen.trace("webview 渲染进程没了 didCrash=$crashed 重建=${webRebuilds + 1}")
+                if (webRebuilds < 2) {
+                    webRebuilds++
+                    /* 不能在这一帧里 recreate：崩溃回调还没走完，窗口正在拆 */
+                    rootView.postDelayed({ runCatching { recreate() } }, 500)
+                }
+                return true
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
                 Log.i("Shuyin", "page finished: $url")
+                /* 页面真的加载完了：崩溃重建的额度还回去，下次崩还能自愈 */
+                webRebuilds = 0
                 /*
                  * 必须在这里再推一次。
                  * onCreate 里那次跑在页面还没加载完的时刻，evaluateJavascript 写在
@@ -465,7 +707,40 @@ class MainActivity : Activity() {
          * 只有在没有 savedInstanceState 时处理——转屏重建会带着同一个 intent 回来，
          * 再处理一次等于每转一次屏弹一个导入框。
          */
+        /*
+         * 熄屏 / 亮屏 / 解锁：锁屏播放页的三个时机。页面是本窗口的一层 View，
+         * 所以判断必须跟着窗口走（窗口标志也只有 Activity 有）。
+         */
+        try {
+            registerReceiver(
+                screenRx,
+                IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_USER_PRESENT)
+                },
+            )
+        } catch (_: Exception) { /* 个别 ROM 限制动态注册：只是没有锁屏页，不影响播放 */ }
+
         if (savedInstanceState == null) handleIncoming(intent)
+
+        /*
+         * 熄屏时被服务从后台拉起来的（用户在别的应用里按了电源键）：窗口刚创建，
+         * 锁屏标志必须**赶在第一次绘制之前**挂上，否则亮屏那一瞬先看到的是主界面。
+         */
+        if (intent?.getBooleanExtra(EXTRA_LOCK_NOW, false) == true) {
+            intent.removeExtra(EXTRA_LOCK_NOW)
+            LockScreen.markAck()
+            /*
+             * 只有「现在真的该铺」才挂标志 + 挂起待办。
+             * 迟到的 extra（锁屏期间被压后的闹钟）进到这里就是用户点了图标，
+             * 再挂 `showWhenLocked` 会在**第一次绘制之前**就把窗口置成锁屏形态。
+             */
+            if (lockNowWanted(intent)) {
+                pendingLockNow = true
+                applyLockWindow(true)
+            }
+        }
     }
 
     /**
@@ -610,8 +885,78 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // 从别的应用/登录窗回来后，系统可能把隐藏态还原了；照前端最后的意思再补一次
-        if (barsHidden) web.post { applySystemBars() }
+        resumed = true
+        LockScreen.trace("lifecycle onResume kg=${keyguardShowing()} pulled=$pulledForLock shown=${lockPanel?.shown == true}")
+        /*
+         * 上一次「解锁退任务」为了不闪主界面把整棵树藏住了（见 `dropTaskNow`），
+         * 正常情况下由 onStop 亮回来。用户在这几百毫秒内点通知回来时窗口直接
+         * 回到前台、可能走不到 onStop，这里也兜一手。
+         */
+        /*
+         * 上一次「解锁退任务」为了不闪主界面把整棵树藏住了（见 `dropTaskNow`），
+         * 正常情况下由 onStop 亮回来。用户在这几百毫秒内点通知回来时窗口直接
+         * 回到前台、可能走不到 onStop，这里也兜一手。
+         *
+         * **但「熄屏拉起的这一趟」还没退完时不能亮**：那说明窗口又被系统带到前台
+         * 了（解锁转场、锁屏重排），这时候亮出主界面就是用户看到的那一下闪。
+         */
+        if (!pulledForLock) {
+            restoreOnStop = false
+            if (lockPanel?.shown != true && web.visibility != View.VISIBLE) web.visibility = View.VISIBLE
+            if (rootView.visibility != View.VISIBLE) rootView.visibility = View.VISIBLE
+        }
+        /*
+         * 熄屏时被拉起来的：这时播放状态、曲目信息都已经就绪，铺面板正合适。
+         * 已经不放了（或用户把开关关了）就把刚挂上的锁屏标志摘掉。
+         */
+        if (pendingLockNow) {
+            pendingLockNow = false
+            /*
+             * 只有「还锁着」或者「屏幕黑着」才铺。
+             *
+             * 屏幕亮着、锁也解了，说明这一趟是用户自己点图标回来的（或者是那次
+             * 熄屏拉起留下的一颗迟到 extra）——这时候再铺上去，就是他说的
+             * 「点桌面图标，打开的是我们应用的锁屏页」。
+             */
+            val wanted = LockScreen.enabled(this) && NowPlaying.playing &&
+                (!isInteractive() || keyguardShowing())
+            if (wanted) {
+                showLockPanel(preview = false)
+                if (lockPanel?.shown != true) applyLockWindow(false) else pulledForLock = true
+            } else {
+                applyLockWindow(false)
+            }
+        }
+        /*
+         * 个别 ROM 在息屏/亮屏之间会把 FLAG_SHOW_WHEN_LOCKED 清掉，清了就会露出系统锁屏。
+         *
+         * 但**锁已经解开就一定要收**：不管面板是被哪条路径留下的（上滑收起被顶掉、
+         * USER_PRESENT 广播没来、任务被重排），只要此刻能到 onResume 且系统已经解锁，
+         * 再把 WebView 藏起来就是「应用打不开，只有一屏锁屏页」。
+         * 用户自己点开的预览（`isPreview`）不算——那是屏幕亮着时他主动看的。
+         */
+        lockPanel?.takeIf { it.shown }?.let { panel ->
+            /*
+             * 只在**屏幕亮着**时才敢做这个判断：熄屏期间个别 ROM 的
+             * `isKeyguardLocked` 会返回 false，那时候误收就等于「熄屏拉起白做一遍」。
+             */
+            if (!panel.isPreview() && isInteractive() && !keyguardShowing()) {
+                hideLockPanel(fromUser = false, revealWeb = false)
+                dropTaskAfterUnlock()
+                return@let
+            }
+            applyLockWindow(true)
+            web.visibility = View.INVISIBLE
+            lockBars = true
+            web.post { applySystemBars() }
+        }
+        if (barsHidden || lockBars) web.post { applySystemBars() }
+        /*
+         * 解锁那一趟：面板可能已经被别的路径收掉了（USER_PRESENT 没来、系统直接把
+         * 窗口压下去），所以这一句**不能挂在「面板还开着」里**，否则最该退任务的
+         * 时候恰好什么都不做。
+         */
+        if (isInteractive() && !keyguardShowing()) dropTaskAfterUnlock()
         /*
          * 回到前台了。**必须告诉前端一声**：在后台这段时间里，原生侧能单方面
          * 改掉一些只有它知道的状态——最典型的就是悬浮歌词（通知栏那颗「词」、
@@ -620,6 +965,465 @@ class MainActivity : Activity() {
          * 离开前的样子（用户说的「桌面歌词的开关显示不准确」）。
          */
         bridge?.emit("app://resume", "{}")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        LockScreen.trace("lifecycle onPause kg=${keyguardShowing()} pulled=$pulledForLock shown=${lockPanel?.shown == true}")
+        pausedAt = SystemClock.uptimeMillis()
+        /*
+         * 兜底：屏幕已经灭了但 SCREEN_OFF 广播还没到（或压根没收到）。
+         * 屏幕还亮着时说明只是切到别的应用，不是熄屏——那种情况绝不弹。
+         */
+        if (!isInteractive()) {
+            onScreenOff()
+        } else if (lockPanel?.shown == true && !keyguardShowing()) {
+            /*
+             * 屏幕亮着、锁也解开了，却在离开前台：说明用户已经离开锁屏
+             * （按了 HOME / 从通知栏跳走）。这一层没有理由再挂着。
+             */
+            hideLockPanel(fromUser = false)
+        }
+        /*
+         * 屏幕亮着却离开了这个应用：说明「借任务栈显示锁屏页」那一趟已经结束，
+         * 不管是解锁退回去的，还是用户自己按 HOME 走的 —— 别再记着要退任务了。
+         *
+         * **锁还在的时候不能清。** 解锁的第一拍是「锁屏页这一层被系统挡住 → 本
+         * Activity onPause」，此刻屏幕已经亮了、锁还没解开，按这条清掉标记的话，
+         * 紧接着那次 onResume 就什么都不做——用户解锁后照样落在疏音的界面上
+         * （2026-11-17 真机复现）。
+         */
+        if (isInteractive() && !keyguardShowing()) pulledForLock = false
+        resumed = false
+    }
+
+    override fun onStop() {
+        super.onStop()
+        LockScreen.trace("lifecycle onStop kg=${keyguardShowing()} hidden=$restoreOnStop")
+        /*
+         * 窗口真的不可见了：`dropTaskNow` 藏的那一树可以放心亮回来。
+         * 用户下次从最近任务 / 图标回来，onResume 看到的就是正常界面。
+         */
+        restoreViewsIfHidden()
+        if (!isInteractive()) stopUnlockProbe()
+    }
+
+    /* ---------------- 锁屏播放页 ---------------- */
+
+    /**
+     * 熄屏 / 亮屏 / 解锁三个时机。
+     *
+     * 页面是**本窗口的一层 View**，能不能盖住系统锁屏取决于窗口标志，而窗口只有
+     * Activity 有。所以这三个时机必须跟窗口走，不能挂在服务上。
+     */
+    private val screenRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> onScreenOff()
+                Intent.ACTION_SCREEN_ON -> {
+                    /* 熄屏时 tick 降到 800ms，亮屏第一眼可能差半拍：先补一帧 */
+                    PlaybackService.instance?.pushNow()
+                    lockPanel?.takeIf { it.shown }?.let {
+                        applyLockWindow(true)
+                        it.setAwake(true)
+                    }
+                    /* 抢在 USER_PRESENT 之前发现解锁（见 `unlockProbe`） */
+                    startUnlockProbe()
+                }
+                Intent.ACTION_USER_PRESENT -> onUserPresent()
+            }
+        }
+    }
+
+    /**
+     * 熄屏那一刻：要不要把锁屏播放页顶上来。
+     *
+     * 这里只挂标志 + 显示这一层，**一行点屏的代码都没有**：
+     *   · 不调 `setTurnScreenOn` / 不加 `FLAG_TURN_SCREEN_ON`；
+     *   · 不发全屏意图（鸿蒙上 IMPORTANCE_HIGH 必点亮屏幕）。
+     * 屏幕由用户按电源键点亮，那一刻这一层已经在窗口里了。
+     */
+    private fun onScreenOff() {
+        stopUnlockProbe()
+        lockPanel?.setAwake(false)
+        LockScreen.trace(
+            "SCREEN_OFF in activity fg=${foregroundNow()} playing=${NowPlaying.playing} " +
+                "shown=${lockPanel?.shown == true}",
+        )
+        if (!LockScreen.enabled(this)) return
+        if (!NowPlaying.playing) return
+        if (lockPanel?.shown == true) {
+            /*
+             * 面板已经在（熄屏来了两趟的第二趟，或者上个熄屏周期还没收）。
+             * 记一笔告诉服务端「窗口这边处理过了」，别再去拉任务——那条路径
+             * 会 `moveTaskToFront` 并挂一个 700ms 的闹钟 PendingIntent，
+             * 解锁之后任务栈就被它搅乱了。
+             */
+            markScreenOffHandled()
+            return
+        }
+        if (!foregroundNow()) return
+        showLockPanel(preview = false)
+        if (lockPanel?.shown == true) markScreenOffHandled()
+    }
+
+    /** 用户真的解开了锁：自动弹的那一次收掉（预览态是用户自己点开的，留着） */
+    private fun onUserPresent() {
+        /*
+         * 熄屏期间也会收到一次 USER_PRESENT（真机实测：熄屏拉起 3 秒后就来了一条，
+         * 而那时候屏幕还黑着）——多半是我们这层 showWhenLocked 窗口让系统认成
+         * 「锁已经没了」。
+         *
+         * 这条假信号代价很大：它会把「熄屏拉起的这一趟」记的账抹掉、把面板收掉、
+         * 再把任务退回后台 —— 用户按电源键亮屏时，看到的是光秃秃的系统锁屏；
+         * 而真正的解锁反倒是「没账可退」，任务又被留在前台。
+         * 真解锁时屏幕一定是亮的，拿它当判据。
+         */
+        if (!isInteractive()) {
+            LockScreen.trace("USER_PRESENT 但屏幕没亮（熄屏期间），忽略")
+            return
+        }
+        onUnlockDetected("USER_PRESENT")
+    }
+
+    /**
+     * 解锁早鸟：亮屏之后每 110ms 问一次 keyguard，抢在解锁动画放完之前收摊。
+     *
+     * 只在「这一屏是熄屏拉起的」或者「锁屏页还开着」时才值这个开销 ——
+     * 用户正常解锁自己的手机，跟疏音没有关系。
+     */
+    private fun startUnlockProbe() {
+        stopUnlockProbe()
+        if (!isInteractive()) return
+        if (!pulledForLock && lockPanel?.shown != true) return
+        probeFrom = SystemClock.elapsedRealtime()
+        probeTries = 0
+        probeHits = 0
+        LockScreen.trace("unlockProbe 启动 pulled=$pulledForLock")
+        web.postDelayed(unlockProbe, 110)
+    }
+
+    private fun stopUnlockProbe() {
+        web.removeCallbacks(unlockProbe)
+        probeTries = 0
+        probeHits = 0
+    }
+
+    private fun probeUnlock() {
+        if (!isInteractive()) { stopUnlockProbe(); return }
+        if (!pulledForLock && lockPanel?.shown != true) { stopUnlockProbe(); return }
+        val age = SystemClock.elapsedRealtime() - probeFrom
+        /*
+         * 亮屏后 350ms 内的「没锁」不当真：华为从 AOD / 熄屏过渡时会短暂报
+         * `isKeyguardLocked=false`，那时候动手等于把刚铺好的锁屏页收掉。
+         */
+        if (!keyguardShowing() && age >= 350) {
+            probeHits++
+            if (probeHits >= 2) {
+                stopUnlockProbe()
+                LockScreen.trace("解锁(probe)：keyguard 已消失 ${age}ms，先收摊再退任务")
+                onUnlockDetected("probe")
+                return
+            }
+        } else {
+            probeHits = 0
+        }
+        probeTries++
+        /*
+         * 前 15 秒盯得紧（110ms，覆盖「按电源键顺手就解锁」的绝大多数）；
+         * 之后松到 1 秒一直盯到熄屏 —— 用户也可能亮屏看半天时间才解锁。
+         *
+         * 注意华为实测（2026-11-17）：`isKeyguardLocked` 跟 `ACTION_USER_PRESENT`
+         * 只差 12ms，这条探针在这个 ROM 上抢不到提前量。留着是给别的 ROM 用，
+         * 真正兜住闪屏的是 `hideLockPanel` 的 `!pulledForLock` 与 `onStop` 恢复。
+         */
+        if (probeTries > 140) web.postDelayed(unlockProbe, 1000) else web.postDelayed(unlockProbe, 110)
+    }
+
+    /**
+     * 解锁那一下该做的事（probe 与 USER_PRESENT 共用，先到先做、后来的幂等）。
+     *
+     * 顺序是**先撤面板再退任务**：面板占满整屏，先 moveTaskToBack 的话，
+     * 退场动画那几帧里画的还是它。
+     */
+    private fun onUnlockDetected(why: String) {
+        val p = lockPanel
+        if (p != null && p.shown && !p.isPreview()) hideLockPanel(fromUser = false, revealWeb = false)
+        /*
+         * 面板收没收都要问一句「这一屏是不是被拉起来的」：
+         * 换歌把面板收掉、或者当次没铺成功，用户在别的应用里解锁之后
+         * 露出来的仍然是我们的主界面，一样该退回后台。
+         */
+        if (pulledForLock) LockScreen.trace("解锁($why)：这一屏是熄屏拉起的 → 任务退回后台")
+        dropTaskAfterUnlock()
+    }
+
+    /**
+     * 解锁之后把任务退回后台（只对「熄屏时被服务拉起来」的那一趟生效）。
+     *
+     * 为什么用 `moveTaskToBack` 而不是 `finish()`：这一趟只是「借你的任务栈
+     * 把锁屏页显示出来」，任务本身、WebView、播放队列都得留着。退到后面去，
+     * 原来的应用就露出来了，用户点通知 / 图标还能立刻回来。
+     *
+     * 注意这和「用户上滑收起面板」不是一回事：那种情况**绝不能**退任务
+     * （见 `hideLockPanel` 的注释），因为在锁屏上把任务挪走会落到系统锁屏后面。
+     */
+    private fun dropTaskAfterUnlock() {
+        if (!pulledForLock) {
+            /*
+             * 已经在退场藏相（`dropTaskNow` 把整棵树藏了，等 onStop 才亮回来）：
+             * **绝不能在这里亮回来**。
+             *
+             * `onResume` 会连着调两次这里（面板那一支退完，末尾那一句又退一次），
+             * 第二次走到这个分支时账已经清了，于是视图被立刻恢复 —— 退场动画还在
+             * 走，用户看到的就是「解锁后应用闪一下」。2026-11-17 录屏那 0.9 秒
+             * 的闪，一半来自 USER_PRESENT 太晚，另一半就是这一下抢跑。
+             */
+            if (restoreOnStop) return
+            /*
+             * 没有要退的任务。但调用方可能已经把 WebView 藏住了（解锁时先藏再退，
+             * 见 `dropTaskNow`）—— 这里必须恢复，否则用户看到是一片空白。
+             */
+            if (lockPanel?.shown != true && web.visibility != View.VISIBLE) web.visibility = View.VISIBLE
+            if (rootView.visibility != View.VISIBLE) rootView.visibility = View.VISIBLE
+            return
+        }
+        pulledForLock = false
+        LockScreen.trace("解锁：这一屏是熄屏拉起的 → 任务退回后台")
+        /*
+         * **无条件藏 WebView**，不看它此刻是什么可见性。
+         *
+         * 这一趟的用户预期是「回到我原来的应用」，不该看见疏音的主界面。之前按
+         * 「web 已经藏着才藏」来判断，漏掉了最常见的一种：面板先被别的路径收掉
+         * （换歌清空、SCREEN_ON、上滑），`hideLockPanel` 已经把 WebView 亮回来了，
+         * 解锁退任务那几十毫秒里主界面就露了一下 —— 用户的原话「解锁还是会出现
+         * 一下，然后退出」。
+         */
+        dropTaskNow(hideWeb = true)
+    }
+
+    /**
+     * 把任务退回后台（`dropTaskAfterUnlock` / 迟到 extra 两条路共用）。
+     *
+     * @param hideWeb 退场前要不要把 WebView 一起藏住。
+     *   `moveTaskToBack` 不是瞬间生效的，它有一段几十~几百毫秒的退场动画；
+     *   这段时间主界面已经露出来了，用户看到的就是「解锁后应用闪一下打开了」。
+     *   藏住 WebView，这一下看到的是「锁屏页淡出、回到原来的应用」，没有闪。
+     *   退完 600ms 再恢复（那时窗口已经在后台，恢复无感）。
+     */
+    private fun dropTaskNow(hideWeb: Boolean) {
+        if (hideWeb) {
+            /*
+             * 光藏 WebView 还不够：窗口本身的底色（主题背景）还会被画出来，
+             * 退场那一两百毫秒里用户看到的是一块纯色 —— 仍然是「出现一下」。
+             * 把整棵视图树藏掉，这一趟就不留任何一个属于疏音的像素。
+             */
+            if (lockPanel?.shown != true) web.visibility = View.INVISIBLE
+            rootView.visibility = View.INVISIBLE
+            restoreOnStop = true
+        }
+        /*
+         * 退到后台。**不要指望「回到上一个应用」**：`moveTaskToBack` 的语义就是按 Home
+         * （2026-11-18 实测：退完后桌面 `visible=true`，微信 task 还活着却在下面）。
+         * 曾经用「使用情况访问」记下熄屏前的前台再拉回来，真机上判不准
+         * （华为浏览器被判成不可返回），还得额外要一个权限，已撤。
+         *
+         * 现在这条路只会出现在「疏音自己在前台时熄屏、用户又上滑收起」——
+         * 用户本来就在我们这里，退后台落桌面是对的。
+         */
+        moveTaskToBack(true)
+        if (hideWeb) {
+            /*
+             * **恢复的时机必须等窗口真的不可见，不能看钟**。
+             *
+             * 以前写死 600ms：`moveTaskToBack` 撞上解锁动画时，华为要 1 秒出头
+             * 才把这一层挪下去，600ms 一到视图先亮了，用户看到的就是那一下
+             * 「应用闪一下」。window 不可见时会走 onStop（见下面的恢复），
+             * 这里只留一颗 2.5 秒的兜底，防某些 ROM 不 stop。
+             */
+            web.postDelayed({ restoreViewsIfHidden() }, 2500)
+        }
+    }
+
+    /** 把 `dropTaskNow` 藏起来的视图还回来（onStop / 兜底 / onResume 三处共用，幂等） */
+    private fun restoreViewsIfHidden() {
+        if (!restoreOnStop) return
+        restoreOnStop = false
+        rootView.visibility = View.VISIBLE
+        if (lockPanel?.shown != true) web.visibility = View.VISIBLE
+    }
+
+    private fun isInteractive(): Boolean = try {
+        (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+    } catch (_: Exception) {
+        true
+    }
+
+    private fun keyguardShowing(): Boolean = try {
+        (getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked
+    } catch (_: Exception) {
+        false
+    }
+
+    /**
+     * 这一趟 `EXTRA_LOCK_NOW` 还该不该真的铺一屏锁屏页（调用方已确认 extra 在）。
+     *
+     * 两条都会让它失效：
+     *   · **过期**。熄屏拉起有一手是 700ms 后的闹钟 PendingIntent，锁屏期间系统
+     *     可能把它压到用户解锁之后才送进来——窗口已经在前台，extra 却还是真的。
+     *   · **屏幕亮着且已解锁**。这就是「用户自己点图标进来」：他要看主界面。
+     *
+     * 两个条件缺一个都会变成用户报的那条「点图标打开应用，结果给我看锁屏页」。
+     */
+    private fun lockNowWanted(intent: android.content.Intent?): Boolean {
+        val at = intent?.getLongExtra(EXTRA_LOCK_AT, 0L) ?: 0L
+        if (at > 0) {
+            val age = android.os.SystemClock.elapsedRealtime() - at
+            if (age > LOCK_NOW_TTL_MS) {
+                LockScreen.trace("lock_now 迟到 ${age}ms，忽略")
+                return false
+            }
+        }
+        if (isInteractive() && !keyguardShowing()) {
+            LockScreen.trace("lock_now 但已解锁在前台，忽略")
+            return false
+        }
+        return true
+    }
+
+    /**
+     * 锁屏页浮在上面时停掉 WebView 的**合成**（不是执行）。
+     *
+     * `INVISIBLE` 只是不参与绘制，JS 照跑 —— 队列推进、取链、歌词推送全靠它。
+     */
+    fun setWebHidden(hidden: Boolean) {
+        runOnUiThread { web.visibility = if (hidden) View.INVISIBLE else View.VISIBLE }
+    }
+
+    /** 设置页点「预览」：屏幕亮着、用户正看着这一次 */
+    fun previewLockPanel() = showLockPanel(preview = true)
+
+    /**
+     * 把锁屏播放页拿上来。
+     *
+     * @param preview true = 用户主动预览（屏幕亮着），false = 熄屏时自动弹的。
+     */
+    fun showLockPanel(preview: Boolean) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            runOnUiThread { showLockPanel(preview) }
+            return
+        }
+        if (!LockScreen.enabled(this)) return
+        if (NowPlaying.title.isBlank()) return
+        val p = lockPanel ?: LockScreenPanel(this) { byUser -> hideLockPanel(byUser) }.also {
+            rootView.addView(
+                it,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            lockPanel = it
+        }
+        if (p.shown) { p.show(preview); return }
+        p.show(preview)
+        applyLockWindow(true)
+        web.visibility = View.INVISIBLE
+        lockBars = true
+        web.post { applySystemBars() }
+        if (preview && LockScreen.guideNeeded(this)) LockScreen.postGuide(this)
+    }
+
+    /**
+     * 收起锁屏播放页。
+     *
+     * @param fromUser 用户上滑 / 点提示条收的（区别于解锁、换歌为空、开关关掉）。
+     * @param revealWeb 收起后要不要把 WebView 亮出来。解锁那一趟要传 false：
+     *   任务马上要退到后台，先亮出来只会让主界面在退场动画里闪一下。
+     */
+    fun hideLockPanel(fromUser: Boolean, revealWeb: Boolean = true) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            runOnUiThread { hideLockPanel(fromUser, revealWeb) }
+            return
+        }
+        val p = lockPanel ?: return
+        if (!p.shown) return
+        /*
+         * 用户上滑收起，而这一屏本来就是「熄屏时被服务拉起来」的：
+         * 他要的是离开（回系统锁屏、回他原来的应用），**绝不能把我们的主界面亮出来**。
+         *
+         * 2026-11-17 23:05:30 实测日志（用户录屏那一下）：
+         *   hidePanel byUser=true reveal=true pulled=true kg=true
+         *   → 32.017 onResume（窗口回到前台，主界面可见）
+         *   → 32.363 才收到 USER_PRESENT，退任务
+         * 中间这 0.35 秒屏幕上就是疏音搜索页。面板收起了、账还在，露出来的只能是
+         * 主界面 —— 这是那段视频里「闪一下」的真正入口，比广播迟到更致命。
+         */
+        val leaveTask = fromUser && pulledForLock
+        /*
+         * 只要这一屏是「被拉起来的」，收起面板就**不许亮主界面**——
+         * 不管是用户上滑、系统把我们 pause 掉，还是换歌把面板清空。
+         * 用户要的那一屏从来不是我们的主界面。
+         */
+        val reveal = revealWeb && !pulledForLock
+        LockScreen.trace(
+            "hidePanel byUser=$fromUser reveal=$reveal leaveTask=$leaveTask pulled=$pulledForLock kg=${keyguardShowing()}",
+        )
+        p.hide()
+        applyLockWindow(false)
+        if (reveal) web.visibility = View.VISIBLE
+        lockBars = false
+        web.post { applySystemBars() }
+        if (leaveTask) {
+            /*
+             * 面板都收了，这一趟也到站了。直接退任务：等系统自己解锁再退的话，
+             * 从「面板收起」到「USER_PRESENT」之间那段窗口是前台可见的。
+             *
+             * 退场前摘掉 `showWhenLocked`，系统锁屏自然回到最前面；
+             * 视图保持隐藏，等 onStop（窗口真的不可见）再亮回来 —— 用户从最近任务
+             * 或图标回来时看到的是正常主界面。
+             */
+            pulledForLock = false
+            LockScreen.trace("上滑收起：这一屏是熄屏拉起的 → 任务退回后台")
+            dropTaskNow(hideWeb = true)
+            return
+        }
+        /*
+         * 用户上滑收起、而手机还锁着：他想要的是回到系统锁屏。
+         *
+         * **只摘掉 `showWhenLocked`，绝不 `moveTaskToBack`。**
+         *
+         * 以前这里退后台，本意是「让系统锁屏露出来」，实际后果是：
+         * 用户解锁时那次上滑本来就会被这一层吃掉（`LockScreenPanel` 把向上的拖
+         * 全接了），于是「上滑解锁」直接变成「收起锁屏页 + 任务退到后台」——
+         * 解锁完成，桌面就上来了。用户的原话是「锁屏后打开，被退回了桌面」，
+         * 而任务在后台还留着，点图标回来时 `NowPlaying.playing` 仍为真，
+         * 又是那一层开着的样子（「点图标打开的是锁屏页」）。
+         *
+         * 摘掉窗口标志就够了：Activity 一旦不再盖在 keyguard 之上，系统锁屏
+         * 自己会回到最前面；用户要真想离开应用，按 HOME 就行。
+         */
+    }
+
+    /**
+     * 窗口标志：压在系统锁屏之上。
+     *
+     * 这是「能不能在锁屏上看到」的唯一开关 —— Activity 窗口带 `showWhenLocked`
+     * 时，系统允许它盖在 keyguard 上面（悬浮窗没有这个待遇，见 LockScreen 的注释）。
+     */
+    private fun applyLockWindow(on: Boolean) {
+        try {
+            if (Build.VERSION.SDK_INT >= 27) {
+                setShowWhenLocked(on)
+            } else {
+                @Suppress("DEPRECATION")
+                if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+            }
+        } catch (_: Exception) { /* 标志设不上：退回系统锁屏，不影响播放 */ }
+        if (!on) {
+            @Suppress("DEPRECATION")
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+        }
     }
 
     /* ---------------- 权限 ---------------- */
@@ -768,6 +1572,38 @@ class MainActivity : Activity() {
         )
     }
 
+    /**
+     * 前端缓存目录里的文件（离线封面）。
+     *
+     * 为什么需要这条路由：`allowFileAccess = false`，`file://` 的图在 WebView 里
+     * 一律加载不出来；而离线封面就躺在 `Sy.cacheAudio` 里。前端把绝对路径
+     * 拼成 `/cachefile/?p=` 交过来，这里读出来喂回去（见 `mediaCache.localFileUrl`）。
+     *
+     * 只放行缓存目录下的文件：这条路由对着的是 WebView，别让它变成任意文件读取口子。
+     */
+    private fun cacheFileResponse(url: Uri): WebResourceResponse? {
+        val p = try { url.getQueryParameter("p") } catch (_: Exception) { null } ?: return null
+        val target = try { File(p).canonicalFile } catch (_: Exception) { return null }
+        val root = try { Sy.cacheAudio.canonicalFile } catch (_: Exception) { return null } ?: return null
+        if (!target.path.startsWith(root.path + File.separator)) return null
+        if (!target.exists() || target.length() <= 0) return null
+        val mime = when (target.extension.lowercase()) {
+            "png" -> "image/png"
+            "webp" -> "image/webp"
+            else -> "image/jpeg"
+        }
+        return try {
+            // 封面是不会变的内容，缓存一天；文件名带地址哈希，换了地址就是另一个文件
+            WebResourceResponse(
+                mime, null, 200, "OK",
+                mapOf("Cache-Control" to "max-age=86400"),
+                target.inputStream(),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun noCacheHeaders(): Map<String, String> = mapOf(
         // index.html 必须每次都要新的，否则换版后用户装着旧界面还以为是 bug
         "Cache-Control" to "no-cache",
@@ -792,11 +1628,19 @@ class MainActivity : Activity() {
     /* ---------------- 返回键 ---------------- */
 
     override fun onBackPressed() {
+        /* 锁屏页在最上面时，返回键收的是它（用户不该透过它去操作底下的应用） */
+        if (lockPanel?.shown == true) { hideLockPanel(fromUser = true); return }
         // 先问前端「这一下该关的是哪一层」：沉浸式播放页 / 队列抽屉 / 子页都比退出优先
         web.evaluateJavascript("(function(){try{return !!(window.__syBack&&window.__syBack())}catch(e){return false}})()") { r ->
             if (r == "true") return@evaluateJavascript
             if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        /* 窗口什么时候真正拿到焦点 = 系统把锁屏让开的那一刻，排查闪屏全靠它对齐 */
+        if (hasFocus) LockScreen.trace("window focus on kg=${keyguardShowing()}")
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -808,6 +1652,9 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         if (inst === this) inst = null
+        try { web.removeCallbacks(unlockProbe) } catch (_: Exception) {}
+        try { unregisterReceiver(screenRx) } catch (_: Exception) { /* 没注册成功 */ }
+        try { lockPanel?.dispose() } catch (_: Exception) { /* 跟着窗口一起销毁 */ }
         try { web.destroy() } catch (_: Exception) {}
         super.onDestroy()
     }

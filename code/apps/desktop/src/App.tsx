@@ -17,6 +17,7 @@ import { ImmersivePlayer } from './components/ImmersivePlayer'
 import { SpectrumEdges } from './components/SpectrumLayer'
 import { HomePage } from './pages/HomePage'
 import { FavPage } from './pages/FavPage'
+import { HistoryPage } from './pages/HistoryPage'
 import { LibraryPage } from './pages/LibraryPage'
 import { LocalPlaylistPage } from './pages/LocalPlaylistPage'
 import { SearchPage } from './pages/SearchPage'
@@ -33,6 +34,7 @@ import { useSpectrumPos } from './lib/spectrumPos'
 import { useTheme } from './lib/ThemeProvider'
 import { bridge, isAndroid, type IncomingFile } from './lib/bridge'
 import { useShell } from './lib/shellMode'
+import { statPing } from './lib/stats'
 import { onNative, setBackHandler } from './lib/native/android'
 import { confirm } from './lib/confirm'
 import { sourceManager } from './lib/online'
@@ -76,9 +78,10 @@ export function App() {
    * 所以开机直接落在曲库上——不然第一屏永远是那张没有入口的仪表盘。
    */
   /* `'all'` = 全部，`'fav'` = 收藏（「我的歌单」第一张卡「我喜欢的音乐」点进来落这里） */
-  const [homeLib, setHomeLib] = useState<false | 'all' | 'fav'>(shell === 'car' ? 'all' : false)
+  const [homeLib, setHomeLib] = useState<false | 'all' | 'fav'>(false)
   /** 「我喜欢的音乐」页（收藏的歌曲）：挂在「我的」上面，和曲库子页同级 */
   const [homeFav, setHomeFav] = useState(false)
+  const [homeHist, setHomeHist] = useState(false)
   /**
    * 在线歌单详情。`from` 记住「从哪儿点进来的」：
    * 搜索页点进来返回搜索页，；「我的 → 收藏的歌单」点进来返回「我的」——
@@ -515,6 +518,9 @@ export function App() {
         setUpd(i)
       })
     }, ms))
+    /* 匿名心跳（24h 一次，端点未配置时是 no-op）：跟着更新检查一起出门，
+       别单独起一条网络路径 */
+    window.setTimeout(() => { if (!stop) void statPing() }, 6000)
     return () => { stop = true; timers.forEach(t => window.clearTimeout(t)) }
   }, [])
 
@@ -652,6 +658,7 @@ export function App() {
     if (onlinePl) { setOnlinePl(null); return true }
     if (localPl) { setLocalPl(null); return true }
     if (homeFav) { setHomeFav(false); return true }
+    if (homeHist) { setHomeHist(false); return true }
     if (homeLib) { setHomeLib(false); return true }
     if (page !== 'home') { nav('home'); return true }
     return false
@@ -730,10 +737,18 @@ export function App() {
       {/* 手机 / 平板 / 车机没有窗口标题栏这回事（那是桌面端的自定义窗口边框） */}
       {shell === 'desk' && <TitleBar page={page} />}
       <Sidebar
-        page={page} onNavigate={nav} trackCount={p.library.length}
+        page={page} trackCount={p.library.length}
+        /* 车机的导轨是「播放页开着时的唯一出路」：沉浸页是全屏浮层，
+           导轨点 媒体库/搜索/设置 却只换底下的页面、不关浮层——用户就被
+           永远压在播放页下面（车机版「直接用不了」的第二成因）。
+           导航 = 离开播放页，一起把浮层收掉。 */
+        onNavigate={p => { if (shell === 'car') { flashPlayer(false); setNowOpen(false) } nav(p) }}
         nowOpen={nowOpen}
         onOpenNow={() => { flashPlayer(true); openDetail(null); setQueueOpen(false); setNowOpen(true) }}
-        onOpenLibrary={() => { nav('home'); setHomeLib('all') }}
+        /* 车机导轨第二格：进完整的「我的」页（本地音乐/播放历史/为你推荐/今天听什么）。
+           以前强制 homeLib='all' 直跳本地曲库——每日推荐、猜你喜欢整块看不到，
+           用户以为功能被砍了（2026-11-21）。 */
+        onOpenLibrary={() => { flashPlayer(false); setNowOpen(false); nav('home') }}
       />
       {/* 平板（设计稿 08）：右侧 340 的「正在播放」栏，底部的播放条让位给它 */}
       {shell === 'tablet' && (
@@ -765,13 +780,14 @@ export function App() {
          * 再返回时，歌单网格的滚动位置和本地曲库的搜索词都还在。
          */}
         <section className="page-slot" data-page="home" data-active={page === 'home' ? 'true' : undefined}>
-          <div className="page-keep" hidden={!!homeDetail || !!localPl || !!homeLib || homeFav}>
+          <div className="page-keep" hidden={!!homeDetail || !!localPl || !!homeLib || homeFav || homeHist}>
             <HomePage
               onOpenDetail={openDetail}
               onOpenLocalPlaylist={id => setLocalPl(id)}
               onOpenOnlinePlaylist={r => { setLocalPl(null); setOnlinePl({ ...r, from: 'home' }) }}
               onOpenLibrary={() => { setLocalPl(null); setHomeLib('all') }}
               onOpenFavs={() => { setLocalPl(null); setHomeLib(false); setHomeFav(true) }}
+              onOpenHistory={() => { setLocalPl(null); setHomeLib(false); setHomeFav(false); setHomeHist(true) }}
             />
           </div>
           {!homeDetail && localPl && (
@@ -782,6 +798,11 @@ export function App() {
           {!homeDetail && homeFav && (
             <div className="page-keep push">
               <FavPage onBack={() => setHomeFav(false)} />
+            </div>
+          )}
+          {!homeDetail && homeHist && (
+            <div className="page-keep push">
+              <HistoryPage onBack={() => setHomeHist(false)} />
             </div>
           )}
           {!homeDetail && homeLib && (
@@ -925,9 +946,14 @@ export function App() {
         <div className={'app-toast' + (nowOpen ? ' low' : '')} role="alert">
           <span className="app-toast-icon" aria-hidden="true">!</span>
           <span className="app-toast-text">{p.lastError}</span>
-          {/* 在线曲目取链失败时，「换源」要随手可点——让用户再去播放条找按钮太绕 */}
+          {/* 在线曲目取链失败时，「重试 / 换源」要随手可点——让用户再去播放条找按钮太绕。
+              两者不同：重试是**同一批音源**再取一次（网络刚恢复、接口偶发超时），
+              换源是把上次那家拉黑（真挂了 / 给的是试听）。断网重连后该先点重试。 */}
           {p.online && (
-            <button className="app-toast-act" onClick={() => { p.clearError(); p.switchSource() }}>换源</button>
+            <>
+              <button className="app-toast-act" onClick={() => p.retryCurrent()}>重试</button>
+              <button className="app-toast-act" onClick={() => { p.clearError(); p.switchSource() }}>换源</button>
+            </>
           )}
           <button onClick={p.clearError} aria-label="关闭提示">关闭</button>
         </div>

@@ -12,7 +12,7 @@
  */
 import type { LocalTrack } from '@shuyin/core'
 import {
-  PLATFORM_NAMES, SourceManager,
+  PLATFORM_NAMES, SoftVerifyError, SourceManager,
   createPlatformApis,
   type PlatformApi, type PlatformSource, type PlaylistDetail, type SearchSong,
   type HotPlaylistResult, type HotPlaylistItem,
@@ -23,7 +23,7 @@ import { createLxWorkerHost } from './lxWorkerHost'
 import { bridge } from './bridge'
 import { KEYS, settings } from './settings'
 import { bootPlatformAccounts, cookieOf, setProfileLoader, accountOf } from './platformAccount'
-import { titleMismatch } from './titleMatch'
+import { bareTitle, titleMismatch, versionMismatch } from './titleMatch'
 
 /* ------------------------------------------------------------------ */
 /* 单例                                                                */
@@ -150,10 +150,29 @@ export const sourceManager = new SourceManager({
     const want = exp?.duration ?? 0
     if (want < 45) return
     const info = await bridge.probeAudioInfo(url)
+    /*
+     * 非 2xx = 地址本身不可用（签名过期 / 要不要 Referer / 已下架）。
+     * **硬失败**：这种地址放给播放器只会换来一条「源错误」，不如在这一步就换源。
+     * 只在 status 明确 >= 400 时判——有些服务器对 Range 请求回 206/304，
+     * 还有少数干脆不回状态（0），那些不能当失败。
+     */
+    if (info.status >= 400) throw new Error(`直链返回 HTTP ${info.status}（地址可能已过期）`)
+    /*
+     * 下面的失败分「软」「硬」两类，这个区分决定了**网络慢的时候能不能出声**：
+     *
+     *   硬：文件里写着另一首歌 / 另一个版本 —— 放出来就是错的，绝不放过；
+     *       时长不到声明的一半 —— 那是试听片段，放出来用户听到 30 秒就断了。
+     *   软：码率偏低、时长差十几秒、探测超时 —— 多半是「平台时长标得糙」或「网慢」。
+     *       严格路径全灭之后允许拿它兜底（见 SoftVerifyError），否则用户看到的是
+     *       「洛雪能播，你这儿没有可用音源」。
+     */
     if (info.total && info.total > 0) {
       const kbps = (info.total * 8) / want / 1000
       if (kbps < MIN_KBPS || kbps > MAX_KBPS) {
-        throw new Error(`音频与歌曲信息不符（约 ${Math.round(kbps)} kbps / ${Math.round(want)} 秒）`)
+        /* 码率低到 48 以下更像「30 秒试听被当成整首」：样本太短，按硬失败处理 */
+        const msg = `音频与歌曲信息不符（约 ${Math.round(kbps)} kbps / ${Math.round(want)} 秒）`
+        if (kbps < MIN_KBPS) throw new Error(msg)
+        throw new SoftVerifyError(url, '', msg)
       }
     }
     /*
@@ -170,9 +189,14 @@ export const sourceManager = new SourceManager({
      */
     const tol = Math.max(10, want * 0.06)
     if (info.duration > 0 && Math.abs(info.duration - want) > tol) {
-      throw new Error(
-        `音源给的不是这首歌（实际 ${Math.round(info.duration)} 秒 / 应为 ${Math.round(want)} 秒）`,
-      )
+      const msg = `音源给的不是这首歌（实际 ${Math.round(info.duration)} 秒 / 应为 ${Math.round(want)} 秒）`
+      /*
+       * 短到不足声明时长的 60% —— 试听片段、截断文件、"前奏版"。
+       * 这个**必须硬拦**：放出来用户听三十秒就没了，比播不了更让人困惑。
+       * 其余的（长十几秒 / 短十几秒）更像平台时长标得糙，留作兜底候选。
+       */
+      if (info.duration < want * 0.6) throw new Error(msg)
+      throw new SoftVerifyError(url, '', msg)
     }
     /*
      * 最后一道：**音频文件自己写的歌名**。
@@ -190,6 +214,18 @@ export const sourceManager = new SourceManager({
     const tagTitle = (info.title || '').trim()
     if (titleMismatch(tagTitle, exp?.title)) {
       throw new Error(`音源给的不是这首歌（文件里写的是《${tagTitle}》）`)
+    }
+    /*
+     * 最后一道之二：**版本**。
+     *
+     * 上面那条只比「核心歌名」——括号里的东西整块被丢掉，于是
+     * 《寂寞才说爱》和《寂寞才说爱 (DJ版)》被当成同一首。用户 2026-11 报的就是
+     * 「日推点原版，出来的是 DJ 版，歌词还全对不上」。
+     * 文件标签里写着 DJ / 混音 / 伴奏，而我们要的是原版 → 判失败，让降级链
+     * 换源、换平台（跨平台那条会按版本扣分，挑到真正的原版）。
+     */
+    if (versionMismatch(tagTitle, exp?.title)) {
+      throw new Error(`音源给的是另一个版本（文件里写的是《${tagTitle}》，要的是《${exp?.title ?? '原版'}》）`)
     }
   },
 })
@@ -233,6 +269,27 @@ export const onlineId = (s: { source: PlatformSource; id: string }) => `${ONLINE
 
 export const isOnlineTrack = (t: { id: string } | null | undefined): boolean =>
   !!t && t.id.startsWith(ONLINE_PREFIX)
+
+/**
+ * 「这条不是歌，是旧版误落盘的播放缓存副本」。
+ *
+ * 0.6.96 及更早，播放缓存复用了「下载」那条命令，缓存文件被发布到了公共音乐
+ * 目录，名字是 `online_<平台>_<歌曲id>.<ext>`（见 `DownloadStore.isCacheCopyName`）。
+ * 这些文件被系统媒体库收成了正常的歌：流式落盘没有 ID3，标题就取了文件名。
+ * 于是曲库里多出一批「online_wy_1341482370 / 未知歌手」的条目，点开还能响，
+ * 播放条上赫然写着文件名。
+ *
+ * 用户 2026-11 报的「标题偶尔变成 online_tx_xxx.mp3」就是它——不是标题渲染出错，
+ * 是队列里真的躺着这样一条**本地曲目**。
+ *
+ * 壳里已经不再收录它们（`Library.kt` 的 `name.startsWith("online_")`），
+ * 但用户手机上那份队列存档还是旧的：恢复时把非在线曲目、标题却是这个形状的
+ * 条目丢掉，否则它会一直跟着队列跑到下一次存盘。
+ */
+export function isCacheCopyTrack(t: { id: string; title?: string } | null | undefined): boolean {
+  if (!t || isOnlineTrack(t)) return false
+  return /^online_[a-z]{2}_[0-9a-z]+(\.\w{2,5})?$/i.test((t.title ?? '').trim())
+}
 
 const registry = new Map<string, SearchSong>()
 
@@ -386,21 +443,31 @@ export interface MinePlaylists {
  * 为什么要单独返回 `error`：酷狗的云歌单只认 App 签发的 token，用网页登录
  * 拿到的凭证打过去会回 `20017`。以前这里把异常吞成 `null`，界面看起来
  * 就是「登录了，但一张歌单都没有」——用户完全不知道是接口拿不到。
+ *
+ * **失败的结果绝对不写缓存**（2026-11 修）。以前成功、失败都塞进 `MINE`：
+ * 断网那次拿到的 error 会被当成「10 分钟内的有效答案」，
+ * 连调用方那句「失败重试一次」也会命中同一份缓存——重试照样拿回同一个错误，
+ * 用户看到的就是「第一次没联网，之后它一直是加载失败」。
+ * 现在失败只返回、不入表；`force` 连成功缓存也跳过，给「重试」按钮用。
  */
-export async function minePlaylists(source: PlatformSource): Promise<MinePlaylists> {
+export async function minePlaylists(
+  source: PlatformSource,
+  opts: { force?: boolean } = {},
+): Promise<MinePlaylists> {
   const api = apiFor(source)
   const acc = accountOf(source)
   if (!api?.getUserPlaylists || !acc) return { list: [] }
   const key = `${source}:${acc.userId || acc.cookie.slice(-24)}`
-  const hit = MINE.get(key)
-  if (hit && Date.now() - hit.at < MINE_TTL) return { list: hit.data?.list ?? [], error: hit.error }
+  if (!opts.force) {
+    const hit = MINE.get(key)
+    if (hit && Date.now() - hit.at < MINE_TTL) return { list: hit.data?.list ?? [], error: hit.error }
+  }
   try {
     const data = await api.getUserPlaylists()
     MINE.set(key, { at: Date.now(), data })
     return { list: data?.list ?? [] }
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e)
-    MINE.set(key, { at: Date.now(), data: null, error })
     return { list: [], error }
   }
 }
@@ -766,14 +833,23 @@ export async function setPreferredQuality(q: string): Promise<void> {
  */
 export function usableQualities(track: LocalTrack | null | undefined): string[] {
   if (!track || !isOnlineTrack(track)) return []
-  // 兜底换过平台的话，档位要按**真正出链的那个平台**算，否则菜单里还是原来平台的档位
+  // 兜底换过平台的话，档位要按**真正出链的那个平台**算，否则菜单里还是原来平台的档位。
+  // 但**不能只按它算**——兜底平台往往只声明标准档，取并集前的行为就是
+  // 「切一次标准，高音质选项整个消失」（2026-11-21 实测）。原平台与兜底平台
+  // 的声明档位取并集；用户想切回高音质时 changeQuality 会清掉兜底记录回原平台重取。
   const song = effectiveSong(track.id)
   if (!song) return []
-  const declared = sourceManager.qualitysFor(song.source)
-  const own = song.qualities
-  if (!own?.length) return declared
-  const both = own.filter(q => declared.includes(q))
-  const out = both.length ? both : declared
+  const origin = registry.get(track.id)
+  const substituted = !!origin && origin !== song
+  const declared = new Set(sourceManager.qualitysFor(song.source))
+  if (substituted) for (const q of sourceManager.qualitysFor(origin.source)) declared.add(q)
+  let own = song.qualities
+  if (substituted && origin.qualities?.length) {
+    own = Array.from(new Set([...(own ?? []), ...origin.qualities]))
+  }
+  if (!own?.length) return QUALITY_CHOICES.filter(q => declared.has(q))
+  const both = own.filter(q => declared.has(q))
+  const out = both.length ? both : Array.from(declared)
   return QUALITY_CHOICES.filter(q => out.includes(q))
 }
 
@@ -813,6 +889,14 @@ export interface ResolvedPlay {
    * 在歌手不一致时显示**真正在唱的人**，而不是原来的元数据。
    */
   matchedSinger?: string
+  /**
+   * true = 这条地址**没通过落地校验**（严格路径全灭之后的兜底）。
+   *
+   * 取链时探测超时、时长差十几秒这类「软失败」会走到这里。能播的概率很高
+   * （地址是音源正常出链的），但也有可能是错歌。UI 上要让用户看得见，
+   * 否则「为什么这首听起来有点不对劲」会变成一个查不出来的谜。
+   */
+  unverified?: boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -851,8 +935,25 @@ export function forgetResolved(trackId: string) {
 /** 兜底顺序：酷狗 / 酷我 的第三方接口最稳，其次网易云，然后 QQ、咪咕 */
 const FALLBACK_ORDER: PlatformSource[] = ['kg', 'kw', 'wy', 'tx', 'mg']
 
-/** 匹配及格线。低于它就是「同名不同歌」，宁可不播也不给用户放错 */
-const MATCH_MIN = 62
+/**
+ * 匹配及格线。低于它就是「同名不同歌」，宁可不播也不给用户放错。
+ *
+ * 2026-11 从 62 提到 68。真正起作用的不是这个数字（见 `scoreMatch` 的歌手权重），
+ * 而是「门槛 + 歌手必须对上」两条一起：光靠歌名拼分数再也凑不到及格线。
+ */
+const MATCH_MIN = 68
+
+/**
+ * 「可以抢跑」的分数。
+ *
+ * 兜底泳道在 [HEDGE_MS] 就起跑，是为了「本平台卡住时别让用户干等」。但它有个
+ * 副作用（2026-11 用户报「原版放出 DJ 版」）：本平台只是**慢**、还没失败，
+ * 兜底就已经从别的平台搜到一条歌名相似、歌手对不上的版本抢先返回了。
+ *
+ * 所以分档：歌名精确 + 歌手命中 + 时长对得上（≈118 分）这种「几乎肯定是同一首歌」
+ * 的候选可以抢跑；其余（74、80 这类靠歌名拼出来的）**必须等主泳道真的失败**。
+ */
+const EARLY_MIN = 100
 
 /** 归一化：去括号内容（Live / Remix / 伴奏）、去 feat、去标点空格，全部小写 */
 const normText = (s: string): string =>
@@ -902,7 +1003,21 @@ function scoreMatch(
   const tArts = target.singer.map(normText).filter(Boolean)
   const cArts = cand.singer.map(normText).filter(Boolean)
   const artistHit = tArts.some(a => cArts.some(b => a === b || b.includes(a) || a.includes(b)))
-  s += artistHit ? 25 : -8
+  /*
+   * 歌手对不上 = 基本不是同一首（2026-11 加重）。
+   *
+   * 以前只扣 8 分，等于没有：中文歌名的 bigram 分普遍很高，「歌名完全一致」
+   * 就有 75+15=90，扣 8 之后 82 照样过线——于是用户点原版，播出来的是别人翻唱。
+   * 跨平台兜底是我们自己发明的路径（洛雪不做这件事，它按 id 取链），
+   * 这条路要自己守住「同一个人唱的」这条底线。
+   *
+   * 两种不判的情况：
+   *   · 候选没写歌手（大量冷门文件）→ 无从比较，不加不减；
+   *   · 歌手名字互相包含（「周杰伦」vs「周杰伦/Jay Chou」）→ 上面已经算命中。
+   */
+  const bothHaveArtist = tArts.length > 0 && cArts.length > 0
+  if (artistHit) s += 28
+  else if (bothHaveArtist) s -= 40
 
   if (target.interval > 0 && cand.interval > 0) {
     const d = Math.abs(cand.interval - target.interval)
@@ -912,6 +1027,18 @@ function scoreMatch(
   }
   // 伴奏 / 纯音乐：宁可这首不播，也不能把伴奏当原曲放出来
   if (INSTRUMENTAL.test(cand.name)) s -= 45
+  /*
+   * 版本对不上就重罚，判据与出链校验**同一套**（`versionMismatch`）。
+   *
+   * 兜底搜索是「按歌名找另一家」，而「寂寞才说爱」和「寂寞才说爱 (DJ版)」
+   * 在四家平台上都同时存在、时长还常常只差几秒——光看歌名和时长，DJ 版
+   * 完全可能拿最高分。用户点的明明是原版，耳机里却是咚鼓，歌词自然全错。
+   *
+   * 扣分幅度必须**大过满分**（歌名 75 + 歌手 28 + 时长 15 ≈ 118，及格线 68）。
+   * 以前按 -45 算过：DJ 版靠「歌名完全一致 + 歌手一致 + 时长接近」能拿 73，
+   * 照样过线被选中——等于没拦。现在落到 48，稳稳出局。
+   */
+  if (versionMismatch(cand.name, target.name)) s -= 70
   return s
 }
 
@@ -1032,7 +1159,14 @@ async function searchTrackByKeyword(
   timeoutMs: number,
   bail?: () => void,
 ): Promise<SearchSong | null> {
-  const keyword = `${name} ${singers[0] ?? ''}`.trim()
+  /*
+   * 搜索词：原文优先，实在搜不到再退到「去掉括号后缀的核心歌名」。
+   * 队列里那些 `寂寞才说爱 (Live)` / `花海 (DJ 阿若版)` 用原文去平台搜，
+   * 常常一条都搜不回来（括号被当字面量），退一步就全都有了。
+   */
+  const head = `${name} ${singers[0] ?? ''}`.trim()
+  const bare = bareTitle(name)
+  const keywords = bare && bare !== name ? [head, `${bare} ${singers[0] ?? ''}`.trim()] : [head]
   const target = { name, singer: singers, interval: track.duration || 0 }
   const own = platformOfTrackId(track.id)
   const order: PlatformSource[] = own
@@ -1044,19 +1178,14 @@ async function searchTrackByKeyword(
   for (const p of order) {
     /* 头一家就没答上来、而用户已经切走了：剩下三家更没必要问（每问一家就占一个槽） */
     bail?.()
-    const api = apiFor(p)
-    if (!api?.supportsSearch) continue
+    if (!apiFor(p)?.supportsSearch) continue
     try {
-      const res = await withTimeout(api.search(keyword, 1, 8), timeoutMs, '搜索超时')
+      const hit = await searchOne(p, target, keywords, bail ?? (() => {}), timeoutMs)
       answered++
-      let best: SearchSong | null = null
-      let bestScore = 0
-      for (const c of res.list) {
-        const sc = scoreMatch(target, c)
-        if (sc > bestScore) { bestScore = sc; best = c }
-      }
-      if (best && bestScore >= MATCH_MIN) return best
-    } catch {
+      if (hit) return hit.song
+    } catch (e) {
+      /* 被下一首顶掉：原样往上抛，别当成「这个平台没有」 */
+      if (e instanceof StaleResolve) throw e
       /* 这个平台问不出来就换下一个 */
     }
   }
@@ -1066,14 +1195,61 @@ async function searchTrackByKeyword(
   return null
 }
 
+/**
+ * 在一个平台上搜这首歌，返回**分数最高且过门槛**的那条。
+ *
+ * `keywords` 可以有多个：先原文，再（可选）去掉括号后缀的核心歌名。
+ *
+ * 为什么要退一步再搜：平台搜索把括号当字面量。「寂寞才说爱 (Live) 刘可」
+ * 在很多平台一条都搜不出来，而「寂寞才说爱 刘可」有几十条。
+ * 放宽搜索词**不会**放错版——版本由 `scoreMatch` 里的 versionMismatch 扣 70 分把关，
+ * 只是让「本来能搜到」的歌不再白失败一次。
+ */
+async function searchOne(
+  p: PlatformSource,
+  target: { name: string; singer: string[]; interval: number },
+  keywords: string[],
+  bail: () => void,
+  timeoutMs = 3_000,
+): Promise<{ song: SearchSong; score: number } | null> {
+  const api = apiFor(p)
+  if (!api?.supportsSearch) return null
+  for (const kw of keywords) {
+    bail()
+    try {
+      const res = await withTimeout(api.search(kw, 1, 8), timeoutMs, '搜索超时')
+      let best: SearchSong | null = null
+      let bestScore = 0
+      for (const c of res.list) {
+        const sc = scoreMatch(target, c)
+        if (sc > bestScore) { bestScore = sc; best = c }
+      }
+      if (best && bestScore >= MATCH_MIN) return { song: best, score: bestScore }
+    } catch (e) {
+      /*
+       * 网络层失败：**不再试下一个关键词**。
+       *
+       * 第二个关键词是给「搜到了但没有一条够分」准备的（平台把括号当字面量，
+       * 所以搜不到东西）；网络超时说明这家现在根本不通，再搜一遍只是再等一次超时
+       * ——而兜底是并行等所有平台，那一次多余的等待会直接加到用户身上。
+       */
+      throw e
+    }
+  }
+  return null
+}
 async function searchElsewhere(
   song: SearchSong,
   quality: string,
   skip: Set<PlatformSource>,
   bail: () => void = () => {},
 ): Promise<CrossHit | CrossFail> {
-  const keyword = `${song.name} ${song.singer[0] ?? ''}`.trim()
   const target = { name: song.name, singer: song.singer, interval: song.interval }
+  const head = `${song.name} ${song.singer[0] ?? ''}`.trim()
+  const bare = bareTitle(song.name)
+  const keywords = bare && bare !== song.name
+    ? [head, `${bare} ${song.singer[0] ?? ''}`.trim()]
+    : [head]
 
   const candidates = FALLBACK_ORDER.filter(p => {
     if (skip.has(p)) return false
@@ -1084,52 +1260,62 @@ async function searchElsewhere(
   })
   if (!candidates.length) return { errors: ['没有可兜底的平台'] }
 
-  const errors: string[] = []
-  const lanes = candidates.map(async (p): Promise<CrossHit> => {
-    let best: SearchSong | null = null
-    let bestScore = 0
-    try {
-      const res = await withTimeout(apiFor(p)!.search(keyword, 1, 8), 5_000, '搜索超时')
-      for (const c of res.list) {
-        const sc = scoreMatch(target, c)
-        if (sc > bestScore) { bestScore = sc; best = c }
-      }
-    } catch (e) {
-      errors.push(`${PLATFORM_NAMES[p]}${shortErr(e)}`)
-      throw e
-    }
-    if (!best || bestScore < MATCH_MIN) {
-      const e = new Error(`${PLATFORM_NAMES[p]}没有同名版本`)
-      errors.push(e.message)
-      throw e
-    }
-    /* 搜到一半就被下一首顶掉了：别再花一次「取链」（那是最贵的一步） */
-    bail()
-    // 换平台后时长可能不同，校验要按**这条**的时长算
-    const r = await sourceManager.getMusicUrl(p, best.raw, quality, {
-      expectDuration: best.interval || song.interval || 0,
-      expectTitle: best.name,
-    })
-    return { platform: p, matched: best, score: bestScore, ...r }
-  })
+  /*
+   * 先把所有平台的**搜索结果**收齐，按分数排序，再从最高的往下取链。
+   *
+   * 以前是「搜到就取链、哪条链接先出来用哪条」（`Promise.any`）。歌名相似度
+   * 普遍偏高（两个字的歌名 bigram 很容易 0.8+，中文短歌名更是经常 1.0），
+   * 先到的那条常常是 82 分的翻唱，而 118 分的原版后到、被 `settled` 直接丢掉。
+   * 用户听到的「原版放成 DJ 版 / 翻唱」有一半来自这里。
+   *
+   * 兜底本来就是慢路径（本平台已经失败才会走到这一步），多等一次搜索的钱必须花。
+   */
+  const settled = await Promise.allSettled(
+    candidates.map(p => searchOne(p, target, keywords, bail)),
+  )
 
-  try {
-    return await Promise.any(lanes)
-  } catch (e) {
-    /*
-     * 被顶掉的那一轮：别当成「这个平台没有」，直接把作废信号往上抛。
-     * 否则会在 `Promise.any` 的 AggregateError 里被拼成一句
-     * 「各平台都没有可用音源（…）」——虽然调用方会按票号丢弃，但日志里全是假失败，
-     * 真出问题的时候反而查不出来。
-     */
-    const all = ((e as AggregateError).errors ?? []) as unknown[]
-    if (all.some(x => x instanceof StaleResolve)) throw new StaleResolve()
-    const reasons = all
-      .map(x => (x instanceof Error ? x.message : String(x)))
-      .filter(Boolean)
-    const merged = [...errors, ...reasons]
-    return { errors: [...new Set(merged)].length ? [...new Set(merged)] : ['取链失败'] }
+  const errors: string[] = []
+  const hits: Array<{ platform: PlatformSource; song: SearchSong; score: number }> = []
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i]
+    const p = candidates[i]
+    if (r.status === 'fulfilled') {
+      if (r.value) hits.push({ platform: p, ...r.value })
+      else errors.push(`${PLATFORM_NAMES[p]}没有同名版本`)
+    } else {
+      /* 被下一首顶掉：原样往上抛，别拼成一句假失败 */
+      if (r.reason instanceof StaleResolve) throw new StaleResolve()
+      errors.push(`${PLATFORM_NAMES[p]}${shortErr(r.reason)}`)
+    }
   }
+
+  /* 分数从高到低试；同分时按 FALLBACK_ORDER 的顺序（`sort` 稳定） */
+  hits.sort((a, b) => b.score - a.score)
+  /*
+   * 只试前三条：后面的基本是「同名不同歌」，白花几秒不值得。
+   * 每条再给 5 秒预算、整体不超过 12 秒——兜底这条路已经比用户点的慢了，
+   * 再让它把三条都等满超时，就是「转圈半分钟然后说没音源」。
+   */
+  const t0 = Date.now()
+  for (const h of hits.slice(0, 3)) {
+    bail()
+    if (Date.now() - t0 > 12_000) break
+    try {
+      // 换平台后时长可能不同，校验要按**这条**的时长算
+      const r = await sourceManager.getMusicUrl(h.platform, h.song.raw, quality, {
+        expectDuration: h.song.interval || song.interval || 0,
+        expectTitle: h.song.name,
+        budgetMs: 5_000,
+      })
+      return { platform: h.platform, matched: h.song, score: h.score, ...r }
+    } catch (e) {
+      if (e instanceof StaleResolve) throw e
+      errors.push(`${PLATFORM_NAMES[h.platform]}${shortErr(e)}`)
+    }
+  }
+
+  const merged = [...new Set(errors)]
+  return { errors: merged.length ? merged : ['取链失败'] }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1171,6 +1357,28 @@ export class StaleResolve extends Error {
     super('')
     this.name = 'StaleResolve'
   }
+}
+
+/** 失败原因里「网的问题」的长相 */
+const NETISH = /超时|timeout|resolve host|无法连接|连接被|网络|断开|EAI_AGAIN|ENOTFOUND/i
+
+/**
+ * 把泳道失败凑成**一句人话**。
+ *
+ * 原文是「各平台都没有可用音源（酷狗搜索超时；酷我搜索超时；网易云没有同名版本）」——
+ * 信息量低，却很像软件坏了。用户 2026-11 说的「失败率比洛雪高」，一部分观感就来自
+ * 提示的形式：失败本来难免，但提示不该长得像报错堆栈。
+ *
+ * 单条原因时直接用（音源那边的 `NoPlayableSourceError.brief` 已经是人话结论）；
+ * 只有「所有原因都指向同一件事」时才归并，别把「音源脚本崩了」说成「网络不好」——
+ * 那种情况用户照着原因去查才有用。
+ */
+function humanizeResolveFail(reasons: string[]): string {
+  const uniq = [...new Set(reasons.filter(Boolean))]
+  if (!uniq.length) return '这首歌暂时没有可用音源'
+  if (uniq.length === 1) return uniq[0]
+  if (uniq.every(r => NETISH.test(r))) return '网络不稳，暂时取不到这首歌的音源（恢复后会自动重试）'
+  return `暂时取不到这首歌的音源（${uniq.slice(0, 2).join('；')}）`
 }
 
 /** 一条泳道跑出来的赢家 */
@@ -1359,6 +1567,8 @@ export async function resolvePlayUrl(
     cancel?: () => boolean
   } = {},
 ): Promise<ResolvedPlay> {
+  /** 这一轮从什么时候开始：后面用它决定「还值不值得再等一轮兜底」 */
+  const t0 = Date.now()
   /** 已经作废就立刻退出：每个 await 边界都要问一次（见 [StaleResolve]） */
   const bail = () => {
     if (opts.cancel?.() === true) throw new StaleResolve()
@@ -1400,7 +1610,7 @@ export async function resolvePlayUrl(
   }
 
   const build = (
-    r: { url: string; sourceId: string; sourceName: string; quality: string },
+    r: { url: string; sourceId: string; sourceName: string; quality: string; unverified?: boolean },
     platform: PlatformSource,
     extra: { switched: boolean; duration: number; matchedName?: string; matchedSinger?: string; fresh: boolean },
   ): ResolvedPlay => {
@@ -1419,6 +1629,7 @@ export async function resolvePlayUrl(
       matchedName: extra.matchedName,
       matchedSinger: extra.matchedSinger,
     }
+    if (r.unverified) out.unverified = true
     if (canReuse(opts)) urlCache.set(key, { ...out, at: Date.now() })
     return out
   }
@@ -1513,11 +1724,33 @@ export async function resolvePlayUrl(
     bail()
     const skipSet = new Set<PlatformSource>([song.source])
     if (opts.skipPlatform) skipSet.add(opts.skipPlatform)
-    const alt = await searchElsewhere(song, requested, skipSet, bail)
+    /*
+     * 这条泳道自己也有总预算（9 秒）。
+     *
+     * 它内部是「5 个平台并行搜 → 排序 → 最多 3 条依次取链」，每一步都有超时，
+     * 乘起来可以到十几秒。而 `Promise.any` 要等**所有**泳道都失败才会报错，
+     * 于是用户就得陪着这条最长的路走完——实测 17 秒才弹「没有音源」。
+     * 到点就收，把失败时间压到 10 秒内：快速失败之后用户才愿意点「重试 / 换源」。
+     */
+    const alt = await Promise.race([
+      searchElsewhere(song, requested, skipSet, bail),
+      sleep(7_000).then((): CrossFail => ({ errors: ['兜底平台搜索超时'] })),
+    ])
     if (!('platform' in alt)) {
       throw new Error(alt.errors.slice(0, 2).join('；') || '没有同名版本')
     }
-    return { kind: 'alt', hit: alt, platform: alt.platform, dur: alt.matched.interval || wantDur }
+    /*
+     * 低分候选**不许抢跑**。
+     *
+     * 主泳道只是「慢」而不是「失败」的时候，一条 74 分的翻唱抢先返回，
+     * 用户点的原版就被顶掉了 —— 这是「原版放出 DJ 版 / 别人唱的那版」的另一半来源。
+     * 分数够高（歌名精确 + 歌手命中 + 时长对得上，见 `EARLY_MIN`）才允许抢；
+     * 不够高就等主泳道真的失败，最多再等 6 秒（这么久还没结果，也基本没戏了）。
+     */
+    if (alt.score < EARLY_MIN && pendingMains > 0) {
+      await Promise.race([mainsFailed, sleep(6_000)])
+      if (settled) throw new LaneSkipped()
+    }    return { kind: 'alt', hit: alt, platform: alt.platform, dur: alt.matched.interval || wantDur }
   })())
 
   let win: LaneWin
@@ -1530,9 +1763,45 @@ export async function resolvePlayUrl(
     const reasons = all
       .map(x => (x instanceof Error ? x.message : String(x)))
       .filter(Boolean)   // LaneSkipped 是空的，不进提示
-    throw new Error(
-      reasons.length ? `各平台都没有可用音源（${reasons.slice(0, 3).join('；')}）` : '各平台都没有可用音源',
-    )
+
+    /*
+     * 最后一步：**允许未校验的地址**。
+     *
+     * 这是「失败率」这条线上最实在的一处收口。严格路径挂掉的原因里，很大一部分
+     * 不是「没版权」，而是「探测那一下超时了」——慢网 / 大文件头 / 服务器慢响应。
+     * 地址本身是好的、放出来能播，而我们把它当成失败弹给用户。
+     * 洛雪没有这一步校验，所以它「能播」；用户对比下来就是「你这儿播不了」。
+     *
+     * 只对本平台这条要一次（跨平台那条匹配本身就不可靠，未校验风险太大）。
+     * 硬失败（文件里是另一首歌 / 试听片段）不会走到这里，见 verify 里的软硬之分。
+     */
+    if (!skipOwnPlatform() && song.source !== opts.skipPlatform) {
+      try {
+        bail()
+        /*
+         * 整轮预算 11 秒：主泳道 7s + 兜底 7.7s 都没成的话，这里只剩不到 4 秒。
+         * 剩余时间太短（<2s）就别再起一轮了——多等 2 秒还是失败，不如立刻报错
+         * 让用户点「重试」，那样至少是他在掌控。
+         */
+        const left = 11_000 - (Date.now() - t0)
+        if (left < 2_000) throw new Error('skip')
+        const soft = await sourceManager.getMusicUrl(song.source, song.raw, ownQuality, {
+          exclude: opts.exclude,
+          sourceId: opts.sourceId,
+          expectDuration: wantDur,
+          expectTitle: song.name,
+          allowUnverified: true,
+          budgetMs: Math.min(6_000, left),
+        })
+        if (soft.unverified) {
+          settled = true
+          return build(soft, song.source, { switched: false, fresh: false, duration: wantDur })
+        }
+      } catch {
+        /* 连宽松兜底都没有：按原来的原因报错 */
+      }
+    }
+    throw new Error(humanizeResolveFail(reasons))
   }
   // 赢了就把闸门关上：还在路上的兜底搜索看到这个标记就不再发请求
   settled = true
@@ -1582,10 +1851,16 @@ export async function resolvePlayUrl(
  * 另外必须带超时：平台歌词接口偶发卡住（限流 / 长尾），不设上限的话
  * 这个 Promise 会一直挂着，调用方那句「读歌词失败也收尾」永远等不到。
  */
-export async function onlineLyric(track: LocalTrack): Promise<string> {
-  /* 走 ensureSong：注册表里被挤掉的老歌要重搜一次，否则这里返回空串，
-     界面就永久停在「暂无歌词」（冷启动点老队列必现）。 */
-  const song = await ensureSong(track)
+export async function onlineLyric(track: LocalTrack): Promise<{ text: string; exact: boolean }> {
+  /*
+   * 播放走了跨平台兜底时，**耳朵里响的是那一条**，歌词必须跟着它走。
+   *
+   * 以前这里固定用原平台的 song：兜底换到酷狗播了同一首歌，LRC 却还从网易云取。
+   * 两边歌词时间轴不一样，表现就是「歌词整体慢半拍 / 对不上」——用户 2026-11
+   * 报「寂寞才说爱歌词全错」时，一半是歌放错了版本，另一半就是这里。
+   * `effectiveSong` 是同步的（兜底记录只在内存里，重启即失效），为空再走 ensureSong。
+   */
+  const song = effectiveSong(track.id) ?? await ensureSong(track)
   let own = ''
   if (song) {
     const api = apiFor(song.source)
@@ -1598,11 +1873,11 @@ export async function onlineLyric(track: LocalTrack): Promise<string> {
       }
     }
   }
-  if (own.trim()) return own
+  if (own.trim()) return { text: own, exact: true }
   const alt = await lyricElsewhere(track, song?.source)
-  if (alt) return alt
+  if (alt) return { text: alt, exact: false }
   /* 兜底也没词：返回本平台那条（可能是空串，也可能只有几行），总比丢掉好 */
-  return own
+  return { text: own, exact: false }
 }
 
 /**
@@ -1630,6 +1905,18 @@ async function lyricElsewhere(track: LocalTrack, skip?: PlatformSource): Promise
       let best: SearchSong | null = null
       let bestScore = 0
       for (const c of res.list) {
+        /*
+         * 时长必须先对上（2026-11-21 平板「海屿你歌词对不上」教训）。
+         *
+         * 别家平台上传的 LRC 经常是另一个版本（MV 版 / 加长版 / DJ 版）的
+         * 时间轴——歌名歌手都对、词也是同一首，可每行的时间整体偏移几十秒，
+         * 高亮永远落在错的那句上。歌名匹配防不了这个，时长能：
+         * 同一首歌在不同平台的音频时长不会差出 12%（音源转码差异兜 8 秒底）。
+         */
+        if (target.interval > 0 && c.interval > 0) {
+          const tol = Math.max(8, target.interval * 0.12)
+          if (Math.abs(c.interval - target.interval) > tol) continue
+        }
         const sc = scoreMatch(target, c)
         if (sc > bestScore) { bestScore = sc; best = c }
       }

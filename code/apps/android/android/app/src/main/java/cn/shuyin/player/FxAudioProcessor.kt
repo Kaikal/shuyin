@@ -139,7 +139,7 @@ class FxAudioProcessor : BaseAudioProcessor() {
         out.order(ByteOrder.nativeOrder())
 
         /* 原声 / 少见的 8·24·32bit：原样搬运，一个字节都不改 */
-        if (flat || (encoding != C.ENCODING_PCM_16BIT && encoding != C.ENCODING_PCM_FLOAT)) {
+        if (encoding != C.ENCODING_PCM_16BIT && encoding != C.ENCODING_PCM_FLOAT) {
             out.put(inputBuffer)
             out.flip()
             return
@@ -201,6 +201,15 @@ class FxAudioProcessor : BaseAudioProcessor() {
         }
 
         flat = !any
+        /*
+         * 切回「原声」时把平滑值直接落到 1：flat 分支不推进这三个值，
+         * 留着半路的中间值，下次打开音效会从那个陈旧的增益起步（一个可听的跳变）。
+         */
+        if (flat) {
+            preCur = 1f
+            gainLCur = 1f
+            gainRCur = 1f
+        }
     }
 
     private fun process16(input: ByteBuffer, out: ByteBuffer) {
@@ -242,8 +251,24 @@ class FxAudioProcessor : BaseAudioProcessor() {
         input.position(input.limit())
     }
 
-    /** 一帧：前置增益 → EQ → 空间音效 → 平衡 → 软限幅 */
+    /**
+     * 一帧：前置增益 → EQ → 空间音效 → 平衡 → 软限幅。
+     *
+     * **`flat` 只跳过「加工」，不跳过限幅。**
+     *
+     * 以前整条链路在「原声」状态下是纯透传（`queueInput` 直接 `put` 了事），
+     * 连软限幅也不走。于是默认状态下的输出**没有任何峰值保护**——一首录得偏响、
+     * 或者平台给的源本身已经贴着 0dBFS 的歌，就原样送到扬声器，听感是
+     * 「这首怎么比上一首响一大截」。限幅跟 EQ 不是一回事：它是输出端的保险，
+     * 用户有没有开音效都得在。为了不为此付出整条 EQ 的开销，flat 时单独走
+     * 只管限幅的短路径。
+     */
     private fun runFrame(b: FloatArray, ch: Int) {
+        if (flat) {
+            for (c in 0 until ch) b[c] = softClip(b[c])
+            return
+        }
+
         preCur += (preGain - preCur) * rampK
         gainLCur += (gainL - gainLCur) * rampK
         gainRCur += (gainR - gainRCur) * rampK

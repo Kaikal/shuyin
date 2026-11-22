@@ -135,6 +135,20 @@ object Library {
                 val id = c.getLong(iId)
                 val uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id)
                 val name = c.getString(iName) ?: ""
+                /*
+                 * 旧版本把**播放缓存**当成「下载」发布到了公共音乐目录，
+                 * 文件名是 `online_<平台>_<歌曲id>.<ext>`（见 DownloadStore.isCacheCopyName）。
+                 * 这些文件在公共目录里，系统媒体库会把它们收成正常的歌：
+                 * 标题取文件名（因为流式落盘没有 ID3），于是曲库里多出一批
+                 * 「online_wy_1341482370 / 未知歌手 / 大鱼视频」的条目，
+                 * 点了还能响——用户看到的却是文件名当歌名。
+                 *
+                 * 2026-11 华为实测：用户把「保存目录」改成了 `/sdcard/大鱼视频`，
+                 * 这批副本就落在那里，`Music/疏音` 那套清理规则一个都扫不到。
+                 * 删除逻辑受限于用户可能已经动过这些文件，所以**这里直接不收录**——
+                 * 有没有删掉都不该出现在曲库里。清理是另一条路（DownloadStore）。
+                 */
+                if (name.startsWith("online_")) continue
                 val mime = c.getString(iMime) ?: ""
                 val title = c.getString(iTitle)?.takeIf { it.isNotBlank() } ?: name.substringBeforeLast('.')
                 // MediaStore 里「未知歌手」是字面量 <unknown>

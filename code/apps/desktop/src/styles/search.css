@@ -350,6 +350,25 @@
 /* 限流不是错误：一句灰字说明「已跳过」，不占红条的位置 */
 .sr-busy { padding: 12px 0 0; font-size: 11px; color: var(--sy-text-4); }
 
+/*
+ * 错误旁边那颗「重试」。
+ *
+ * 断网那一次留下的红条不该只有「换个词再搜」一条出路——同一个词再点一次
+ * 「搜索」以前根本不会重发（effect 依赖没变）。现在提交会强制发一轮，
+ * 这颗按钮就是把这件事摆到眼前。
+ */
+.sr-retry {
+  font-size: 11px;
+  color: var(--sy-accent);
+  background: none;
+  border: 1px solid var(--sy-accent-a26, rgba(120, 160, 255, 0.26));
+  border-radius: var(--sy-radius-small);
+  padding: 3px 10px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.sr-retry:hover { background: var(--sy-accent-a15, rgba(120, 160, 255, 0.15)); }
+
 /* 标题旁的一行边界说明：搜索不依赖音源脚本，别让它抢标题的视觉重量 */
 .sr-note {
   font-size: 10.5px;
@@ -361,6 +380,25 @@
 
 /* ---------- 曲目列表 ---------- */
 .sr-list { flex: 1; overflow-y: auto; padding: 6px 0 24px; }
+/*
+ * **不要用 `content-visibility: auto` 做屏外裁切。**
+ *
+ * 试过一版：屏外的行整行跳过渲染、`contain-intrinsic-size` 估个占位高度。
+ * 结果用户报「刚打开时滑动会闪烁」——原因很具体：
+ *
+ *   · 占位高度是估的（手机行是 `min-height: 62px` 自适应），估高了估低了都会在
+ *     某一行**第一次进入视口**的瞬间换成真实高度，整个列表跟着平移一次；
+ *   · 快速滑动时几十行接连「苏醒」，就是连续几十次平移 + 一片片内容凭空冒出来。
+ *   · 滑过一遍之后估值被记住，就不再闪了——所以症状只在"刚打开时"出现。
+ *
+ * 换句话说它有收益的只有**首屏那一次布局**，代价却是每次滑动都在跳。
+ * 这里换成 `contain: layout style`：子元素变化不外溢、不反复触发整表重排，
+ * 行高永远由内容真实决定，不存在"先猜后改"。行内没有溢出定位的子元素，
+ * 所以不加 `paint`（免得把 popover 之类裁掉）。
+ */
+.sr-list > .sr-row {
+  contain: layout style;
+}
 .sr-group + .sr-group { margin-top: 10px; }
 .sr-group-head {
   display: flex;

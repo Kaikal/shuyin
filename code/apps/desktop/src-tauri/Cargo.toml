@@ -73,7 +73,7 @@ windows = { version = "0.62", features = ["Foundation", "Media", "Win32_Foundati
 # 托盘只在桌面端启用：底层 tray-icon crate 没有 iOS / Android 实现，
 # 不拆开的话 iOS 构建直接链接失败
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 
 # macOS 系统媒体会话（Now Playing / 耳机线控 / 控制中心）。
 # 故意不用生成的强类型 API：NSDictionary 的泛型值类型在 objc2 各版本间

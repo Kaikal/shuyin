@@ -433,19 +433,32 @@ object DownloadStore {
      */
     private fun isCacheCopyName(name: String) = name.startsWith("online_")
 
+    /*
+     * 找副本时**不限目录**。
+     *
+     * 以前写死 `Music/疏音`，因为默认下载目录就在那儿。可下载目录是用户可改的
+     * （设置 → 下载 → 更改），旧版那些缓存副本就落在用户当时选的那个目录里。
+     * 2026-11 华为实测：用户的保存目录是 `/sdcard/大鱼视频`，9 个副本躺在那儿，
+     * 清理页只认出 1 个（`Music/疏音` 里那一个），其余 8 个永远删不掉，
+     * 还在曲库里当歌放着。
+     *
+     * 现在按**文件名**在整库范围内找：`online_` 这个前缀是我们自己造的，
+     * 用户点「下载」得到的文件名永远是「歌手 - 歌名 [品质].mp3」，不会撞上。
+     */
+    private const val CACHE_COPY_SELECTION = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE 'online\\_%' ESCAPE '\\'"
+
     /** 统计误落盘副本：[个数, 字节数] */
     fun cacheCopies(): LongArray {
         var count = 0L
         var bytes = 0L
-        val rel = "${Environment.DIRECTORY_MUSIC}/$SUBDIR"
         if (Build.VERSION.SDK_INT >= 29) {
             val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             try {
                 Sy.app.contentResolver.query(
                     collection,
                     arrayOf(MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DISPLAY_NAME),
-                    "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-                    arrayOf("$rel/"),
+                    CACHE_COPY_SELECTION,
+                    null,
                     null,
                 )?.use { c ->
                     while (c.moveToNext()) {
@@ -457,19 +470,29 @@ object DownloadStore {
                 }
             } catch (_: Exception) { /* 查不到就当没有 */ }
         } else {
-            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), SUBDIR)
-                .listFiles()?.forEach { f ->
-                    if (f.isFile && isCacheCopyName(f.name)) { count++; bytes += f.length() }
-                }
+            walkPublicMusic { f ->
+                if (f.isFile && isCacheCopyName(f.name)) { count++; bytes += f.length() }
+            }
         }
         return longArrayOf(count, bytes)
+    }
+
+    /** 老系统（<Q）没有 MediaStore 分区，递归翻音乐目录兜底 */
+    private fun walkPublicMusic(onFile: (File) -> Unit) {
+        val root = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+        fun walk(dir: File, depth: Int) {
+            if (depth > 3) return
+            dir.listFiles()?.forEach { f ->
+                if (f.isDirectory) walk(f, depth + 1) else onFile(f)
+            }
+        }
+        walk(root, 0)
     }
 
     /** 删掉那些副本；返回 [删掉的个数, 释放的字节数] */
     fun purgeCacheCopies(): LongArray {
         var count = 0L
         var bytes = 0L
-        val rel = "${Environment.DIRECTORY_MUSIC}/$SUBDIR"
         if (Build.VERSION.SDK_INT >= 29) {
             val resolver = Sy.app.contentResolver
             val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -478,8 +501,8 @@ object DownloadStore {
                 resolver.query(
                     collection,
                     arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DISPLAY_NAME),
-                    "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-                    arrayOf("$rel/"),
+                    CACHE_COPY_SELECTION,
+                    null,
                     null,
                 )?.use { c ->
                     while (c.moveToNext()) {
@@ -495,13 +518,12 @@ object DownloadStore {
                 }
             } catch (_: Exception) { /* 查询失败就什么都不删 */ }
         } else {
-            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), SUBDIR)
-                .listFiles()?.forEach { f ->
-                    if (f.isFile && isCacheCopyName(f.name)) {
-                        bytes += f.length()
-                        if (f.delete()) count++
-                    }
+            walkPublicMusic { f ->
+                if (f.isFile && isCacheCopyName(f.name)) {
+                    val n = f.length()
+                    if (f.delete()) { count++; bytes += n }
                 }
+            }
         }
         return longArrayOf(count, bytes)
     }

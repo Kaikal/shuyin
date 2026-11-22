@@ -8,8 +8,13 @@
  * 交互细节：
  *   · 点外面 / 选完 / 按 Esc 都关；Esc 在 capture 阶段吃掉，避免顺手把整个播放页也关了
  *   · 当前项打勾；不可用的档位置灰但保留在列表里（用户得知道「有这个档位只是现在不行」）
+ *   · **自动避让屏幕边缘**：弹出层默认向下展开，但打开那一刻会量一下按钮四周
+ *     还剩多少空间——下方放不下就翻上去，右边放不下就改左对齐，两个方向都紧张
+ *     就把列表高度压到放得下为止。以前「设置 · 播放」里的音质下拉贴着屏幕底部，
+ *     选项一半在屏幕外面（2026-11-21 用户反馈），各调用点自己猜 `up` / `alignEnd`
+ *     猜不准，现在统一在这里量。
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { IconCheck, IconChevronDown } from './icons'
 
 export interface ChipOption {
@@ -34,10 +39,20 @@ interface Props {
   disabled?: boolean
   /** 弹出层最小宽度 */
   width?: number
-  /** 列表从右边对齐（靠右的芯片用） */
+  /** 列表从右边对齐（靠右的芯片用）——只是**初始猜测**，实际以测量结果为准 */
   alignEnd?: boolean
-  /** 列表向上展开（芯片已经贴近页面底部时用，否则弹出层会被裁在屏幕外） */
+  /** 列表向上展开（芯片已经贴近页面底部时用）——同样是初始猜测 */
   up?: boolean
+}
+
+const POP_GAP = 8
+const POP_MAX = 320
+const POP_MIN = 140
+
+interface Fit {
+  up: boolean
+  end: boolean
+  maxH: number
 }
 
 export function ChipMenu({
@@ -45,6 +60,10 @@ export function ChipMenu({
 }: Props) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  /** 避让结果：方向 + 高度上限。打开时量一次，关掉就回到调用点的初始猜测 */
+  const [fit, setFit] = useState<Fit>({ up: !!up, end: !!alignEnd, maxH: POP_MAX })
+
   /*
    * 退场留白：列表是「小浮层」这一档，110ms 就够。
    * 直接 `open && …` 的话点完选项面板是瞬间消失的，和进场那 120ms 不对称，
@@ -56,6 +75,50 @@ export function ChipMenu({
     const t = window.setTimeout(() => setShown(false), 130)
     return () => window.clearTimeout(t)
   }, [open])
+
+  /* 关掉后恢复初始猜测，下次打开重新量 */
+  useEffect(() => {
+    if (!open) setFit({ up: !!up, end: !!alignEnd, maxH: POP_MAX })
+  }, [open, up, alignEnd])
+
+  /*
+   * 打开那一刻量一次可用空间（useLayoutEffect：改状态发生在绘制前，不会闪）。
+   *
+   * 用 `visualViewport` 而不是 `innerHeight`：手机上键盘弹起 / WebView 缩放时
+   * 后者可能比真实可视区大，量出来的「下方空间」是假的。
+   */
+  useLayoutEffect(() => {
+    if (!open) return
+    const root = rootRef.current
+    const pop = popRef.current
+    if (!root) return
+    const r = root.getBoundingClientRect()
+    const vv = window.visualViewport
+    const vh = vv?.height ?? window.innerHeight
+    const vw = vv?.width ?? window.innerWidth
+    /* 弹出层此刻的真实高度（首次渲染还带着 CSS 的 320 上限） */
+    const h = pop?.offsetHeight ?? Math.min(POP_MAX, options.length * 42 + 14)
+    const w = Math.max(pop?.offsetWidth ?? 0, width)
+    const below = vh - r.bottom - POP_GAP
+    const above = r.top - POP_GAP
+
+    let useUp = !!up
+    /* 初猜向下但下面放不下、上面更宽裕 → 翻上去；反之亦然 */
+    if (!useUp && below < h && above > below) useUp = true
+    if (useUp && above < h && below > above) useUp = false
+
+    let useEnd = !!alignEnd
+    if (!useEnd && r.left + w > vw && r.right - w >= 0) useEnd = true
+    if (useEnd && r.right - w < 0 && r.left + w <= vw) useEnd = false
+
+    /* 选定方向后把高度压进可用空间：两个方向都放不下时取更宽裕的那边 */
+    const space = Math.max(useUp ? above : below, POP_MIN)
+    const maxH = Math.min(POP_MAX, Math.max(POP_MIN, Math.floor(space)))
+    setFit(prev => (prev.up === useUp && prev.end === useEnd && prev.maxH === maxH
+      ? prev
+      : { up: useUp, end: useEnd, maxH }))
+    // options.length 变化（音源装载完补档位）会改高度，跟着重量一次
+  }, [open, options.length, width, up, alignEnd])
 
   useEffect(() => {
     if (!open) return
@@ -77,7 +140,7 @@ export function ChipMenu({
   }, [open])
 
   return (
-    <div className={'chip-menu' + (alignEnd ? ' end' : '') + (up ? ' up' : '')} ref={rootRef}>
+    <div className={'chip-menu' + (fit.end ? ' end' : '') + (fit.up ? ' up' : '')} ref={rootRef}>
       <button
         className={'imm-chip chip-menu-btn' + (open ? ' on' : '')}
         aria-haspopup="listbox"
@@ -97,7 +160,8 @@ export function ChipMenu({
           className="chip-pop"
           role="listbox"
           aria-label={label}
-          style={{ minWidth: width }}
+          ref={popRef}
+          style={{ minWidth: width, maxHeight: fit.maxH }}
           data-closing={open ? undefined : 'true'}
         >
           {options.map(o => {

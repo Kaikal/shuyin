@@ -216,6 +216,18 @@ export function PlaylistSquarePage({ onOpenPlaylist, onImport }: Props) {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [platform, load])
 
+  /*
+   * 网络回来就自动重取一次。
+   *
+   * 这一页是常驻挂载的（切走只是平移），离线那一次失败的红条会一直挂在那儿；
+   * 用户以为「广场坏了」，其实只要重发一次就好。见 HomePage 里同一套处理。
+   */
+  useEffect(() => {
+    const up = () => { void load(platform, 1, false) }
+    window.addEventListener('online', up)
+    return () => window.removeEventListener('online', up)
+  }, [platform, load])
+
   /* 排行榜和歌单是两次独立请求：榜单慢/挂了不该拦住歌单 */
   useEffect(() => {
     const api = apiFor(platform)

@@ -9,8 +9,11 @@ import {
   type ThemeDef, type ThemeMode, type ThemeTokens,
 } from '@shuyin/theme-engine'
 import { useTheme } from '../lib/ThemeProvider'
-import { IconCheck, IconDownload, IconFolder, IconTrash, IconUpload } from '../components/icons'
+import {
+  IconCheck, IconDownload, IconFolder, IconGitee, IconGithub, IconMusicNote, IconTrash, IconUpload,
+} from '../components/icons'
 import { bridge } from '../lib/bridge'
+import { useShell } from '../lib/shellMode'
 import { SPECTRUM_STYLES, useSpectrumStyle, type SpectrumStyle } from '../lib/spectrumStyle'
 import {
   MOBILE_SPEC_POSITIONS, SPECTRUM_POSITIONS, useSpectrumPos, useMobileSpecPos, type SpectrumPos,
@@ -28,7 +31,7 @@ import { desktopLyrics } from '../lib/desktopLyrics'
 import { musicDesk } from '../lib/musicDesk'
 import { useFoliaFx, useLyricsSolo, useVinylView } from '../lib/uiPrefs'
 import { KEYS, settings } from '../lib/settings'
-import { fetchUpdate, openDownload, type UpdateInfo } from '../lib/update'
+import { fetchUpdate, openDownload, openLink, type UpdateInfo } from '../lib/update'
 import { QualitySection, SourcesDirSection, SourcesSection } from '../components/SourcesSection'
 
 import { HotkeySection } from '../components/HotkeySection'
@@ -36,6 +39,8 @@ import { AccountSection } from '../components/AccountSection'
 import { HelpTip } from '../components/HelpTip'
 import { useDownloads } from '../lib/DownloadsProvider'
 import { audioCacheSize, clearAudioCache } from '../lib/audioCache'
+import { usePlayer } from '../lib/PlayerProvider'
+import { SleepSheet } from '../components/SleepSheet'
 
 /**
  * 设置分类。
@@ -60,13 +65,54 @@ const SET_PANES: Array<{ id: SetPane; label: string }> = [
   { id: 'about', label: '关于' },
 ]
 
-/** `lock_state` 的返回：开关态 + 是不是小米 + MIUI「锁屏显示」放不放行 + 我们能不能绕过去 */
+/**
+ * 项目主页入口（关于 → 仓库地址）。
+ *
+ * 只放**常量地址**，点一下交给系统浏览器。以后官网定了，往数组里加一条即可
+ * （顺序就是显示顺序，官网建议放最前）。两端的打开能力已经统一在
+ * `lib/update.ts` 的 `openLink()`：安卓走 `open_url` intent，桌面走 Tauri
+ * shell open，浏览器预览退回 `window.open`。
+ */
+const PROJECT_LINKS: Array<{
+  id: string
+  name: string
+  sub: string
+  url: string
+  Icon: typeof IconGithub
+}> = [
+  { id: 'github', name: 'GitHub', sub: 'github.com/Kaikal/shuyin', url: 'https://github.com/Kaikal/shuyin', Icon: IconGithub },
+  /*
+   * Gitee 主仓（ghpgitee/shuyin）是**私有**的：浏览器直接打开就是 403「访问受限」，
+   * 用户报过这条。这里放**公开**的发布仓 `shuyin-update`（更新清单、安装包镜像都
+   * 在里面，匿名可读），不暴露私有源码仓。
+   */
+  { id: 'gitee', name: 'Gitee', sub: 'gitee.com/ghpgitee/shuyin-update', url: 'https://gitee.com/ghpgitee/shuyin-update', Icon: IconGitee },
+  /* 官网地址定下来之后在这里加一条，`id` 用 site（底色走强调色）：
+   * { id: 'site', name: '官网', sub: 'shuyin.xxx', url: 'https://…', Icon: IconGlobe },
+   */
+]
+
+/**
+ * `lock_state` 的返回。
+ *
+ * 锁屏页是主 Activity 里的一层 View（`setShowWhenLocked`），**不需要任何额外权限**
+ * 就能在「用户在应用里熄屏」时出现。只有「在桌面/别的应用里熄屏」那一半，
+ * 要系统允许我们把窗口从后台拉回来 —— 那是系统开关，读不到，只能试过一次才知道
+ * （`bgBlocked`）。
+ */
 interface LockState {
   on: boolean
-  miui: boolean
-  allowed: 'allow' | 'deny' | 'unknown'
-  /** 原生侧能给 intent 打上 MIUI 的系统级标志（绕开「锁屏显示」appop）。老版本没这个字段 */
+  /** 小米：MIUI 自己的「显示在锁屏上」（10020） */
+  miui?: boolean
+  allowed?: 'allow' | 'deny' | 'unknown'
+  /** 原生能给 intent 打上 MIUI 的系统级标志（绕开 10020/10021） */
   bypass?: boolean
+  /** 上一次熄屏拉起被系统拦住了（事后回看窗口有没有到前台） */
+  bgBlocked?: boolean
+  /** 悬浮窗（SAW）：跨应用熄屏拉起的前置条件，没给时开关锁死 */
+  saw?: boolean
+  /** 这次 toggle 因为缺悬浮窗权限被原生按下了（原生已带 Toast + 跳授权页） */
+  needPermission?: boolean
 }
 
 export interface SettingsPageProps {
@@ -80,6 +126,17 @@ export interface SettingsPageProps {
 export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
   const th = useTheme()
   const dl = useDownloads()
+  /* 定时关闭 / 音量保护的真值都在原生（安卓），这里只读显示 + 发命令 */
+  const p = usePlayer()
+  /*
+   * 车机上没有对应物的设置整块收掉（用户：「车机版不用的设置选项也可以去掉」）：
+   * 锁屏播放页（车机不存在「解锁回到原应用」的场景）、下载（导轨里没有下载页，
+   * 车里插 USB 听本地，主动下载不成立）。频谱 / 音效 / 缓存 / 睡眠定时这些
+   * 车机上照常有用，保留。
+   */
+  const shellMode = useShell()
+  const isCar = shellMode === 'car'
+  const [sleepOpen, setSleepOpen] = useState(false)
 
   /**
    * 当前分类。
@@ -121,6 +178,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
   }
   useEffect(() => {
     refreshLockState()
+    refreshBattery()
     if (!bridge.isAndroid) return
     /*
      * 从系统「权限管理」页退回来时刷一次。
@@ -129,7 +187,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
      * 这里仍然写着「没打开」，用户会以为没生效、再去开一遍。
      * WebView 里 useFocusEffect 不可靠，`visibilitychange` 是稳的。
      */
-    const onVis = () => { if (!document.hidden) refreshLockState() }
+    const onVis = () => { if (!document.hidden) { refreshLockState(); refreshBattery() } }
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [])
@@ -144,6 +202,33 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
     try {
       await bridge.invoke('lock_perm_open')
     } catch { /* 打不开就算了，副标题里写了手动路径 */ }
+  }
+  /** 跳系统「显示在其他应用上层」授权页（锁屏页跨应用拉起的前置条件） */
+  const openOverlayPerm = async () => {
+    try {
+      await bridge.invoke('overlay_perm_open')
+    } catch { /* 老包没有这条命令：让用户自己去系统设置 */ }
+  }
+
+  /**
+   * 电池优化白名单（Doze）。
+   *
+   * 在线曲目边下边放，系统一进 Doze 就把后台网络掐掉 —— 表现是「播放在线歌单
+   * 过一段时间就停，而本地缓存的歌一点事没有」（缓存不需要网）。
+   * 这一步是唯一能根治的：进白名单后 Doze 不再限制本应用。
+   */
+  const [batteryOk, setBatteryOk] = useState<boolean | null>(null)
+  const refreshBattery = () => {
+    if (!bridge.isAndroid) return
+    void bridge
+      .invoke<{ ignoring: boolean }>('battery_state')
+      .then(r => setBatteryOk(!!r?.ignoring))
+      .catch(() => { /* 老包没有这条命令 */ })
+  }
+  const openBattery = async () => {
+    try {
+      await bridge.invoke('battery_open')
+    } catch { /* 打不开就让用户自己进系统设置 */ }
   }
 
   /**
@@ -162,8 +247,6 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
   const [updBusy, setUpdBusy] = useState(false)
   const [updMsg, setUpdMsg] = useState('')
   const [updNew, setUpdNew] = useState<UpdateInfo | null>(null)
-  /** 手机端「关于」弹窗（设计稿把关于收成一行） */
-  const [aboutOpen, setAboutOpen] = useState(false)
   /**
    * 「关于」里显示的版本号。
    *
@@ -436,15 +519,15 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
        * 顺带修掉旧行为：以前打开它的一瞬间会立刻把锁屏页弹出来「预览」，
        * 用户的意思是「我锁屏了以后再跳」，不是「我点开关你就跳」。
        */}
-      {bridge.isAndroid && (
+      {bridge.isAndroid && !isCar && (
         <section className="set-group" data-pane="shell" data-sec="lock">
           <h3>锁屏</h3>
           <div className="set-row">
             <span className="set-label">
               锁屏播放页
               <span className="set-sub">
-                锁屏之后按亮屏幕，显示整屏播放页（封面 + 歌词 + 播控）。不会自己点亮屏幕，
-                也不会拦住系统息屏；打开这个开关不会立刻跳过去，没在放歌也不会弹
+                熄屏后按亮屏幕显示整屏播放页；在任意应用中熄屏均有效，解锁后回到原应用。
+                不会自行点亮屏幕
               </span>
             </span>
             <button
@@ -454,20 +537,46 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
               <span className="sr-only">锁屏播放页</span>
             </button>
           </div>
+          {/* 华为后弹窗被拦时设置页给出引导（见 LockScreen 的 bg_blocked） */}
+          {lockOn && lockState?.bgBlocked && (
+            <div className="set-row">
+              <span className="set-label">
+                后台弹出被系统拦截
+                <span className="set-sub">
+                  请在 系统设置 → 应用 → 疏音 → 应用启动管理 中改为「手动管理」，
+                  并允许「后台活动」
+                </span>
+              </span>
+            </div>
+          )}
           {/*
-           * 只有「我们自己也绕不过去」时才提示用户去开系统权限。
-           * 原生侧能给 intent 打上 MIUI 的系统级标志（bypass=true）时，
-           * appop 仍然是 deny，但系统在检查开头就放行了 —— 这时候再显示
-           * 「去开启」就是让用户白跑一趟设置。
+           * 悬浮窗没给：开关保持关 + 给授权入口（原生 lock_toggle 也会按住，
+           * 这里是先把状态摆出来，用户不用点了才知道）。
+           * 2026-11-21 平板实测：没有 SAW 时跨应用熄屏拉起被 ROM 静默拦掉，
+           * 开关开着等于开了一个不工作的功能（用户拍板：没权限就不该能打开）。
            */}
+          {lockState && lockState.saw === false && (
+            <div className="set-row">
+              <span className="set-label">
+                需要悬浮窗权限
+                <span className="set-sub">
+                  「在其他应用上层」没开启时，别的应用里熄屏拉不出锁屏页
+                  （系统会静默拦截）。点「去开启」允许后回来再打开上面的开关
+                </span>
+              </span>
+              <span className="set-ctl">
+                <button className="ghost-btn" onClick={() => void openOverlayPerm()}>去开启</button>
+              </span>
+            </div>
+          )}
+          {/* 小米自己那道「显示在锁屏上」（10020）：原生绕不过去时才需要用户动手 */}
           {lockOn && lockState?.miui && !lockState.bypass && lockState.allowed !== 'allow' && (
             <div className="set-row">
               <span className="set-label">
-                小米要「显示在锁屏上」才压得住锁屏
+                需要开启「显示在锁屏上」
                 <span className="set-sub">
-                  {lockState.allowed === 'deny'
-                    ? '这是 MIUI 自己的限制：它默认不许第三方应用显示在锁屏上，所以这一页要等你解锁之后才冒出来。点右边「去开启」→ 在「其他权限」里打开「显示在锁屏上」（部分版本叫「锁屏显示」），之后按亮屏幕就会直接看到它'
-                    : '如果锁屏时这一页要等解锁才出现，点「去开启」→ 在「其他权限」里打开「显示在锁屏上」；能直接显示就不用管这一行'}
+                  MIUI 限制第三方应用显示在锁屏上。点「去开启」→「其他权限」→
+                  打开「显示在锁屏上」
                 </span>
               </span>
               <span className="set-ctl">
@@ -475,6 +584,34 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
               </span>
             </div>
           )}
+          {/*
+           * 「在线的歌播一段时间就停、本地缓存的半小时都没事」的根因就在这一行：
+           * Doze 一进入就掐后台网络，而缓存歌根本不需要网。加进白名单才是根治。
+           */}
+          {batteryOk !== null && (
+            <div className="set-row">
+              <span className="set-label">
+                允许后台活动（不被系统休眠）
+                <span className="set-sub">
+                  {batteryOk
+                    ? '已允许：熄屏后系统不会再掐掉后台网络，在线歌曲能一直连着播'
+                    : '没允许。熄屏一段时间后系统会掐掉后台网络，在线的歌就会停——本地缓存的歌不受影响，两种歌的差别正在这里。点右边「去允许」；华为/荣耀多半只会跳到「应用信息」，那就自己去 设置 → 电池 → 应用启动管理，把疏音改成「手动管理」并勾上「允许后台活动」'}
+                </span>
+              </span>
+              <span className="set-ctl">
+                {batteryOk
+                  ? <button className="ghost-btn" disabled>已允许</button>
+                  : <button className="ghost-btn" onClick={() => void openBattery()}>去允许</button>}
+              </span>
+            </div>
+          )}
+          {/*
+           * 「解锁后回到锁屏前的应用」那一行已撤（连同使用情况访问权限）。
+           *
+           * 它只在「在别的应用里熄屏也铺整屏歌词页」的前提下才有意义 —— 那个前提
+           * 本身要先把我们的窗口顶到前台，任务栈被重排，解锁就必然落桌面。
+           * 现在跨应用熄屏不再铺页（见上面那行的说明），这一行自然也不需要了。
+           */}
         </section>
       )}
 
@@ -730,6 +867,8 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       </section>
       </>)}
 
+      {/* 下载在车机上没有入口（导轨不放下载页），设置项跟着收掉 */}
+      {!isCar && (
       <section className="set-group" data-pane="storage" data-sec="download">
         <h3>下载</h3>
         <div className="set-row">
@@ -756,6 +895,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           </button>
         </div>
       </section>
+      )}
 
       <section className="set-group" data-pane="storage" data-sec="cache">
         <h3>播放缓存</h3>
@@ -893,6 +1033,52 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         </div>
       </section>
 
+      {/*
+       * 定时关闭 / 音量保护：**安卓专属**（真值在原生 SleepTimer / AudioEngine）。
+       *
+       * 桌面端没有这两条：定时关闭在桌面上意义不大（没人插着电睡觉听），
+       * 而淡入淡出要动 Rust 音频线程那一侧，两边节奏不同步反而会「一个平台有一处没」。
+       * 等桌面那边要做时，这里把 isAndroid 去掉即可。
+       */}
+      {bridge.isAndroid && (
+        <section className="set-group" data-pane="play" data-sec="guard">
+          <h3>睡眠与音量</h3>
+          <div className="set-row">
+            <span className="set-label">
+              定时关闭
+              <span className="set-sub">
+                {p.sleep.track
+                  ? '播完当前这首就暂停'
+                  : p.sleep.on
+                    ? `还有 ${Math.max(1, Math.ceil(p.sleep.remain / 60))} 分钟，到点淡出并暂停`
+                    : '到点淡出并暂停，不会退出应用；播放页「更多」里也能设'
+                }
+              </span>
+            </span>
+            <span className="set-ctl">
+              <button className="ghost-btn" onClick={() => setSleepOpen(true)}>
+                {p.sleep.on ? '修改' : '设置'}
+              </button>
+            </span>
+          </div>
+          <div className="set-row">
+            <span className="set-label">
+              音量保护
+              <span className="set-sub">
+                起播淡入、暂停淡出，被来电或别家应用压低后缓慢回升；常开峰值限幅，
+                避免换到一首录得偏响的歌时音量一下子变大
+              </span>
+            </span>
+            <button
+              className="toggle" role="switch" aria-checked={p.audioGuard}
+              onClick={() => p.setAudioGuard(!p.audioGuard)}
+            >
+              <span className="sr-only">音量保护</span>
+            </button>
+          </div>
+        </section>
+      )}
+
       <section className="set-group" data-pane="play" data-sec="boot">
         <h3>启动</h3>
         <div className="set-row">
@@ -928,20 +1114,36 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         </div>
       </section>
 
-      <section className="set-group" data-pane="about" data-sec="about">
-        <h3>关于疏音</h3>
-        {/* 手机上一行就够（设计稿 05 的 34 高行），点开才是完整信息 */}
-        {bridge.isNative && (
-          <button className="hd-about-row" onClick={() => setAboutOpen(true)}>
-            <span className="hd-about-name">关于疏音</span>
-            <span className="hd-about-ver num">v{ver} · 疏影横斜，澄澈之音 <i aria-hidden="true">›</i></span>
-          </button>
-        )}
-        <div className="about">
-          <span className="about-name">疏音</span>
-          <span className="about-tag">疏影横斜，澄澈之音</span>
-          <span className="about-ver num">v{ver}</span>
+      <section className="set-group ab-card" data-pane="about" data-sec="about">
+        {/*
+         * 关于页以前是「一行字 + 一个弹窗」：手机上整页几乎空白，要点开才看到版本。
+         * 现在整页摊开——品牌头、项目主页、检查更新。没有弹窗了。
+         */}
+        <div className="ab-hero">
+          <span className="ab-mark" aria-hidden="true"><IconMusicNote width={24} height={24} /></span>
+          <span className="ab-main">
+            <span className="ab-name">疏音</span>
+            <span className="ab-tag">疏影横斜，澄澈之音</span>
+          </span>
+          <span className="ab-ver num">v{ver}</span>
         </div>
+
+        <div className="ab-sub">项目主页</div>
+        <div className="ext-links">
+          {PROJECT_LINKS.map(({ id, name, sub, url, Icon }) => (
+            <button className="ext-link" key={id} onClick={() => void openLink(url)}>
+              <span className={'ext-ico ext-ico-' + id} aria-hidden="true">
+                <Icon width={18} height={18} />
+              </span>
+              <span className="ext-main">
+                <span className="ext-name">{name}</span>
+                <span className="ext-url">{sub}</span>
+              </span>
+              <span className="eq-entry-chev" aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+
         {/* 自动检查是「发现就弹窗」，这里给一个手动入口：不确定有没有新版时点一下 */}
         <div className="set-row">
           <span className="set-label">
@@ -963,28 +1165,6 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           </span>
         </div>
       </section>
-
-      <Modal
-        open={aboutOpen}
-        title="关于疏音"
-        onClose={() => setAboutOpen(false)}
-        width={420}
-        footer={<button className="primary-btn" onClick={() => setAboutOpen(false)}>知道了</button>}
-      >
-        <div className="hd-about-card">
-          <div className="hd-about-logo">疏音</div>
-          <div className="hd-about-tag">疏影横斜，澄澈之音</div>
-          <div className="hd-about-line"><span>版本</span><b className="num">v{ver}</b></div>
-          <div className="hd-about-line"><span>更新</span>
-            <span className="hd-about-upd">
-              {updMsg || '启动时自动检查一次'}
-              {updNew
-                ? <button className="link-btn" onClick={() => void openDownload(updNew.url)}>下载 v{updNew.latest}</button>
-                : <button className="link-btn" onClick={() => void doCheckUpdate()} disabled={updBusy}>{updBusy ? '检查中…' : '检查更新'}</button>}
-            </span>
-          </div>
-        </div>
-      </Modal>
 
       {/* ---------- 均衡器与声道 ---------- */}
       <Modal
@@ -1124,6 +1304,9 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           <span className="dl-size-val num">{Math.round(dlLayout.bg * 100)}%</span>
         </div>
       </Modal>
+
+      {/* 定时关闭（安卓）：和播放页「更多」里那个是同一个面板、同一个真值 */}
+      <SleepSheet open={sleepOpen} onClose={() => setSleepOpen(false)} />
     </div>
   )
 }

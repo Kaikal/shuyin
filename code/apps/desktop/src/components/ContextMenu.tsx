@@ -2,6 +2,7 @@
  * 右键菜单：自定义浮层（非系统原生菜单），支持边界翻转、键盘上下选择、Esc 关闭。
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { pushBackLayer } from '../lib/native/android'
 
 /**
  * 视口底部被**常驻栏**占掉的地方。
@@ -255,6 +256,19 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
   useEffect(() => {
     armedRef.current = false
   }, [x, y])
+
+  /*
+   * 安卓返回键：**先关菜单**，这一下不许穿透到页面。
+   *
+   * 踩到的现象（用户 2026-11 反馈）：搜索页长按出菜单，按返回，菜单还在、
+   * 页面却跳到了「我的」。原因是菜单的 open 状态是**页面内部的 state**，
+   * App 那套返回栈看不见它，返回键一路走到「page !== home → nav('home')」；
+   * 而搜索页是**常驻挂载**的（只做横向平移），fixed 定位的菜单不跟着动，
+   * 于是旧菜单留在了新页面上。
+   *
+   * 弹层自己压一层到返回栈里（`pushBackLayer` 后来的先响应），关掉即弹掉。
+   */
+  useEffect(() => pushBackLayer(() => { requestClose(); return true }), [])
 
   return (
     <>

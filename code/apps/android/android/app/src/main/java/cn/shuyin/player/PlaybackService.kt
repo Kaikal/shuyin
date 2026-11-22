@@ -27,6 +27,8 @@ import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -37,6 +39,7 @@ import android.os.PowerManager
 import android.widget.RemoteViews
 import android.widget.Toast
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.PlaybackException
 import org.json.JSONObject
 
 /**
@@ -92,7 +95,7 @@ class PlaybackService : Service() {
 
         /** 当前是否真的在出声：浮窗上的播放键要按它画 ▶ / ⏸ */
         fun playingNow(): Boolean = instance?.let {
-            try { it.mp?.isPlaying == true } catch (_: Exception) { false }
+            try { it.mp?.active == true } catch (_: Exception) { false }
         } ?: false
 
         /**
@@ -101,6 +104,15 @@ class PlaybackService : Service() {
          */
         @Volatile
         var instance: PlaybackService? = null
+
+        /**
+         * 服务还没起来时前端递来的预告表（见 [next_prefetch] 与 onCreate 的注释）。
+         *
+         * 前端算预告不等播放，而 service 要等第一首 load 才会 start；这段空窗期
+         * 里递的东西必须有地方存，否则整表丢掉，直接表现为「播完一首就停」。
+         */
+        @Volatile
+        var pendingPrefetch: org.json.JSONArray? = null
 
         /** 频段数：和桌面 Rust 侧一致（40 段对数分箱） */
         const val BANDS = 40
@@ -120,6 +132,8 @@ class PlaybackService : Service() {
             put("seeking", false)
             put("error", JSONObject.NULL)
             put("buffered", 0.0)
+            put("sleep", 0)
+            put("sleep_track", false)
         }
     }
 
@@ -156,8 +170,31 @@ class PlaybackService : Service() {
      *     抢占者一松手系统就会给我们回一个 GAIN，这正是「等它结束后继续播」。
      *   · LOSS_TRANSIENT_CAN_DUCK：只把音量压到 20%（系统提示音这类不打断听歌）。
      *   · GAIN：恢复音量；若之前是被抢占而暂停的，自动续播。
+     *
+     * ## `focusLost` 是 2026-11-15 补的那一位
+     *
+     * 用户原话：「我听着听着来电话了，需要暂停，等他挂断后继续播放」——说明**没停**。
+     * 根因是 LOSS 分支里那句 `if (!prepared) return`：换歌 / 首包还没到时
+     * `prepared` 是 false，于是这次焦点丢失被整条丢掉；几百毫秒后 `onPrepared`
+     * 一看 `wantPlay == true`，**在通话中把歌放了出来**。
+     * 所以「焦点现在不在我们手里」必须单独记一位，`onPrepared` 也要看它。
      */
     private var focusPaused = false
+    /** 「焦点此刻在别人手里」。不看 `prepared`，只看焦点回调本身 */
+    private var focusLost = false
+    /**
+     * 上一次丢焦点是**永久**的（`AUDIOFOCUS_LOSS`），不是「来电这种等一下会还回来」的。
+     *
+     * 这一位的存在是因为 Android 的两种丢失语义完全不同：
+     *   · `LOSS_TRANSIENT`（来电、导航播报）：我们还挂在焦点栈里，对方一松手系统就回一个 GAIN；
+     *   · `LOSS`（另一个播放器抢走了）：**框架会立刻把我们移出焦点栈**，
+     *     之后永远不会再有 GAIN。实测华为音乐一开播，`dumpsys audio` 里我们的条目
+     *     当场消失——这就是用户说的「他打开了别的视频，播完也没给我接着放」。
+     * 永久丢失只能靠 [probeFocusRecovery] 主动探：等到对方真的没在出声了，再申请回来。
+     */
+    private var lostPermanently = false
+    /** 探测节流：2 秒一次就够，`isMusicActive()` 是系统调用，别每 250ms 摸一次 */
+    private var focusProbeAt = 0L
     /** 被压低音量前的原始音量；-1 表示当前没有被压低 */
     private var duckedFrom: Float = -1f
 
@@ -170,6 +207,41 @@ class PlaybackService : Service() {
     private var seekingFlag = false
     private var errorText: String? = null
     private var wantPlay = false
+
+    /**
+     * 「网络断了，正在等它回来」。
+     *
+     * 在线曲目的音频是边下边放的，系统一休眠就容易把网掐掉（Doze、华为省电、
+     * WiFi 休眠都是这个形状）。这时候**不能把 `wantPlay` 熄掉**：
+     * 用户并没有要停，他只是离开了手机；熄掉之后网络回来也不会自己接上，
+     * 界面上就停在某一首，用户回来只看到「播放」按钮——他 2026-11-16 报的
+     * 「过一段时间被冻结、播放在线就停止」正是这条。
+     *
+     * 置位之后由 [netWatch] 的回调负责续播（见 onCreate）。
+     * 本地缓存的曲目不联网，永远不会进这个状态——这也是为什么「已缓存的
+     * 半小时都没事、在线的一段时间就停」。
+     */
+    @Volatile
+    private var netStall = false
+    private var netCb: ConnectivityManager.NetworkCallback? = null
+
+    /**
+     * 用户意图代号（前端 `epochRef` 发来的单调自增数）。
+     *
+     * 只解决一件事：**迟到的加载不许出声**。
+     *
+     * 真机日志（2026-11-15）里那个形状：
+     *   `src=frontend pause` → `after pause playing=false`
+     *   `open autoplay=true index=22`   ← 130ms 之后，上一轮取链回来了
+     *
+     * 前端下发 `play_url` 时读的是**那一刻**的 `autoCancel`，管不住已经在路上的
+     * 命令。所以每条播放/暂停命令都带一个代号：原生记住最新代号，凡是代号更旧的
+     * `play_file/play_url`，**音源照常准备**（进度、时长、后续秒播都在），
+     * 但 `autoplay` 一律按 false 处理。弱网时这条链路能拖几秒，正是用户听到的
+     * 「我明明暂停了，过一会儿又自己响」。
+     */
+    @Volatile
+    private var intentEpoch = 0L
 
     /**
      * 「下一首预告」里的一个条目（见 [setPrefetch]）。
@@ -244,12 +316,26 @@ class PlaybackService : Service() {
         super.onCreate()
         Sy.init(this)
         instance = this
+        /*
+         * 补收「服务还没起来时递来的预告表」。
+         *
+         * 前端一挂载就算预告（不等播放），而这时 service 常常还没被 start——
+         * 原来 `instance?.setPrefetch(...)` 是空安全的，于是整表**静默丢掉**，
+         * 之后队列没再变过就不会重发，原生手里一首都没有：第一首放完就停在
+         * 曲末（用户 2026-11-14 报的「只能播一首就暂停」）。冷启动恢复上次
+         * 队列时最典型：index 没变，effect 不会再触发。
+         */
+        pendingPrefetch?.let { p ->
+            pendingPrefetch = null
+            setPrefetch(p)
+        }
         createChannel()
         /*
          * 悬浮歌词的开关真值在 FloatingLyrics 里，建窗/拆窗是 post 到主线程异步做的。
          * 挂这个回调，等窗真挂了再刷通知——那颗「词」才不会一直停在旧样式。
          */
         FloatingLyrics.onShownChanged = { updateNotif() }
+        netWatch()
         session = MediaSession(this, "shuyin").apply {
             /*
              * 这三样是「系统肯不肯把你当播放器」的入场券，缺一样华为控制中心
@@ -275,8 +361,14 @@ class PlaybackService : Service() {
                  * 以前两个都映射成「playpause」（切换）——在播的时候收到 onPlay
                  * 反而会暂停。现在按语义走，只有通知栏那颗键才是切换。
                  */
-                override fun onPlay() = setPlayingInService(true)
-                override fun onPause() = setPlayingInService(false)
+                override fun onPlay() {
+                    LockScreen.trace("src=session onPlay")
+                    setPlayingInService(true)
+                }
+                override fun onPause() {
+                    LockScreen.trace("src=session onPause")
+                    setPlayingInService(false)
+                }
                 override fun onSkipToNext() = action("next")
                 override fun onSkipToPrevious() = action("prev")
                 override fun onSeekTo(pos: Long) {
@@ -288,17 +380,67 @@ class PlaybackService : Service() {
             })
             isActive = true
         }
-        /* 息屏 / 亮屏监听：见 screenRx 的注释（锁屏播放页靠它摆好位置） */
+        /* 熄屏 / 亮屏 / 解锁 → 挂上或收起锁屏播放页那个悬浮窗 */
         try {
             registerReceiver(
                 screenRx,
-                IntentFilter().apply {
-                    addAction(Intent.ACTION_SCREEN_OFF)
-                    addAction(Intent.ACTION_SCREEN_ON)
-                },
+                IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF) },
             )
-        } catch (_: Exception) { /* 个别 ROM 限制动态注册，注册失败只是没有锁屏页 */ }
+        } catch (_: Exception) { /* 个别 ROM 限制动态注册：只是从别的应用熄屏时不弹，不影响播放 */ }
+        /*
+         * 拔耳机 / 断开蓝牙 → 立刻暂停。
+         *
+         * ExoPlayer 建的时候关掉了 `setHandleAudioBecomingNoisy(true)`（见 AudioEngine：
+         * 让它自己暂停会绕过我们这套状态机，`wantPlay` 还是 true，界面和通知都会撒谎）。
+         * 这里自己接这条广播，走 [setPlayingInService]，状态、通知、媒体会话一起更新。
+         * 不做的话就是「拔了耳机，外放接着唱」——公共场合最尴尬的那种。
+         */
+        try {
+            registerReceiver(
+                noisyRx,
+                IntentFilter().apply { addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY) },
+            )
+        } catch (_: Exception) { /* 同上：注册不上只是少了这个贴心动作 */ }
         startTick()
+    }
+
+    /**
+     * 盯住「默认网络回来了」这件事。
+     *
+     * 为什么要它，而不是只靠 ExoPlayer 自己重试：
+     *
+     *   · 重试有上限（见 AudioEngine 的 NetTolerantPolicy，40 次约 5 分钟）。真断得久，
+     *     ExoPlayer 会放弃并进入 IDLE，之后**没有任何人**会再试一次——界面就停在那一首。
+     *   · 系统休眠时 CPU 会被放掉，重试的退避可能落到 8 秒一档；而"网回来了"是个
+     *     立刻可用的信号，没理由再等几秒。
+     *   · 少数场景（WiFi 恢复但 IP 没变）连 `window 'online'` 都不发，只有
+     *     `NetworkCallback` 靠得住。
+     *
+     * `mp.start()` 对 IDLE 的处理见 AudioEngine.start：先 prepare 再 play，
+     * 播放位置原地保留，所以这一下就是从断点接上，不会回到 0:00。
+     */
+    private fun netWatch() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (!netStall) return
+                    netStall = false
+                    LockScreen.trace("net back → 续播 idx=$index pos=${NowPlaying.pos}")
+                    main.post {
+                        if (!wantPlay || mp == null) return@post
+                        mp?.start()
+                        push()
+                        updateNotif()
+                    }
+                }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            netCb = cb
+            LockScreen.trace("netWatch 已注册")
+        } catch (t: Throwable) {
+            LockScreen.trace("netWatch 注册失败 ${t.javaClass.simpleName}")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -312,39 +454,55 @@ class PlaybackService : Service() {
         if (intent?.action != ACT_STOP) startForegroundSafe()
         when (intent?.action) {
             ACT_PLAY_FILE -> {
+                val (auto, stale) = gateAutoplay(intent)
                 trackPath = intent.getStringExtra("path")
                 trackUrl = null
                 index = intent.getIntExtra("index", -1)
                 autoAdvanced = -1
-                open(intent.getDoubleExtra("startAt", 0.0), intent.getBooleanExtra("autoplay", true), 0.0)
+                open(intent.getDoubleExtra("startAt", 0.0), auto, 0.0, if (stale) "play_file(迟到)" else "play_file")
+                if (stale) LockScreen.trace("  迟到的加载（play_file）：准备音源但不出声")
             }
             ACT_PLAY_URL -> {
+                val (auto, stale) = gateAutoplay(intent)
                 trackUrl = intent.getStringExtra("url")
                 trackPath = null
                 index = intent.getIntExtra("index", -1)
                 autoAdvanced = -1
-                open(intent.getDoubleExtra("startAt", 0.0), intent.getBooleanExtra("autoplay", true), intent.getDoubleExtra("durationHint", 0.0))
+                open(intent.getDoubleExtra("startAt", 0.0), auto, intent.getDoubleExtra("durationHint", 0.0), if (stale) "play_url(迟到)" else "play_url")
+                if (stale) LockScreen.trace("  迟到的加载（play_url）：准备音源但不出声")
             }
             /*
              * 前端点暂停 / 继续。这两条是**用户意图**，必须先清掉「焦点补偿」标记，
              * 否则被别的应用抢过焦点之后，用户自己按了暂停，等对方结束
              * 我们还会自作主张续播一次。
              */
+            /*
+             * 前端的播放/暂停：**统一走 `setPlayingInService`**，不要在这里直接
+             * `mp?.pause()` / `mp?.start()`。
+             *
+             * 直接动 `mp` 有个致命缺口：`mp == null` 时它什么也不做，而前端的
+             * `loadedRef` 是**它自己**记的「我让原生加载过」。服务被系统回收、
+             * 或进程从后台被系统重建时，前端记着「已加载」、原生却已经没有播放器 ——
+             * 用户点播放，命令落到空处：界面乐观翻成「播放中」，下一帧又被真状态顶回来，
+             * 表现就是「点了暂停一会儿又自己播 / 点了播放没反应」。
+             * `setPlayingInService` 里带着兜底（没有播放器就用当前曲目或预告重新 open）。
+             */
             ACT_PAUSE -> {
-                focusPaused = false
-                wantPlay = false
-                safe { mp?.pause() }
-                push()
-                updateNotif()
+                LockScreen.trace(
+                    "src=frontend pause why=${intent.getStringExtra("why") ?: ""} " +
+                        "e=${intent.getLongExtra("epoch", 0L)} cur=$intentEpoch",
+                )
+                claimEpoch(intent)
+                setPlayingInService(false)
             }
             ACT_RESUME -> {
-                focusPaused = false
-                wantPlay = true
+                LockScreen.trace(
+                    "src=frontend resume why=${intent.getStringExtra("why") ?: ""} " +
+                        "e=${intent.getLongExtra("epoch", 0L)} cur=$intentEpoch",
+                )
+                claimEpoch(intent)
                 startForegroundSafe()
-                requestFocus()
-                safe { mp?.start() }
-                push()
-                updateNotif()
+                setPlayingInService(true)
             }
             ACT_TOGGLE -> toggleInService()
             ACT_STOP -> stopPlayback()
@@ -372,6 +530,7 @@ class PlaybackService : Service() {
                 FloatingLyrics.setMeta(metaTitle)
                 syncSessionMeta()
                 loadArtAsync()
+                LockScreen.trace("meta <- \"$metaTitle\" idx=$index")
                 /*
                  * 队列清空那一刻前端会推一次 title 为空的 meta。照单全收的话
                  * 通知标题回落到「疏音」、又没有封面大图，MIUI 就画出那块白板。
@@ -424,9 +583,25 @@ class PlaybackService : Service() {
      */
     fun spectrumSnapshot(): FloatArray = mp?.tap?.spectrum ?: idleSpectrum
 
-    private fun open(startAt: Double, autoplay: Boolean, durationHint: Double) {
+    private fun open(startAt: Double, autoplay: Boolean, durationHint: Double, why: String = "?") {
+        /*
+         * 一行日志，带**发起方**：排查「暂停之后过几秒又响」时，第一个要回答的问题
+         * 就是「这条 open 是谁发的」——前端的 play_url、原生自己的兜底重开
+         * （`setPlayingInService`）、还是预告表接下一首。以前三者长得一模一样，
+         * 只能靠时间猜（2026-11-15 就是这么绕了两轮的）。
+         */
+        LockScreen.trace("open[$why] autoplay=$autoplay at=$startAt url=${trackUrl != null} index=$index")
+        /*
+         * 远程源：从「决定加载」这一刻就把网按住。
+         *
+         * 不能等起播 —— 在线歌最容易断网的位置正是**起播之前那几秒**（前端在取
+         * 下一首直链、上一首已经停了，ExoPlayer 的 WAKE_MODE 锁不在手上）。
+         * 本地文件则顺手把锁放掉（见 `keepNetAlive`）。
+         */
+        keepNetAlive(trackUrl != null)
         wantPlay = autoplay
         errorText = null
+        netStall = false
         endedFlag = false
         pendingSeekSec = startAt
         /* 队列清空那次 stopPlayback 会把会话置为失活（为了让 MIUI 不再画空白媒体卡），
@@ -458,9 +633,21 @@ class PlaybackService : Service() {
                 pendingSeekSec = 0.0
             }
             if (wantPlay) {
-                player.start()
-                startForegroundSafe()
-                requestFocus()
+                /*
+                 * **焦点不在我们手里就不许起播。**
+                 *
+                 * 这一句是「来电话了歌还在放」的另一半：LOSS 到达时可能还在缓冲，
+                 * 那时 `wantPlay` 已经被压成 false 了；但「先点播放、焦点后被人抢」
+                 * 的时序下 `wantPlay` 还是 true，而 READY 恰好晚于 LOSS。
+                 * 只有 `focusLost` 能把这两种时序分开。
+                 */
+                if (focusLost) {
+                    LockScreen.trace("onPrepared: 焦点在别处，暂不起播")
+                } else {
+                    player.start()
+                    startForegroundSafe()
+                    requestFocus()
+                }
             }
             syncSessionMeta()
             updateNotif()
@@ -468,25 +655,69 @@ class PlaybackService : Service() {
         }
         player.onCompletion = {
             /*
-             * 有预告就直接接上，**没有才**交给前端。
-             *
-             * 顺序不能反：先问 JS 再兜底都会留一个空档，而空档正是"停在两首
-             * 之间"的那几秒。接上时不能置 `endedFlag`——一置前端就会再 advance
-             * 一次，等于跳过一首。
+             * 「播完当前这首就关」优先于预告表：这一首放完就该睡了，
+             * 再自动接一首等于定时器白设。
              */
-            val next = synchronized(prefetch) { prefetch.pollFirst() }
-            if (next != null) main.post { playPrefetched(next) }
-            else {
-                endedFlag = true
+            if (SleepTimer.endOfTrack) {
+                SleepTimer.clear()
                 wantPlay = false
+                endedFlag = true
+                toastOut("定时关闭：这一首已播完")
+                LockScreen.trace("sleep end-of-track → stop advance")
                 push()
                 updateNotif()
+            } else {
+                /*
+                 * 有预告就直接接上，**没有才**交给前端。
+                 *
+                 * 顺序不能反：先问 JS 再兜底都会留一个空档，而空档正是"停在两首
+                 * 之间"的那几秒。接上时不能置 `endedFlag`——一置前端就会再 advance
+                 * 一次，等于跳过一首。
+                 */
+                val next = synchronized(prefetch) { prefetch.pollFirst() }
+                val left = synchronized(prefetch) { prefetch.size }
+                LockScreen.trace("end idx=$index prefetch=${if (next == null) "空" else next.index} 余=$left")
+                if (next != null) main.post { playPrefetched(next) }
+                else {
+                    endedFlag = true
+                    wantPlay = false
+                    push()
+                    updateNotif()
+                }
             }
         }
         player.onError = { what, extra ->
-            errorText = "播放失败（$what/$extra）"
-            wantPlay = false
-            push()
+            val net = extra == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                extra == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+            /*
+             * 这一行是排查「在线歌放着放着停了」的唯一线索，必须带全：
+             * `code` 分得清 DNS 失败（2001）/ 读超时（2002）/ 403 防盗链（2003），
+             * `detail` 里有 javaClass 名与原话。不带的话只能看到「播放失败（1/2001）」。
+             */
+            LockScreen.trace(
+                "player err idx=$index code=$extra net=$net want=$wantPlay " +
+                    "pos=${player.currentPosition / 1000} detail=${player.lastErrorDetail}",
+            )
+            if (net) {
+                /*
+                 * **断网不等于用户要停。**
+                 *
+                 * `wantPlay` 保持 true：ExoPlayer 自己会在 NetTolerantPolicy 的窗口里
+                 * 一直重试；真拖到它放弃（IDLE），网络回来的那一刻由 [netWatch] 续上。
+                 * 原来这里无条件 `wantPlay = false`，于是断网 6 秒后播放器判死、
+                 * 意图也一起熄掉，网回来了也没有任何人再去 prepare ——
+                 * 用户看到的就是「停在那不动，得手动点一下」。
+                 */
+                netStall = true
+                errorText = "网络中断，恢复后自动继续播放"
+                push()
+                updateNotif()
+            } else {
+                /* 403/404（直链过期、防盗链）、解码失败：重试无意义，交前端换源 */
+                errorText = "播放失败（$what/$extra）"
+                wantPlay = false
+                push()
+            }
         }
         player.onSeekComplete = {
             seekingFlag = false
@@ -536,6 +767,8 @@ class PlaybackService : Service() {
         }
         /* 前端既然能发预告，就说明它活着并且已经知道现在放的是哪首了 */
         autoAdvanced = -1
+        /* 一行日志：排查「播完一首就停」时先看这张表到底有没有递过来、递了几首 */
+        LockScreen.trace("setPrefetch n=${items.length()}")
     }
 
     /**
@@ -546,6 +779,7 @@ class PlaybackService : Service() {
      */
     private fun playPrefetched(p: Prefetch) {
         if (mp == null && p.title.isBlank()) { shutdownIdle(); return }
+        LockScreen.trace("prefetch→ idx=${p.index} \"${p.title}\" left=${synchronized(prefetch) { prefetch.size }}")
         trackPath = p.path
         trackUrl = p.url
         index = p.index
@@ -558,11 +792,34 @@ class PlaybackService : Service() {
         syncSessionMeta()
         loadArtAsync()
         autoAdvanced = p.index
-        open(0.0, true, p.duration)
+        open(0.0, true, p.duration, "prefetch")
         startForegroundSafe()
         requestFocus()
         updateNotif()
         push()
+    }
+
+    /** 把命令里带的代号记成「当前意图」；不带（0）就什么都不做 */
+    private fun claimEpoch(intent: Intent) {
+        val e = intent.getLongExtra("epoch", 0L)
+        if (e > intentEpoch) intentEpoch = e
+    }
+
+    /**
+     * 判断这条加载命令是不是「迟到」的。
+     *
+     * 返回 (是否自动起播, 是否迟到)。**迟到的照常准备音源、只是不出声**——
+     * 直接丢弃会让「暂停时正好在加载的那首」永远没准备好，用户下次点播放
+     * 又要干等一轮取链。
+     */
+    private fun gateAutoplay(intent: Intent): Pair<Boolean, Boolean> {
+        val want = intent.getBooleanExtra("autoplay", true)
+        val e = intent.getLongExtra("epoch", 0L)
+        val stale = e > 0L && intentEpoch > 0L && e < intentEpoch
+        if (e > intentEpoch) intentEpoch = e
+        /* 只在「确实判成迟到」时留痕：这是排查「暂停后又响」唯一有用的那一行 */
+        if (stale) LockScreen.trace("  判为迟到 e=$e cur=$intentEpoch want=$want")
+        return (want && !stale) to stale
     }
 
     private fun doSeek(sec: Double) {
@@ -570,6 +827,53 @@ class PlaybackService : Service() {
         seekingFlag = true
         safe { p.seekTo((sec.coerceAtLeast(0.0) * 1000).toInt()) }
         push()
+    }
+
+    /* ---------------- 熄屏别把网掐了 ---------------- */
+
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var cpuLock: android.os.PowerManager.WakeLock? = null
+
+    /**
+     * 在线播放会话期间持有 WiFi + CPU 锁。
+     *
+     * **为什么必须有这一把锁**（2026-11-18 真机实证）：本机 `wifi_sleep_policy=1`，
+     * 熄屏 75 秒后从 shell `ping music.163.com` 已经 100% 丢包、`dumpsys wifi`
+     * 显示 `Wi-Fi is disabling`。而在线歌最容易出事的位置恰恰是**换歌那几秒**：
+     * 上一首已经播完或被 pause，ExoPlayer 的 `WAKE_MODE_NETWORK` 此时不持锁，
+     * 前端去取下一首的直链，于是日志里成片 `Unable to resolve host`（酷狗/酷我/
+     * 网易云一起失败），表填不上，播完就停 —— 用户说的「播着播着就停止」。
+     * 播本地缓存不受影响，正因为那不需要网（用户的观察完全对得上）。
+     *
+     * 所以按「当前曲是不是远程源」持锁，**跟 playing 无关**：切歌间隙 playing
+     * 本来就是 false，而那正是最需要网的时候。`stopPlayback()`（队列清空 / 用户
+     * 主动停）才放。
+     */
+    private fun keepNetAlive(on: Boolean) {
+        if (on) {
+            try {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                val l = wifiLock ?: wm.createWifiLock(
+                    android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "shuyin:online",
+                ).apply { setReferenceCounted(false) }.also { wifiLock = it }
+                if (!l.isHeld) {
+                    l.acquire()
+                    LockScreen.trace("wifiLock 持有（在线会话，熄屏不断网）")
+                }
+            } catch (e: Throwable) {
+                LockScreen.trace("wifiLock 失败: ${e.message}")
+            }
+            try {
+                val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                val l = cpuLock ?: pm.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK, "shuyin:online",
+                ).apply { setReferenceCounted(false) }.also { cpuLock = it }
+                if (!l.isHeld) l.acquire()
+            } catch (_: Throwable) { /* 拿不到就退化：只剩 WifiLock 也能撑住 DNS */ }
+        } else {
+            try { wifiLock?.takeIf { it.isHeld }?.release() } catch (_: Throwable) {}
+            try { cpuLock?.takeIf { it.isHeld }?.release() } catch (_: Throwable) {}
+        }
     }
 
     private fun stopPlayback() {
@@ -598,6 +902,8 @@ class PlaybackService : Service() {
          */
         clearNotif()
         if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
+        /* 会话结束了：把「熄屏别断网」那把锁放掉，别替一个不播的播放器耗电 */
+        keepNetAlive(false)
         stopSelf()
     }
 
@@ -626,47 +932,137 @@ class PlaybackService : Service() {
 
     /* ---------------- 锁屏播放页 ---------------- */
 
-    /**
-     * 息屏 → 页面原地不动，只停重绘；亮屏 → 页面已经在栈顶，直接就能看见。
+    /*
+     * 熄屏这件事要**两份**监听，各管一半：
      *
-     * 只有 Activity 能压在系统锁屏之上（TYPE_APPLICATION_OVERLAY 浮窗解锁后才看得见），
-     * 所以监听得挂在一直在跑的前台服务上：用户按电源键那一刻，应用可能早就退到后台了。
-     * 没在放歌就不碰——锁屏上突然冒出一张音乐页比看不到更烦。
+     *   · 主窗口在前台（用户就在应用里按电源键）→ `MainActivity.screenRx` 直接铺面板，
+     *     窗口本来就在，挂个 `showWhenLocked` 就够；
+     *   · 主窗口在后台（用户在桌面/微信里熄屏）→ 启动独立的 `LockActivity` 铺页。
+     *     它有自己的任务栈，浮在 keyguard 和原应用之上，退场 `finish()` 后原应用
+     *     亮回来——主任务从头到尾不被挪动，不会再出现「解锁落到桌面」。
+     *     （老做法把主任务 moveTaskToFront 拉上来，退场只能 moveTaskToBack = 按 Home，
+     *     已废弃；见 LockActivity 顶部注释。）
      *
-     * **两条路径都不点亮屏幕**（用户原话：「我锁屏以后它会亮一下屏幕然后出现锁屏，
-     * 实际我应该按亮屏幕它才出现」）。息屏那条也**不动 showWhenLocked**——一摘一挂之间
-     * 系统锁屏会顶上来，那就是用户说的「疏音锁屏 → 系统锁屏 → 疏音锁屏」。
+     * 为什么不用悬浮窗：Android 在锁屏上隐藏所有非系统 overlay 窗口，实测
+     * `isVisible=false`，亮屏后看到的还是系统锁屏。见 LockScreen 的注释。
      */
+    /** 上一次跨应用锁屏拉起的时间（elapsedRealtime）：华为 SCREEN_OFF 来两趟，用来去重 */
+    private var lockLaunchAt = 0L
     private val screenRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
-            val action = intent?.action ?: return
-            if (action != Intent.ACTION_SCREEN_OFF && action != Intent.ACTION_SCREEN_ON) return
-            if (!LockScreenActivity.enabled(this@PlaybackService)) return
-            val playing = try { mp?.isPlaying == true } catch (_: Exception) { false }
-            if (!playing) return
-            if (action == Intent.ACTION_SCREEN_OFF) {
-                LockScreenActivity.onScreenOff(this@PlaybackService)
-            } else {
-                LockScreenActivity.onScreenOn(this@PlaybackService)
+            if (intent?.action != Intent.ACTION_SCREEN_OFF) return
+            LockScreen.trace("SCREEN_OFF in service playing=${NowPlaying.playing}")
+            if (!LockScreen.enabled(this@PlaybackService)) { LockScreen.trace("  skip: disabled"); return }
+            if (!NowPlaying.playing) { LockScreen.trace("  skip: not playing"); return }
+            /* 前台那半交给窗口自己处理，别两边一起拉 */
+            if (MainActivity.foregroundNow()) { LockScreen.trace("  skip: foreground"); return }
+            /*
+             * **窗口那边已经铺好了面板，这一趟是重复广播。**
+             *
+             * 华为的 SCREEN_OFF 会来两趟（系统广播一趟、onPause 发现屏幕已黑再兜一趟），
+             * 第二趟到服务时窗口已经 onPause，`foregroundNow()` 过了 1.2 秒宽限就变成
+             * false —— 服务以为窗口在后台，于是 `startActivity` + `moveTaskToFront` +
+             * 一颗 700ms 后的闹钟 PendingIntent 把任务栈重排一遍。
+             * 真机日志（19:09:12 铺面板 / 19:09:14 服务又拉一次）就是这个时序，
+             * 用户看到的是「解锁后回到桌面」「点图标进来却弹着锁屏页」。
+             */
+            if (MainActivity.screenOffHandled()) { LockScreen.trace("  skip: handled by window"); return }
+            /*
+             * **窗口在后台（用户在别的应用里熄屏）→ 交给独立的 LockActivity 铺页。**
+             *
+             * 以前这里会 `bringMainUp`：把主任务顶到前台、挂上 `showWhenLocked`。
+             * 代价在 2026-11-18 上午实测过（ALN-AL00 / EMUI 14.2）：我们一 Resume
+             * 就把用户当前的应用顶掉；退场只有 `moveTaskToBack`，实测语义 = 按 Home
+             * （退完后桌面 visible=true，微信 task 活着却在下面）→「解锁落到桌面」。
+             *
+             * 现在**主任务一个像素都不动**：`LockActivity` 是独立任务
+             * （自有 taskAffinity + excludeFromRecents），浮在 keyguard 和原应用之上；
+             * 退场 `finish()` = 任务消失、原应用亮回来。见 LockActivity 顶部注释。
+             */
+            if (LockActivity.alive) { LockScreen.trace("  skip: LockActivity alive"); return }
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            if (nowMs - lockLaunchAt < 1500) { LockScreen.trace("  skip: just launched"); return }
+            lockLaunchAt = nowMs
+            val intent = LockActivity.launchIntent(this@PlaybackService)
+            LockScreen.addMiuiFlags(intent)
+            val ok = try { startActivity(intent); true } catch (_: Throwable) {
+                LockScreen.trace("  cross-app: startActivity 抛异常")
+                false
+            }
+            LockScreen.trace("  cross-app: startActivity ok=$ok")
+            if (ok) {
+                /*
+                 * 1.2 秒后对一次账：没收到回执（`markAck`）也没看到活动活着，
+                 * 说明 startActivity 被 ROM 的「后台弹出界面」appop 静默拦了——
+                 * 记一笔给设置页，再用系统闹钟代发一颗 PendingIntent 兜底
+                 * （系统替我们发，不算应用自己在后台拉 Activity；
+                 *  锁屏期间可能被压到解锁之后才送，那颗会因 TTL 被丢弃）。
+                 */
+                val sentAt = System.currentTimeMillis()
+                main.postDelayed({
+                    if (LockActivity.alive || LockScreen.ackedSince(sentAt)) return@postDelayed
+                    LockScreen.markBgBlocked(this@PlaybackService)
+                    LockScreen.trace("  cross-app: 未收到回执 → 闹钟代发兜底")
+                    try {
+                        val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                        val pi = LockActivity.alarmPending(this@PlaybackService)
+                        val trig = android.os.SystemClock.elapsedRealtime() + 700
+                        val canExact = Build.VERSION.SDK_INT >= 31 && am.canScheduleExactAlarms()
+                        if (canExact) {
+                            am.setExactAndAllowWhileIdle(
+                                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trig, pi,
+                            )
+                        } else {
+                            am.setAndAllowWhileIdle(
+                                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trig, pi,
+                            )
+                        }
+                    } catch (_: Throwable) { /* 兜底失败就算了：锁屏上没有这一页而已 */ }
+                }, 1200)
             }
         }
     }
 
+    /** 拔耳机 / 蓝牙断开：按「用户暂停」处理，通知与状态一起收 */
+    private val noisyRx = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            if (intent?.action != AudioManager.ACTION_AUDIO_BECOMING_NOISY) return
+            LockScreen.trace("BECOMING_NOISY → pause")
+            setPlayingInService(false)
+        }
+    }
+
+    /**
+     * 立刻刷一帧（不改变 tick 节奏）。
+     *
+     * 熄屏时 tick 降到 800ms 省电，用户按电源键亮屏这一刻，锁屏页手里的位置/歌词
+     * 可能最多差一拍——他第一眼看到的就是「歌词慢半句」。亮屏那一下补一帧，
+     * 画面一出来就是准的。
+     */
+    fun pushNow() {
+        try { push() } catch (_: Exception) { /* 播放器刚好在换源：下一拍自己会补 */ }
+    }
+
     /** 把「当前播放面」同步给悬浮歌词 / 锁屏页（它们只读这份镜像） */
-    private fun syncNowPlaying() {
-        NowPlaying.title = metaTitle
+    private fun syncNowPlaying() {        NowPlaying.title = metaTitle
         NowPlaying.artist = metaArtist
         NowPlaying.album = metaAlbum
         NowPlaying.fav = metaFav
         NowPlaying.cover = art
-        NowPlaying.playing = try { mp?.isPlaying == true } catch (_: Exception) { false }
+        NowPlaying.playing = try { mp?.active == true } catch (_: Exception) { false }
+        /*
+         * 歌词时间轴在原生这边推进：位置是从播放器刚读出来的（毫秒级），
+         * 一拍之内算出的当前句就是耳朵听到的那一句。没时间轴时这是个空操作，
+         * 锁屏页退回前端 `float_lyric` 推过来的那份。
+         */
+        NowPlaying.syncLyrics(NowPlaying.pos)
     }
 
     /* ---------------- 状态 ---------------- */
 
     private fun push() {
         val p = mp
-        val playing = try { p?.isPlaying == true } catch (_: Exception) { false }
+        val playing = try { p?.active == true } catch (_: Exception) { false }
         val onScreen = screenOn()
         /*
          * 频谱不再需要「息屏就放开」那套管理了。
@@ -696,6 +1092,16 @@ class PlaybackService : Service() {
 
         val snap = JSONObject().apply {
             put("playing", playing)
+            /*
+             * `want`：原生记着的「准备好了就播」。
+             *
+             * 这是前端判定「用户点这一下到底是想播还是想停」的唯一可靠依据：
+             * 取链完成、`play_url` 已经下发、prepare 还在跑的时候**没有任何声音**，
+             * 但原生手里 `wantPlay == true`——几秒后就会出声。此时界面显示的是
+             * 「播放」图标（因为还没出声），用户点它十有八九是「别放了」；
+             * 前端看到这一位为 true 就把这点翻译成取消，而不是再 resume 一次。
+             */
+            put("want", wantPlay)
             put("position", if (dur > 0) pos.coerceAtMost(dur) else pos)
             put("duration", if (dur > 0) dur else snapshot.optDouble("duration", 0.0))
             put("volume", volume.toDouble())
@@ -708,6 +1114,25 @@ class PlaybackService : Service() {
             put("seeking", seekingFlag)
             put("error", errorText ?: JSONObject.NULL)
             put("buffered", buffered)
+            /*
+             * 预告表还剩几首。
+             *
+             * 前端补表原来只靠一个 1200ms 的 setTimeout，而**熄屏后 WebView 会把
+             * 定时器节流到分钟级**——表用完之后要等好几分钟才补，中间那几首就靠
+             * `ended` 一帧交给 JS，而 JS 这会儿正好最不愿意干活。于是「在线歌单
+             * 播几首就停、缓存的能一直播」（缓存项不需要取链，`setPrefetch` 一次就够）。
+             *
+             * 现在把余量摊在每帧状态里（这帧是原生用 evaluateJavascript 推的，
+             * 不受定时器节流影响），前端看到 0 就立刻补一次。
+             */
+            put("pf", synchronized(prefetch) { prefetch.size })
+            /*
+             * 定时关闭：`sleep` 是剩余秒数（0 = 没开），`sleep_track` = 「等这首放完」。
+             * 前端只做显示（播放页那颗小钟 / 设置页那一行），倒计时的真值在原生
+             * （理由见 SleepTimer）。每秒都在变，跟着 250ms 的 tick 一起推不额外花钱。
+             */
+            put("sleep", if (SleepTimer.endAt > 0L) ((SleepTimer.remainMs() + 999) / 1000).toInt() else 0)
+            put("sleep_track", SleepTimer.endOfTrack)
         }
         snapshot = snap
         // ended / error 是一次性的：推一次之后清掉，否则前端会反复「跳下一首」
@@ -757,6 +1182,13 @@ class PlaybackService : Service() {
         val r = object : Runnable {
             override fun run() {
                 try { push() } catch (_: Exception) {}
+                /*
+                 * 定时关闭的对表放在 tick 里，不放前端：熄屏之后 WebView 的定时器
+                 * 会被系统摁住，而「定时关掉」的主场景恰恰是熄屏躺着听（见 SleepTimer）。
+                 */
+                try { checkSleep() } catch (_: Exception) {}
+                /* 被别的播放器永久抢走焦点之后，等它播完再自己接回来（见 probeFocusRecovery） */
+                try { probeFocusRecovery() } catch (_: Exception) {}
                 main.postDelayed(this, tickInterval())
             }
         }
@@ -764,11 +1196,53 @@ class PlaybackService : Service() {
         main.postDelayed(r, 250)
     }
 
+    /**
+     * 定时关闭到点了：**先记意图、再淡出**。
+     *
+     * `wantPlay = false` 必须先写：淡出要 1.8 秒，这段时间播放器还在出声，
+     * 前端/通知上仍然显示「在播」。要是等 exo 真停了再改，中间那一拍
+     * `playing=true / want=false` 会让用户点播放时被自己判成「取消」。
+     */
+    private fun checkSleep() {
+        if (!SleepTimer.due()) return
+        SleepTimer.clear()
+        val p = mp
+        if (p == null || !(try { p.active } catch (_: Exception) { false })) {
+            /* 已经停了：定时器过期就完事，别提示，也别去动队列 */
+            push()
+            return
+        }
+        wantPlay = false
+        p.fadeOutAndPause(1800)
+        toastOut("定时关闭：已暂停播放")
+        LockScreen.trace("sleep fired → fadeOutAndPause")
+        push()
+        updateNotif()
+    }
+
     /** 屏幕是不是亮着（有人正看着）。查询本身很便宜，跟着 tick 走没问题。 */
     private fun screenOn(): Boolean = try {
         (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
     } catch (_: Exception) {
         true
+    }
+
+    /**
+     * 当前声音从哪儿出去（外放 / 蓝牙 / 有线 / USB）。
+     *
+     * 只为了排查「点了暂停声音还在响几秒」这类主观描述：外放是毫秒级切断，
+     * 蓝牙耳机（尤其 LDAC / aptX 那类）自己手里还攥着一两秒的缓冲，
+     * 手机这边 AudioTrack 已经 paused，耳朵里还能听见尾巴。日志里带上这个
+     * 设备类型，一眼就能把「代码没停」和「耳机还在放」分开。
+     */
+    private fun outRoute(): String = try {
+        val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
+            .filter { it.isSink }
+            .joinToString(",") { "${it.type}" }
+            .ifBlank { "?" }
+    } catch (_: Exception) {
+        "?"
     }
 
     /**
@@ -781,7 +1255,7 @@ class PlaybackService : Service() {
      */
     private fun tickInterval(): Long {
         if (screenOn()) return 250L
-        val playing = try { mp?.isPlaying == true } catch (_: Exception) { false }
+        val playing = try { mp?.active == true } catch (_: Exception) { false }
         return if (playing) 800L else 2500L
     }
 
@@ -794,12 +1268,42 @@ class PlaybackService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            val ch = NotificationChannel("playback", "播放控制", NotificationManager.IMPORTANCE_LOW)
-            ch.setShowBadge(false)
-            ch.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            /*
+             * **必须 IMPORTANCE_DEFAULT，不能 LOW。**
+             *
+             * 2026-11-18 真机 A/B（EMUI 14.2 / Android 12），四个组合各测一遍：
+             *
+             *   LOW + 自绘卡        → 锁屏上**整条不出现**（静默通知被系统藏掉）
+             *   LOW + 系统模板      → 锁屏只有一行「歌名 / 歌手」，没有封面/按钮
+             *   DEFAULT + 系统模板  → 锁屏一行，通知栏一行
+             *   DEFAULT + 自绘卡    → **锁屏是完整卡片**：封面 + 歌名 + 进度 + 五个按钮
+             *
+             * 也就是说：自定义 RemoteViews 不背这个锅（曾经误判成它），
+             * 真正的开关是渠道重要性 —— 静默通知在锁屏一律降级。
+             *
+             * 渠道重要性**建成之后应用改不了**（系统只允许改名字/描述），
+             * 所以老的 "playback"(LOW) 必须换成新 ID，并把老的删掉，
+             * 免得用户在系统「通知管理」里看到两个「播放控制」。
+             *
+             * 不加声音、不加震动：换歌不该叮一下。DEFAULT 只是让系统愿意把它
+             * 画在锁屏上，不代表要吵用户。
+             */
+            nm.deleteNotificationChannel("playback")
+            nm.createNotificationChannel(
+                NotificationChannel("playback_sys", "播放控制", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    setShowBadge(false)
+                    setSound(null, null)
+                    enableVibration(false)
+                    setDescription("锁屏与通知栏的播放卡片")
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                },
+            )
         }
     }
+
+    /** 播放通知的渠道：见 `createChannel`（必须 DEFAULT，否则锁屏不显示） */
+    private fun chId(): String = "playback_sys"
 
     private fun intentFor(action: String): PendingIntent {
         val i = Intent(this, PlaybackService::class.java).setAction(action)
@@ -862,7 +1366,7 @@ class PlaybackService : Service() {
 
     private fun buildNotification(playing: Boolean): Notification {
         val openPi = openAppPending()
-        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "playback")
+        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, chId())
         else @Suppress("DEPRECATION") Notification.Builder(this)
 
         val durMs = if (prepared) (try { (mp?.duration ?: 0).toLong() } catch (_: Exception) { 0L }) else 0L
@@ -918,6 +1422,10 @@ class PlaybackService : Service() {
          * （纯系统模板 + CATEGORY_TRANSPORT 也一样是「未在播放」，而它认的四家
          * 音乐 App 都实现了 MediaBrowserService，见 MediaBrowserBridge），
          * 所以没必要为它多留一条只在华为生效的分支。
+         *
+         * 2026-11-18 又核了一次「华为锁屏不显示我们的卡」，结论同上：跟自定义视图无关。
+         * 四个组合（渠道 LOW/DEFAULT × 自绘/系统模板）各测一遍，唯一决定锁屏形态的是
+         * 渠道重要性 —— 见 `createChannel`。DEFAULT + 这张自绘卡就是锁屏上的完整卡片。
          *
          * 自绘的理由本身没变：MIUI 的媒体模板把动作行第 4 位画成一颗巨大的心、
          * 还只给 5 个位置，我们的「悬浮歌词 / 切换输出」会被吞；一张自己画的卡
@@ -977,7 +1485,7 @@ class PlaybackService : Service() {
             /* 背景那层封面色晕：没有封面就留空，卡片退回系统原本的底色 */
             rv.setImageViewBitmap(R.id.n_wash, washBitmap(cover, night))
         } else {
-            rv.setImageViewBitmap(R.id.n_cover, appTile(night, 64))
+            rv.setImageViewBitmap(R.id.n_cover, appTile(night, 48))
             rv.setImageViewBitmap(R.id.n_wash, transparentPixel())
         }
 
@@ -1001,10 +1509,10 @@ class PlaybackService : Service() {
             rv.setViewVisibility(R.id.n_bar, android.view.View.INVISIBLE)
         }
 
-        rv.setImageViewBitmap(R.id.n_fav, tintedIcon(if (metaFav) R.drawable.notif_fav_on else R.drawable.notif_fav, iconInk))
-        rv.setImageViewBitmap(R.id.n_prev, tintedIcon(R.drawable.notif_prev, iconInk))
+        rv.setImageViewBitmap(R.id.n_fav, tintedIcon(if (metaFav) R.drawable.notif_fav_on else R.drawable.notif_fav, iconInk, 22))
+        rv.setImageViewBitmap(R.id.n_prev, tintedIcon(R.drawable.notif_prev, iconInk, 22))
         rv.setImageViewBitmap(R.id.n_toggle, accentDisc(if (playing) R.drawable.notif_pause else R.drawable.notif_play))
-        rv.setImageViewBitmap(R.id.n_next, tintedIcon(R.drawable.notif_next, iconInk))
+        rv.setImageViewBitmap(R.id.n_next, tintedIcon(R.drawable.notif_next, iconInk, 22))
         /*
          * 「悬浮歌词」不再用引号图标：那对引号既不像歌词也没人认得出来
          * （用户：「你这个图标我也摸不着头脑这个是什么意思」）。
@@ -1017,7 +1525,7 @@ class PlaybackService : Service() {
          */
         rv.setImageViewBitmap(
             R.id.n_lyric,
-            glyphIcon("词", if (FloatingLyrics.shown) lyricAccent() else iconInk),
+            glyphIcon("词", if (FloatingLyrics.shown) lyricAccent() else iconInk, 22),
         )
 
         rv.setOnClickPendingIntent(R.id.n_fav, pendingFor("fav"))
@@ -1086,8 +1594,9 @@ class PlaybackService : Service() {
      * ImageView 的 centerCrop 只显示中间那一块，圆角全落在被裁掉的部分——
      * 屏幕上看到的是一个直角方块（用户看到的就是「封面没圆角，很糙」）。
      */
-    private fun roundCover(src: Bitmap, dp: Int = 12): Bitmap {
-        val px = (64 * resources.displayMetrics.density).toInt().coerceAtLeast(48)
+    private fun roundCover(src: Bitmap, dp: Int = 10): Bitmap {
+        /* 和 notif_media.xml 里 n_cover 的 48dp 对齐：卡片整体压矮之后封面也得跟着缩 */
+        val px = (48 * resources.displayMetrics.density).toInt().coerceAtLeast(48)
         if (coverRoundedSrc === src && coverRoundedOut?.width == px) coverRoundedOut?.let { return it }
         /* 先中心裁成正方形 */
         val side = minOf(src.width, src.height)
@@ -1212,7 +1721,7 @@ class PlaybackService : Service() {
      * 视觉落点——这也是「单调」的一半来源。实心圆 + 反白图标等于给卡片一个焦点，
      * 和播放页、锁屏页上的主按钮是同一个语言。
      */
-    private fun accentDisc(resId: Int, dp: Int = 38): Bitmap {
+    private fun accentDisc(resId: Int, dp: Int = 32): Bitmap {
         val key = "disc/$resId/$dp"
         notifIcons[key]?.let { return it }
         val px = (dp * resources.displayMetrics.density).toInt().coerceAtLeast(24)
@@ -1368,9 +1877,94 @@ class PlaybackService : Service() {
      */
     private fun setPlayingInService(want: Boolean, fromFocus: Boolean = false) {
         val p = mp
+        LockScreen.trace(
+            "setPlaying want=$want focus=$fromFocus mp=${p != null} prepared=$prepared " +
+                "playing=${try { p?.isPlaying } catch (e: Exception) { null }} " +
+                "active=${try { p?.active } catch (e: Exception) { null }} out=${outRoute()}",
+        )
+        /*
+         * **用户按下的意图先落账，再谈有没有播放器能动。**
+         *
+         * 这两行以前在下面的正常分支里，而「正在准备中」和「没有播放器」两条
+         * 早退路径都到不了它们 —— 于是出现用户报了很久的那个形状：
+         *   1. 点了播放 → `wantPlay = true` 记在服务里，接着取链/缓冲；
+         *   2. 用户改主意点暂停 → 走早退分支，`wantPlay` 还是 true；
+         *   3. 缓冲完成 `onPrepared` 一看 `wantPlay` 是 true → **自己开始放**。
+         * 用户看到的就是「我明明暂停了，它过一会儿又自己响起来」。
+         * 焦点补偿同理：`focusPaused` 没清，焦点一还回来又替他续播一次。
+         *
+         * 所以放在最前面：用户自己按的一下（`fromFocus == false`）永远优先，
+         * 暂停同时撤掉「等准备好就播」和「等焦点回来就播」两种待办。
+         */
+        if (!fromFocus) {
+            focusPaused = false
+            /*
+             * 用户自己动手了，就别再替他「等网续播」——他可能是想换歌，也可能就是不想听了。
+             * 焦点回调（fromFocus）不清：那条路上没人在操作手机。
+             */
+            netStall = false
+            if (!want) {
+                wantPlay = false
+                /*
+                 * **用户自己按的暂停要放弃焦点。**
+                 *
+                 * 攥着 AUDIOFOCUS_GAIN 却不发声，是「和其他应用抢音频输出」最典型
+                 * 的来源：别家申请焦点时系统照样先让我们 LOSS 再给对方，我们这边
+                 * 还要走一遍状态机；而「暂停状态下占着焦点」本身对用户毫无收益。
+                 * 被抢占而暂停的那条路（fromFocus）**不放弃**——那正是恢复栈的入口。
+                 */
+                abandonFocus()
+            }
+        }
         if (p == null || !prepared) {
-            /* 焦点回调里没有播放器可动——绝不能退化成 `playpause`，那是反着切 */
-            if (fromFocus) return
+            /*
+             * **「停」这件事不认 `prepared`，只认有没有播放器。**
+             *
+             * `prepared` 是我们自己记的标记（`open()` 里清掉、第一次 READY 置回）。
+             * 换歌 / 恢复会话那一小段它是 false，可播放器实例已经在了——正好覆盖
+             * 「声音已经在出、标记还没跟上」的窗口。以前这里对暂停一律走到函数末尾
+             * 只 `push()` 一帧，等于把用户按的那一下丢了；下一次 `onPrepared`
+             * 再看 `wantPlay`（同样是 false，没事）也就不会再响，但用户听到的是
+             * 「我按了暂停，声音还在」——那种「按了没停」的观感就是这么来的。
+             * 有播放器就停，不看标记。
+             */
+            if (!want && p != null) {
+                wantPlay = false
+                safe { p.pause() }
+                LockScreen.trace("  准备中：照样执行 pause playing=${try { p.isPlaying } catch (e: Exception) { null }}")
+                push()
+                updateNotif()
+                return
+            }
+            /*
+             * **播放器正在准备中**（有实例、有源，只是还没 READY）：把意图记下来就走。
+             *
+             * 这在真机上是个高频路径：冷启动恢复会话、在线曲目取链完刚下发 `play_url`，
+             * 用户这时点播放，本来只该「等它准备好就播」。以前的写法会掉进下面的兜底，
+             * 用同一个 `trackPath` 再 `open()` 一次 —— 正在进行的加载被推倒重来，
+             * 进度归零、还要再等一轮；用户看到的就是「点了播放，进度条跳回 0」。
+             * `onPrepared` 里已经有 `if (wantPlay) player.start()`，这里只需要把话递到。
+             */
+            if (want && p != null && (trackPath != null || trackUrl != null)) {
+                wantPlay = true
+                LockScreen.trace("  准备中：记下 wantPlay，等 onPrepared 起播")
+                push()
+                updateNotif()
+                return
+            }
+            /*
+             * **焦点回调里没有播放器可动**：绝不能退化成 `playpause`（那是反着切），
+             * 也不能为空着手去「重开一首」——焦点还回来不代表用户想听别的。
+             *
+             * 注意这一条必须放在上面两个分支**之后**：
+             * 有播放器只是还没 READY 时（来电时正在缓冲），焦点还回来要能把
+             * `wantPlay` 递进 `onPrepared`，否则挂断电话后这首歌就永远停在那儿。
+             */
+            if (fromFocus) {
+                push()
+                updateNotif()
+                return
+            }
             /*
              * 服务里没有可用的播放器，但**预告里还有下一首**：直接用它开播。
              *
@@ -1386,18 +1980,45 @@ class PlaybackService : Service() {
              * 只在 `want = true` 时走：暂停一个不存在的播放器没有意义。
              */
             if (want) {
+                /*
+                 * 先试「把当前这首重新拉起来」。
+                 *
+                 * 用户按播放键的语义是「继续听这首」，不是「跳到下一首」。原来这里
+                 * 无条件拿预告表第一项开播，听到的永远是**下一首**，而锁屏页/通知上
+                 * 显示的还是刚才那首的标题封面 —— 用户的原话「响是响了，但播的不是
+                 * 锁屏上这首歌」。当前曲的 path/url 还在就重启同一首（播放器已经没了，
+                 * 只能从头开始）。
+                 */
+                if (trackPath != null || trackUrl != null) {
+                    open(0.0, true, snapshot.optDouble("duration", 0.0), "fallback")
+                    startForegroundSafe()
+                    requestFocus()
+                    return
+                }
                 val next = synchronized(prefetch) { if (prefetch.isEmpty()) null else prefetch.pollFirst() }
                 if (next != null) {
                     playPrefetched(next)
                     return
                 }
             }
-            action("playpause")
+            /*
+             * 既没有播放器、也没有当前曲目的路径（服务刚被系统重建）：**什么都不发**。
+             *
+             * 以前这里往前端递一条 `playpause`，指望它把播放器建起来。但前端那份
+             * `playing` 也很可能是过时的：它把这条命令翻译成 resume，原生照样建不起来，
+             * 于是两边来回弹 —— 用户看到的是「点了暂停，一会儿又自己播上」；
+             * 而真点播放时又因为前端记着「已加载」不发加载命令，表现成「点了没反应」。
+             *
+             * 只推一帧真实状态，让界面自己回到「暂停」。前端已经会拿 `track_path`
+             * 校正它的 `loadedRef`，下一次点播放就会走完整的加载链路。
+             */
+            push()
+            updateNotif()
             return
         }
         /* 用户自己按的这一下：焦点补偿作废，别再替他续播 */
         if (!fromFocus) focusPaused = false
-        val playing = try { p.isPlaying } catch (_: Exception) { false }
+        val playing = try { p.active } catch (_: Exception) { false }
         if (playing == want) {
             if (want) requestFocus()
             push()
@@ -1406,18 +2027,40 @@ class PlaybackService : Service() {
         wantPlay = want
         if (want) requestFocus()
         safe { if (want) p.start() else p.pause() }
+        LockScreen.trace("  after ${if (want) "start" else "pause"} playing=${try { p.isPlaying } catch (e: Exception) { null }}")
         push()
+        updateNotif()
+    }
+
+    /**
+     * 自绘界面（锁屏播放页 / 悬浮歌词）上的播放暂停。
+     *
+     * 与通知栏那颗键走同一条路：**就地切**，然后 `push()` 一帧让前端界面跟上。
+     * 不经过 WebView —— 那是上一版锁屏页「点了没反应」的根因（Activity 被回收后
+     * Bridge 是空的，命令发出去没人接；接上了也会因为前端那份 playing 已经过时而
+     * 反向切一次，表现成「点了暂停一下又开始播」）。
+     */
+    fun toggleFromUi() {
+        LockScreen.trace("src=ui toggle（锁屏页/悬浮歌词） wantPlay=$wantPlay prepared=$prepared")
+        toggleInService()
         updateNotif()
     }
 
     private fun toggleInService() {
         val p = mp
         if (p == null || !prepared) {
-            /* 没有播放器可切，语义上就是「想开始放」：交给 setPlayingInService 走预告兜底 */
-            setPlayingInService(true)
+            /*
+             * 准备中的「切一下」要**反着切当前意图**，不能一律当「想开始放」。
+             *
+             * 以前这里无条件 `setPlayingInService(true)`：用户点了暂停、播放器还在
+             * 缓冲（`prepared == false`），锁屏页/悬浮歌词上这一下反而把 `wantPlay`
+             * 又置回 true —— 缓冲一完成就自己出声。语义上「切」本来就是「取反」，
+             * `wantPlay` 就是这一刻的意图真值。
+             */
+            setPlayingInService(!wantPlay)
             return
         }
-        setPlayingInService(try { !p.isPlaying } catch (_: Exception) { true })
+        setPlayingInService(try { !p.active } catch (_: Exception) { true })
     }
 
     private fun updateNotif() {
@@ -1436,7 +2079,7 @@ class PlaybackService : Service() {
             if (metaTitle.isBlank()) shutdownIdle()
             return
         }
-        val playing = try { mp?.isPlaying == true } catch (_: Exception) { false }
+        val playing = try { mp?.active == true } catch (_: Exception) { false }
         /*
          * 悬浮歌词的播放键跟着**真实播放状态**翻面。
          *
@@ -1456,7 +2099,7 @@ class PlaybackService : Service() {
         try {
             // 状态按真实情况给：刚进 onStartCommand（还没 prepare）时 playing 是 false，
             // 通知就显示「暂停」那套图标，等 onPrepared 后再 updateNotif 换回来。
-            val playing = try { mp?.isPlaying == true } catch (_: Exception) { false }
+            val playing = try { mp?.active == true } catch (_: Exception) { false }
             startForeground(1, buildNotification(playing))
         } catch (_: Exception) { /* 通知权限被拒时不影响出声 */ }
     }
@@ -1477,7 +2120,7 @@ class PlaybackService : Service() {
     /** 只刷播放状态（position / speed），不重建 metadata —— tick 每 250ms 走的就是这条轻的 */
     private fun syncSessionState() {
         val s = session ?: return
-        val playing = try { mp?.isPlaying == true } catch (_: Exception) { false }
+        val playing = try { mp?.active == true } catch (_: Exception) { false }
         s.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
@@ -1621,7 +2264,7 @@ class PlaybackService : Service() {
 
     private fun requestFocus() {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (Build.VERSION.SDK_INT >= 26) {
+        val result = if (Build.VERSION.SDK_INT >= 26) {
             if (focus == null) {
                 focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                     .setAudioAttributes(
@@ -1639,10 +2282,22 @@ class PlaybackService : Service() {
                     .setWillPauseWhenDucked(false)
                     .build()
             }
-            focus?.let { am.requestAudioFocus(it) }
+            focus?.let { am.requestAudioFocus(it) } ?: AudioManager.AUDIOFOCUS_REQUEST_FAILED
         } else {
             @Suppress("DEPRECATION")
             am.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+        }
+        /*
+         * **拿到了就当作「焦点在我这儿」。**
+         *
+         * `focusLost` / `lostPermanently` 是「丢过焦点」的记账，只在真的拿回来时才能清。
+         * 用户被别家抢走之后再手动点播放，走的就是这条路：请求成功 → 清账 →
+         * 之后 `onPrepared` 才敢起播（那一句 `if (focusLost)` 会一直挡着）。
+         * 拿不到（FAILED）就留着，让探测那条路继续等。
+         */
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            focusLost = false
+            lostPermanently = false
         }
     }
 
@@ -1651,33 +2306,58 @@ class PlaybackService : Service() {
          * 焦点这首状态机在真机上只能靠「另一台应用抢一下」来观察，
          * 留一行日志：产品反馈「又和别的应用一起响了」时，先看这行有没有来过。
          */
-        Log.i("SyFocus", "change=$change focusPaused=$focusPaused ducked=$duckedFrom prepared=$prepared")
+        Log.i(
+            "SyFocus",
+            "change=$change focusPaused=$focusPaused focusLost=$focusLost ducked=$duckedFrom " +
+                "prepared=$prepared want=$wantPlay active=${try { mp?.active } catch (e: Exception) { null }}",
+        )
         when (change) {
             AudioManager.AUDIOFOCUS_GAIN -> {
-                if (duckedFrom >= 0f) { duckedFrom = -1f; applyVolume() }
+                focusLost = false
+                lostPermanently = false
+                /* 被系统压低之后的回升要慢：20% → 100% 是 5 倍增益，硬跳就是「突然变大」 */
+                if (duckedFrom >= 0f) {
+                    duckedFrom = -1f
+                    applyVolume(AudioEngine.UNDUCK_MS)
+                }
                 /*
                  * 焦点还回来了：只有「因为被抢才停的」才续播。
                  * 用户自己在别处点过暂停时 `focusPaused` 已经被清掉，这里不会硬拉起。
                  */
                 if (focusPaused) {
                     focusPaused = false
-                    setPlayingInService(true, fromFocus = true)
+                    LockScreen.trace("focus gain → 续播")
+                    /* 播放器已经没了（服务被回收 / 队列空）就别为了焦点去重开一首 */
+                    if (mp != null) setPlayingInService(true, fromFocus = true) else push()
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 val p = mp ?: return
-                if (!prepared) return
                 if (duckedFrom < 0f) duckedFrom = volume
-                safe { p.setVolume(volume * 0.2f) }
+                safe { p.setVolume(volume * 0.2f, 140) }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, AudioManager.AUDIOFOCUS_LOSS -> {
-                if (duckedFrom >= 0f) { duckedFrom = -1f; applyVolume() }
-                val p = mp ?: return
-                if (!prepared) return
-                val playing = try { p.isPlaying } catch (_: Exception) { false }
+                if (duckedFrom >= 0f) {
+                    duckedFrom = -1f
+                    applyVolume(AudioEngine.UNDUCK_MS)
+                }
+                /*
+                 * **这里不看 `prepared`。** 换歌 / 首包之前它是 false，可播放器实例
+                 * 可能已经在了，而且 `onPrepared` 一到就会自己 start —— 那正是
+                 * 「来电话了，歌还在放」的形状。只要有实例就停，是不是 READY 无关紧要。
+                 */
+                focusLost = true
+                lostPermanently = change == AudioManager.AUDIOFOCUS_LOSS
+                val p = mp
+                val playing = try { p?.active == true } catch (_: Exception) { false }
                 if (!playing && !wantPlay) return
                 focusPaused = true
-                setPlayingInService(false, fromFocus = true)
+                /* 意图先落账：`onPrepared` 里那句 `if (wantPlay)` 才不会把歌又拉起来 */
+                wantPlay = false
+                LockScreen.trace("focus loss → pause focusPaused=true")
+                safe { p?.pause() }
+                push()
+                updateNotif()
                 /*
                  * 被永久抢走（另一个播放器）时**不放弃焦点请求**：
                  * 放弃就等于退出恢复栈，对方结束后再也轮不到我们。
@@ -1688,22 +2368,54 @@ class PlaybackService : Service() {
     }
 
     /** 音量统一从这里下发：被压低时仍然按 20% 算，别让一次「调音量」把压低态冲掉 */
-    private fun applyVolume() {
+    private fun applyVolume(ms: Int = AudioEngine.RAMP_MS) {
         val v = if (duckedFrom >= 0f) volume * 0.2f else volume
-        safe { mp?.setVolume(v) }
+        safe { mp?.setVolume(v, ms) }
     }
 
     private fun abandonFocus() {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         focusPaused = false
+        focusLost = false
+        lostPermanently = false
         duckedFrom = -1f
         if (Build.VERSION.SDK_INT >= 26) focus?.let { am.abandonAudioFocusRequest(it) }
         else @Suppress("DEPRECATION") am.abandonAudioFocus(focusListener)
     }
 
+    /**
+     * 被动丢焦点之后的「接回来」探测（见 [lostPermanently]）。
+     *
+     * 只在「因为我们被抢而暂停」时探，用户自己按的暂停不会走到这里
+     * （那条路会把 `focusPaused` 清掉）。判据两条：
+     *
+     *   · `AudioManager.mode` 不是通话中 —— 通话时也不能放，语音通路的焦点语义
+     *     和媒体不是一套，光看「有没有音乐在响」会误判成「没人放，可以接着放」；
+     *   · `isMusicActive()` 为 false —— 别家真的没在出声了（播完了 / 被用户关了）。
+     *
+     * 拿到焦点就续播，界面/通知一起跟上；拿不到就等下一轮，什么都不写。
+     */
+    private fun probeFocusRecovery() {
+        if (!lostPermanently || !focusPaused) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - focusProbeAt < 2000) return
+        focusProbeAt = now
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (am.mode == AudioManager.MODE_IN_CALL || am.mode == AudioManager.MODE_IN_COMMUNICATION) return
+        if (am.isMusicActive) return
+        lostPermanently = false
+        focusPaused = false
+        LockScreen.trace("focus probe → 别家播完，接回焦点续播")
+        requestFocus()
+        if (mp != null) setPlayingInService(true, fromFocus = true) else push()
+    }
+
     override fun onDestroy() {
         stopTick()
-        try { unregisterReceiver(screenRx) } catch (_: Exception) {}
+        try { unregisterReceiver(screenRx) } catch (_: Exception) { /* 没注册成功 */ }
+        try { unregisterReceiver(noisyRx) } catch (_: Exception) { /* 没注册成功 */ }
+        netCb?.let { cb -> try { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(cb) } catch (_: Exception) { /* 已经注销 */ } }
+        netCb = null
         FloatingLyrics.onShownChanged = null
         if (instance === this) instance = null
         safe { mp?.tap?.shutdown() }
@@ -1715,8 +2427,17 @@ class PlaybackService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // 应用被划掉：如果没在播就收摊，正在播则继续（音乐播放器的常识）
-        if (mp?.isPlaying != true) stopPlayback()
+        /*
+         * 用户把应用从「最近任务」里划掉了 —— 这是一次明确的「我不听了」。
+         *
+         * 以前这里写的是「正在播则继续（音乐播放器的常识）」，实际留下的却是一个
+         * **没有界面的幽灵服务**：前台服务照跑，用户点通知栏回来时界面已经没了。
+         * 用户 2026-11-17 的原话：「我把应用的后台退了，歌都没停止」。
+         *
+         * 停止 + 收摊才符合「划掉」这个动作的含义：通知一起收，服务一起走。
+         */
+        LockScreen.trace("onTaskRemoved：用户划掉了任务 → 停止播放并收摊")
+        stopPlayback()
         super.onTaskRemoved(rootIntent)
     }
 

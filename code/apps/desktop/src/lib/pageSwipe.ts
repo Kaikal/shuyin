@@ -42,10 +42,14 @@ const MIN_DX = 56
 /** 快速轻扫：180ms 内甩出这么多就认（手机上常用「甩」而不是「拖」） */
 const FLICK_DX = 26
 const FLICK_MS = 180
-/** 按住超过这么久再抬手，是在长按 / 拖选，不是滑 */
-const MAX_MS = 900
-/** 拖过半屏的这么多比例就认「要切」 */
-const COMMIT_RATIO = 0.26
+/**
+ * 拖过半屏的这么多比例就认「要切」。
+ *
+ * 0.26 太高了：这台机一屏 686 CSS px，要拖满 178px 松手才切。用户的原话是
+ * 「滑不过去」——他拖了三分之一屏，看着下一屏都露出小半了，一松手却弹回去。
+ * 0.18（约 123px）和「下一屏露出三分之一」的视觉预期对得上。
+ */
+const COMMIT_RATIO = 0.18
 /** 到头了（第一页往右 / 最后一页往左）的阻尼 */
 const EDGE_DAMP = 0.3
 /** 落位时间：一段就走完，不再分「滑出 / 滑入」两段 */
@@ -53,6 +57,28 @@ const SETTLE_MS = 260
 
 const EASE_OUT = 'cubic-bezier(0.32, 0.72, 0.22, 1)'
 const EASE_BACK = 'cubic-bezier(0.22, 1, 0.36, 1)'
+
+/**
+ * 「瞬时写」必须用 inline `!important`。
+ *
+ * 设置里开了**减弱动效**时，全局规则（global.css）
+ * `html[data-reduced-motion] * { transition-duration: 100ms !important }`
+ * 会压过普通的 inline `transition: 'none'`（样式表 `!important` > inline 普通声明）。
+ * 真机实锤（2026-11-15，用户录屏 + 逐帧探针）：
+ *   1. 拖动时每帧写 transform 都在播 100ms 过渡 → 跟手变成橡皮筋；
+ *   2. 落位收尾要把位移从 transform 交接给 margin，两条 100ms 过渡起始差十几毫秒，
+ *      相加不再恒等 → 页面「跳过去 → 跳回来 → 又跳过去」，**每次落位都有**，
+ *      偏差最大实测 150px。
+ * inline `!important` 在同源（author）里优先级最高，稳赢样式表的 `!important`；
+ * glide 动画不用锁——被压成 100ms 反而更干脆，正合减弱动效的本意。
+ */
+const lockTransition = (node: HTMLElement) => {
+  node.style.setProperty('transition', 'none', 'important')
+}
+/** 解锁：glide / 弹回要挂自己的过渡，先把 important 锁摘掉（inline important 会赢过普通声明） */
+const unlockTransition = (node: HTMLElement) => {
+  node.style.setProperty('transition', '')
+}
 
 /** 这些容器里的横向手势归它们自己 */
 const BLOCKED = [
@@ -67,7 +93,14 @@ const BLOCKED = [
 
 export function usePageSwipe(opts: {
   enabled: boolean
-  /** 手势容器（`.page-host`）：只管 `data-swiping` 这个标记 */
+  /**
+   * 手势容器（`.page-host`）。
+   *
+   * 以前用它挂 `data-swiping`，让 CSS 停掉页面进场动画。现在不用了：
+   * 竖屏横滑时 `enabled` 已经把二层页面（`.page-keep.push`）全排除了，
+   * 那条规则根本命中不了；而给 `.page-host` 写属性会让**五页所有内容**
+   * 重算一次样式（真机 20~30ms），正好卡在跟手的第一帧上。
+   */
   host?: React.RefObject<HTMLElement | null>
   /** 真正被位移的东西（`.page-track`，五页并排的那条长条） */
   track?: React.RefObject<HTMLElement | null>
@@ -81,14 +114,29 @@ export function usePageSwipe(opts: {
 }) {
   const onStep = useRef(opts.onStep)
   onStep.current = opts.onStep
+  /**
+   * effect 里的落位收尾，暴露给渲染期：横滑落位还在飞时页面被**别的路径**换掉
+   * （滑动途中点了 dock / 弹层导航），立即按 React 的当前页收尾——否则遗留的
+   * 定时器到点会把 margin 硬掰回滑动目标页、再补发一次 onStep，就是
+   * 「跳过去、跳回来、又跳过去」三连跳（2026-11-15）。
+   */
+  const finishRef = useRef<(() => void) | null>(null)
   const enabled = useRef(opts.enabled)
   enabled.current = opts.enabled
-  const host = useRef(opts.host)
-  host.current = opts.host
   const track = useRef(opts.track)
   track.current = opts.track
   const idx = useRef(opts.index ?? 0)
+  const prevIdx = useRef(opts.index ?? 0)
+  /*
+   * 必须先更新 idx.current、**再**检测变化并收尾：finishSettle 的 stale 判定
+   * 读的是 idx.current——若先检测后赋值，收尾时看到的还是上一渲染的旧页号，
+   * 「glide 中点 dock 到别的页」会被误判成没换过页，多补发一次 onStep。
+   */
   idx.current = opts.index ?? 0
+  if (idx.current !== prevIdx.current) {
+    prevIdx.current = idx.current
+    finishRef.current?.()
+  }
   const edge = useRef({ atStart: !!opts.atStart, atEnd: !!opts.atEnd })
   edge.current = { atStart: !!opts.atStart, atEnd: !!opts.atEnd }
 
@@ -104,47 +152,118 @@ export function usePageSwipe(opts: {
     let horiz = false
     /** 当前跟手位移（px，已含阻尼） */
     let drag = 0
-    /** 段落动画进行中：这段时间里的 touchstart 一律不理，免得叠着滑 */
-    let settling = false
+    /**
+     * 这次手势里**到过的最远位移**（带符号）。
+     *
+     * 松手判定不能只看最终位置：用户快速拖过头再「稳一下、蹭回去一点」才松手
+     * 是极常见的手型（2026-11-15 录屏实锤：拖到 85px——远超 69.8px 的切页线，
+     * 松手前回蹭到 60px，按最终位置判成弹回，用户原话「感觉好像就没改」）。
+     * 到过切页线、松手时没拉回 26px 以内的，都算确认切页。
+     */
+    let peak = 0
 
-    const el = () => host.current?.current ?? null
+    /**
+     * 落位动画（弹回 / 切页）的状态机。
+     *
+     * 以前这里只有一个 `settling` 布尔量：动画期间来的 touchstart 直接 `dead`。
+     * 但切页那条路要等 **两次** 超时（260ms 走完 + 280ms 收尾）才把 `settling`
+     * 放掉，等于松手后 **540ms** 内的任何新滑动都不认。用户快速连滑两三下
+     * （每下 150~200ms）时后两下全被吞掉，原话就是「滑得快就滑不过去」，
+     * 而且因为页面一动不动，看着也「不跟手」。
+     *
+     * 现在改成「可中断」：新手指一落下就把上一次立刻收尾（长条直接落到目标页），
+     * 这一下从新页继续跟手。视觉上只是一下到位，不会再整段无响应。
+     */
+    let settling = false
+    /** 落位动画的目标页（`-1` = 不知道怎么落，弹回原地） */
+    let settleIdx = -1
+    /** 还没通知 React 的步进；0 = 已经通知过（弹回路径恒为 0） */
+    let settleStep: -1 | 0 | 1 = 0
+    let settleTimer = 0
+    /**
+     * touchcancel 之后 WebView 可能**把同一次手势重新投递**（新的 touchstart 接着
+     * 原手指的位移继续来）。这段窗口内的 touchstart 必须整个吞掉：它不是新手势，
+     * 若被接住，会从已经 commit 过的新页再拖再 commit 一次——一滑跳两页。
+     */
+    let phantomUntil = 0
+
     const tr = () => track.current?.current ?? null
 
     /**
-     * 滑动期间给容器挂个标记：页面自己的进场动画（`page-enter`，8px 上移 + 淡入）
-     * 会和横向位移叠在一起，看起来像「滑到一半闪一下」。整段手势结束才摘掉。
+     * 直接把位移写到长条上（不走路 CSS 过渡：跟手就是每帧一个真实值）。
+     *
+     * `transition` 只在锁定横向的那一帧写一次：以前每帧都写，等于每帧都让
+     * 浏览器重算一次这个元素的样式，追手指的时候这笔开销白花。
      */
-    const setSwiping = (on: boolean) => {
-      const node = el()
-      if (!node) return
-      if (on) node.setAttribute('data-swiping', 'true')
-      else node.removeAttribute('data-swiping')
-    }
-
-    /** 直接把位移写到长条上（不走路 CSS 过渡：跟手就是每帧一个真实值） */
     const paint = (dx: number) => {
       const node = tr()
       if (!node) return
-      node.style.transition = 'none'
       node.style.transform = dx === 0 ? '' : `translate3d(${dx}px, 0, 0)`
     }
 
     const reset = () => {
-      setSwiping(false)
       const node = tr()
       if (!node) return
       node.style.transition = ''
       node.style.transform = ''
     }
 
+    /**
+     * 把落位动画就地收尾：长条落到目标页、通知 React 换页（如果还没通知）、清掉过渡。
+     *
+     * 三种场景共用它：动画自己跑完、新手势插入、组件卸载。
+     *
+     * ⚠️ 「stale」判定（2026-11-15）：落位还在飞的时候，页面可能已经被**别的路径**
+     * 换掉了（滑动途中点了 dock / 弹层把页面切走）。这时再照旧写 margin + 补发
+     * onStep，用户看到的就是三连跳：跳到 dock 选的页 → 滑动定时器把它硬掰回
+     * 滑动目标页 → onStep 再换一次页。所以收尾前先对账：React 的当前页必须是
+     * 「这次手势的出发点」（target - step），对不上就**以 React 为准**，只把
+     * 长条归位到 React 的页，不补发 onStep。
+     */
+    const finishSettle = () => {
+      window.clearTimeout(settleTimer)
+      settleTimer = 0
+      const node = tr()
+      const target = settleIdx
+      const step = settleStep
+      settleIdx = -1
+      settleStep = 0
+      settling = false
+      if (node && target >= 0) {
+        const stale = step !== 0 && idx.current !== target - step
+        /* 锁过渡：margin↔transform 交接必须瞬时（见 lockTransition 注释） */
+        lockTransition(node)
+        node.style.marginLeft = `-${Math.max(0, stale ? idx.current : target) * 100}%`
+        node.style.transform = ''
+        if (step !== 0 && !stale) onStep.current(step)
+      } else if (step !== 0) {
+        onStep.current(step)
+      }
+      /*
+       * ⚠️ 这里**不能**调 reset()（它会摘掉过渡锁）：浏览器的样式重算发生在
+       * 本任务之后，锁若在这一帧里被摘掉，margin/transform 的交接照样按
+       * 减弱动效的 100ms !important 播两条不同步的过渡——相加不再恒等，
+       * 页面「跳过去→跳回来→又跳过去」。锁留在这元素上没有副作用：
+       * 下一次 glide/弹回（commit/snapBack）开头会先摘，dock 换页的
+       * React margin 写入本来就该瞬时。
+       */
+    }
+    finishRef.current = finishSettle
+
     /** 没切：从当前位置弹回原位 */
     const snapBack = () => {
+      /* 之前若有一段没跑完的落位，旧定时器必须撤掉——settleTimer 马上要被覆盖，
+       * 丢掉句柄后旧定时器到点还会触发一次 finishSettle，把页面硬掰一回 */
+      window.clearTimeout(settleTimer)
       const node = tr()
       settling = true
-      if (!node) { settling = false; return }
+      settleIdx = idx.current
+      settleStep = 0
+      if (!node) { settling = false; settleIdx = -1; return }
+      unlockTransition(node)
       node.style.transition = `transform ${SETTLE_MS}ms ${EASE_BACK}`
       node.style.transform = 'translate3d(0px, 0, 0)'
-      window.setTimeout(() => { settling = false; reset() }, SETTLE_MS + 20)
+      settleTimer = window.setTimeout(finishSettle, SETTLE_MS + 10)
     }
 
     /**
@@ -155,24 +274,18 @@ export function usePageSwipe(opts: {
      * 三步分开做（哪怕隔一帧）就会看见「先跳回去、再跳过来」。
      */
     const commit = (dir: -1 | 1) => {
+      /* 同 snapBack：清掉可能残留的上一段落位定时器 */
+      window.clearTimeout(settleTimer)
       const node = tr()
       settling = true
+      settleIdx = idx.current + dir
+      settleStep = dir
       const W = window.innerWidth
-      const next = idx.current + dir
-      if (!node) { onStep.current(dir); settling = false; return }
+      if (!node) { finishSettle(); return }
+      unlockTransition(node)
       node.style.transition = `transform ${SETTLE_MS}ms ${EASE_OUT}`
       node.style.transform = `translate3d(${dir > 0 ? -W : W}px, 0, 0)`
-      window.setTimeout(() => {
-        const n = tr()
-        if (n) {
-          n.style.transition = 'none'
-          /* 百分比是相对 page-host 的宽度算的，正好一屏 */
-          n.style.marginLeft = `-${Math.max(0, next) * 100}%`
-          n.style.transform = ''
-        }
-        onStep.current(dir)
-        window.setTimeout(() => { settling = false; reset() }, SETTLE_MS + 20)
-      }, SETTLE_MS)
+      settleTimer = window.setTimeout(finishSettle, SETTLE_MS)
     }
 
     /*
@@ -213,11 +326,13 @@ export function usePageSwipe(opts: {
     }
 
     const start = (e: TouchEvent) => {
+      /* 系统取消后重投的同一次手势：吞掉，别从新页再拖再提交 */
+      if (performance.now() < phantomUntil) return
       armed = false
       dead = false
       horiz = false
       drag = 0
-      if (settling) { dead = true; return }
+      peak = 0
       if (!enabled.current || e.touches.length !== 1) return
       /*
        * 横屏默认不接管：手机横屏那一套是左 dock + 两栏，横向手势要留给内容自己。
@@ -232,6 +347,13 @@ export function usePageSwipe(opts: {
       const t = e.target as Element | null
       if (t?.closest?.(BLOCKED)) return
       if (inHorizontalScroller(t)) return
+      /*
+       * 上一次落位还没跑完：就地收尾，这一下从新页接着跟手。
+       *
+       * 位置必须压在**所有「不接管」的判定之后**——在播放页、弹层、横滑列表里
+       * 按一下不该把上一次的换页动画掐断。
+       */
+      if (settling) finishSettle()
       const p = e.touches[0]
       x0 = p.clientX
       y0 = p.clientY
@@ -265,6 +387,7 @@ export function usePageSwipe(opts: {
         /* 到头了只给一点阻尼，手感上「能拉动但拉不走」 */
         const blocked = (raw > 0 && edge.current.atStart) || (raw < 0 && edge.current.atEnd)
         drag = blocked ? raw * EDGE_DAMP : raw
+        if (Math.abs(drag) > Math.abs(peak)) peak = drag
         paint(drag)
         return
       }
@@ -275,10 +398,15 @@ export function usePageSwipe(opts: {
       }
       horiz = true
       if (e.cancelable) e.preventDefault()
-      setSwiping(true)
+      /* 掐掉过渡只写这一次（见 paint 的注释），后面每帧只写 transform。
+       * 必须是 important 锁：减弱动效的全局 !important 会把普通 inline 'none' 顶掉，
+       * 每帧 transform 都在播过渡 → 拖动橡皮筋。 */
+      const node = tr()
+      if (node) lockTransition(node)
       // 抬手补的那一下 click 不能落到手指底下那一行上
       swallowClick()
       drag = raw
+      if (Math.abs(drag) > Math.abs(peak)) peak = drag
       paint(drag)
     }
 
@@ -290,18 +418,59 @@ export function usePageSwipe(opts: {
       if (!p) { snapBack(); return }
       const raw = p.clientX - x0
       const ms = performance.now() - t0
-      const dir: -1 | 1 = raw < 0 ? 1 : -1
+      /*
+       * 松手判定用「主导位移」：最终位置和到过的最远处，谁远听谁的。
+       * 明显往回拉（松手处 < 26px）才当作用户主动取消。
+       */
+      const usePeak = Math.abs(peak) > Math.abs(raw)
+      const dist = usePeak ? peak : raw
+      const pulledBack = usePeak && Math.abs(raw) < FLICK_DX
+      const dir: -1 | 1 = dist < 0 ? 1 : -1
       const blocked = (dir === -1 && edge.current.atStart) || (dir === 1 && edge.current.atEnd)
+      const far = !pulledBack && Math.abs(dist) >= Math.max(MIN_DX, innerWidth * COMMIT_RATIO)
+      /*
+       * 甩一下（快而短）才看时间；**拖够距离的一律认**，不设时长上限。
+       *
+       * 以前是 `ms <= MAX_MS && (far || flick)`——慢慢拖过去（比如 1.2 秒拖了
+       * 半屏）反而判失败，用户看到的是「明明拖过去了又弹回来」。
+       * 长按那种情况根本拿不到 horiz（按住不动没有 MOVE），用不着时长兜。
+       */
       const flick = ms < FLICK_MS && Math.abs(raw) >= FLICK_DX
-      const far = Math.abs(raw) >= Math.max(MIN_DX, innerWidth * COMMIT_RATIO)
-      if (ms <= MAX_MS && !blocked && (far || flick)) commit(dir)
+      if (!blocked && (far || flick)) commit(dir)
       else snapBack()
+      /*
+       * 手势收尾必须复位：horiz/dead 残留的话，之后任何**迟到的** touchcancel
+       * 都会进 cancel()、把一段已经提交的换页错当成「拖动被系统抢走」执行
+       * snapBack——用户看到的就是「跳过去又弹回来」。
+       */
+      horiz = false
+      dead = false
     }
 
     const cancel = () => {
       armed = false
-      if (horiz) snapBack()
+      /*
+       * 一段**已提交**的换页（settleStep ≠ 0）被 touchcancel 打中：照常完成它，
+       * 绝不弹回——弹回等于把用户已经确认的换页撤销，页面「跳过去又跳回来」。
+       */
+      if (settling && settleStep !== 0) { finishSettle(); return }
+      if (horiz) {
+        /*
+         * 拖到一半手指被系统抢走（真机录屏实锤，2026-11-15）：往回滑时 Android 的
+         * 左缘返回手势会把整根手指收走，WebView 补 touchcancel。判定同样用主导
+         * 位移（见 end 里的 peak 注释）：到过切页线的照常完成切页，没到才弹回。
+         */
+        const dist = Math.abs(peak) > Math.abs(drag) ? peak : drag
+        const dir: -1 | 1 = dist < 0 ? 1 : -1
+        const blocked = (dir === -1 && edge.current.atStart) || (dir === 1 && edge.current.atEnd)
+        const far = Math.abs(dist) >= Math.max(MIN_DX, innerWidth * COMMIT_RATIO)
+        const flick = performance.now() - t0 < FLICK_MS && Math.abs(dist) >= FLICK_DX
+        if (!blocked && (far || flick)) commit(dir)
+        else snapBack()
+      }
       horiz = false
+      /* 重投窗口：系统抢走手指后，紧接着可能重投同一次手势（见 phantomUntil 注释） */
+      phantomUntil = performance.now() + 160
     }
 
     // touchmove 必须 passive:false，否则 preventDefault 无效、手势照样被抢
@@ -310,7 +479,11 @@ export function usePageSwipe(opts: {
     window.addEventListener('touchend', end, { capture: true, passive: true })
     window.addEventListener('touchcancel', cancel, { capture: true, passive: true })
     return () => {
+      finishRef.current = null
       dropSink()
+      /* 落位计时器必须撤掉：它到点还会去调 onStep，组件已经卸载就是白发一次切页 */
+      window.clearTimeout(settleTimer)
+      settleTimer = 0
       reset()
       window.removeEventListener('touchstart', start, true)
       window.removeEventListener('touchmove', move, true)

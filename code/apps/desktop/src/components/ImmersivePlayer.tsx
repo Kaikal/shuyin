@@ -34,6 +34,7 @@ import { SPECTRUM_STYLES, spectrumStyleName, useSpectrumStyle } from '../lib/spe
 import { SPECTRUM_POSITIONS, spectrumPosName, useSpectrumPos, useMobileSpecPos } from '../lib/spectrumPos'
 import { Spectrum } from './Spectrum'
 import { SpectrumSheet } from './SpectrumSheet'
+import { SleepSheet } from './SleepSheet'
 import { LYRICS_LOOKS, lyricsLookName, useLyricsLook } from '../lib/lyricsLook'
 import { FX_PRESETS, fxSummary, setFxPreset, useAudioFx } from '../lib/audioFx'
 import { coverInfo, effectiveSong, qualityChoicesFor, qualityLabel } from '../lib/online'
@@ -155,7 +156,13 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * （左：封面+信息+控制 / 右：歌词），也就是用户说的「参考 windows 端」。 */
   /* 形态要在上面先算出来：playbar / 系统栏 / 排版分支都看它 */
   const shellKind = useShell()
-  const mobile = isAndroid && shellKind !== 'tablet'
+  /*
+   * 车机（shell === 'car'）也走桌面那套两栏：车机是 1280×720 的横屏大屏，
+   * 手机竖排（唱片 + 控制从上往下堆）在它上面就是「唱片 62vw 撑满全屏、
+   * 进度条和控制键全被挤出屏幕外」——用户原话「车机版直接用不了」的第一成因。
+   * 车机的字号 / 触摸目标放大交给 handoff.css 的 car 段做，不靠竖排结构。
+   */
+  const mobile = isAndroid && shellKind !== 'tablet' && shellKind !== 'car'
   /*
    * 「两栏」形态：**横屏时封面页与歌词页是并排的**（见 handoff.css 里
    * landscape 那两段——手机 520 高以内一套、平板 data-wide 一套）。
@@ -221,6 +228,8 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * 现在胶囊本身就是入口：点开列出这首歌真有的档位，选一个当场换。
    */
   const [qualSheet, setQualSheet] = useState(false)
+  /* 定时关闭（安卓）：真值在原生，这里只负责弹面板 */
+  const [sleepSheet, setSleepSheet] = useState(false)
   /* 安卓桌面歌词（悬浮窗）的开关态。真值在原生侧，这里只是界面上那几处开关的显示 */
   const [floatOn, setFloatOn] = useState(false)
   /*
@@ -485,24 +494,12 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
   })()
 
   /*
-   * 「怎么用这一页」的第一次提示。
-   *
-   * 分页之后有个新问题：封面页上看不出右边还有一页——用户不知道能滑，
-   * 也不会去试。所以第一次进播放页浮一句提示，滑过一次就存起来，以后不再出现
-   * （每首都飘一句就是噪音）。页头那两个小圆点是常驻的，忘了也能点回去。
-   *
-   * 文案跟着手势一起改了：现在是「左右翻页、上下换歌」，
-   * 再写「在封面左右滑动切歌」会把人教错（那是上一版的手势）。
+   * 「第一次进播放页浮一句手势提示」的开屏 toast 已按用户要求移除（2026-11-20）：
+   * 页头的小圆点本身就说明「右边还有一页」。`markHintSeen` 保留——滑动手势
+   * 各处还会记账（见那些 markHintSeen 调用），只是不再弹提示。
    */
   const [hintSeen, markHintSeen] = useSwipeHint()
-  useEffect(() => {
-    if (!mobile || !open || hintSeen) return
-    const id = window.setTimeout(() => {
-      toast('点左右翻页 · 上下滑动切歌')
-      markHintSeen(true)
-    }, 700)
-    return () => window.clearTimeout(id)
-  }, [mobile, open, hintSeen])
+  void hintSeen
 
   /**
    * 播放页手势（用户：「左右滑动切换歌词和专辑，上下滑动切换上一首下一首」）。
@@ -748,9 +745,16 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
     }
   }, [mobile, open, pager])
 
-  /** 点封面 / 唱片：手机进歌词页，桌面切「纯歌词」 */
+  /**
+   * 点封面 / 唱片：手机进歌词页，桌面切「纯歌词」。
+   * 车机两者都不成立：`.imm-lyric` 整列在车机上是隐藏的，`solo` 视图也没按
+   * 车机排版调过——点了不是「进歌词页」而是落进一个回不来的死状态。
+   * 用户原话：车机上的唱片「可能也不会点击进去查看歌词页」，歌词直接
+   * 在唱片页上显示两行（见 .imm-meta-block 里的 imm-car-lyr）。
+   */
   const onArtTap = () => {
     if (Date.now() < tapGuard.current) return
+    if (shellKind === 'car') return
     if (mobile) {
       markHintSeen(true)
       setPager('lyric')
@@ -1411,8 +1415,10 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
 
       <div className="imm-shell" data-solo={solo} data-mobile={mobile ? '1' : '0'} data-tauri-drag-region>
         {/* 手机 / 车机页头（设计稿 02）：收起在左、居中「正在播放 · 本地」、更多在右。
-            桌面那一条（品牌 + 芯片 + 全屏 + 收起）在触屏上没意义，CSS 里整条隐掉。 */}
-        {mobile && (
+            桌面那一条（品牌 + 芯片 + 全屏 + 收起）在触屏上没意义，CSS 里整条隐掉。
+            车机也用它（handoff.css 的 car 段就是按这个页头写的，设计稿 10）：
+            只留居中的 kicker，返回键 / 更多 / 频谱 / 分页圆点由 CSS 和下面的条件藏掉。 */}
+        {(mobile || shellKind === 'car') && (
           <header className="imm-top-m">
             <button className="icon-btn imm-m-back" aria-label="收起播放页" onClick={onClose}>
               <IconChevronDown width={26} height={26} />
@@ -1424,26 +1430,30 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
               </span>
               {/* 两页的常驻指示：既告诉用户「左边还有一页」，也给不知道能滑的人
                   一个能点的入口（点圆点直接翻页）。 */}
-              <span className="imm-pagedots" role="tablist" aria-label="播放页分页">
-                <button
-                  className={'imm-pagedot' + (pager === 'art' ? ' on' : '')}
-                  role="tab" aria-selected={pager === 'art'} aria-label="封面页"
-                  onClick={() => setPager('art')}
-                />
-                <button
-                  className={'imm-pagedot' + (pager === 'lyric' ? ' on' : '')}
-                  role="tab" aria-selected={pager === 'lyric'} aria-label="歌词页"
-                  onClick={() => setPager('lyric')}
-                />
-              </span>
+              {mobile && (
+                <span className="imm-pagedots" role="tablist" aria-label="播放页分页">
+                  <button
+                    className={'imm-pagedot' + (pager === 'art' ? ' on' : '')}
+                    role="tab" aria-selected={pager === 'art'} aria-label="封面页"
+                    onClick={() => setPager('art')}
+                  />
+                  <button
+                    className={'imm-pagedot' + (pager === 'lyric' ? ' on' : '')}
+                    role="tab" aria-selected={pager === 'lyric'} aria-label="歌词页"
+                    onClick={() => setPager('lyric')}
+                  />
+                </span>
+              )}
             </span>
             <span className="imm-m-topacts">
               {/* 频谱设置：手机上样式/位置以前只能看默认值（设置页那段只对桌面渲染）。
                   放在页头是因为它属于「这台播放器长什么样」，不是每首歌的操作；
                   操作行那五颗已经是收藏/下载/评论/分享/更多，再塞一颗会挤。 */}
-              <button className="icon-btn imm-m-spec" aria-label="频谱设置" onClick={() => setSpecSheet(true)}>
-                <IconWave width={22} height={22} />
-              </button>
+              {mobile && (
+                <button className="icon-btn imm-m-spec" aria-label="频谱设置" onClick={() => setSpecSheet(true)}>
+                  <IconWave width={22} height={22} />
+                </button>
+              )}
               <button className="icon-btn imm-m-more" aria-label="更多" onClick={() => setMoreOpen(true)}>
                 <IconMore width={26} height={26} />
               </button>
@@ -2020,10 +2030,10 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
                   data-playing={p.snapshot.playing && open ? 'true' : 'false'}
                   {...artGesture}
                   onClick={onArtTap}
-                  role={!mobile ? 'button' : undefined}
-                  tabIndex={!mobile ? 0 : undefined}
-                  aria-label={!mobile ? '只看歌词' : undefined}
-                  title={!mobile ? '点击只看歌词（再点右上角的「全屏歌词」回来）' : '点击看歌词 · 上下滑动切歌'}
+                  role={!mobile && shellKind !== 'car' ? 'button' : undefined}
+                  tabIndex={!mobile && shellKind !== 'car' ? 0 : undefined}
+                  aria-label={!mobile && shellKind !== 'car' ? '只看歌词' : undefined}
+                  title={!mobile && shellKind !== 'car' ? '点击只看歌词（再点右上角的「全屏歌词」回来）' : undefined}
                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onArtTap() } }}
                 >
                   <div className="imm-disc-spin">
@@ -2050,10 +2060,10 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
                   data-ring={specPos === 'cover' ? 'true' : 'false'}
                   {...artGesture}
                   onClick={onArtTap}
-                  role={!mobile ? 'button' : undefined}
-                  tabIndex={!mobile ? 0 : undefined}
-                  aria-label={!mobile ? '只看歌词' : undefined}
-                  title={!mobile ? '点击只看歌词（再点右上角的「全屏歌词」回来）' : '点击看歌词 · 上下滑动切歌'}
+                  role={!mobile && shellKind !== 'car' ? 'button' : undefined}
+                  tabIndex={!mobile && shellKind !== 'car' ? 0 : undefined}
+                  aria-label={!mobile && shellKind !== 'car' ? '只看歌词' : undefined}
+                  title={!mobile && shellKind !== 'car' ? '点击只看歌词（再点右上角的「全屏歌词」回来）' : undefined}
                   onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onArtTap() } }}
                 >
                   <Cover track={t} size={300} radius={18} />
@@ -2081,8 +2091,10 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
               {/* 触屏：歌名 24/600 + 「歌手 · 专辑 · 格式 码率」（设计稿 02）。
                   拆成三个 span 是为了车机：设计稿 10 里歌手是 22 的一行，
                   专辑·格式是 15 的另一行；手机上它们只是同一行的三段，
-                  中间的「 · 」由 .imm-m-sep 提供，车机上隐藏掉。 */}
-              {mobile && (
+                  中间的「 · 」由 .imm-m-sep 提供，车机上隐藏掉。
+                  车机也在桌面 grid 里渲染它（handoff.css 的 car 段按这个块排版，
+                  并把桌面那份 imm-title/artist/album 藏掉）。 */}
+              {(mobile || shellKind === 'car') && (
                 <div className="imm-meta-block">
                   <h1 className="imm-m-title">
                     <span>{t.title}</span>
@@ -2097,6 +2109,25 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
                       </>
                     )}
                   </p>
+                  {/*
+                   * 车机：唱片页直接带两行歌词（用户：「播放页唱片他可能也不会
+                   * 点击进去查看歌词页，但是唱片页可以显示两行歌词啊」）。
+                   * 车机上歌词列/纯歌词视图整块不存在，这两行就是车里唯一的歌词；
+                   * 当前句亮、下一句暗，各限一行省略——开车时瞟一眼就够。
+                   * 没词也占位，避免切歌时信息块高度跳。
+                   */}
+                  {shellKind === 'car' && (
+                    <div className="imm-car-lyr" data-empty={miniCur ? 'false' : 'true'} aria-hidden="true">
+                      {miniCur ? (
+                        <>
+                          <div className="icl cur">{miniCur}</div>
+                          <div className="icl next">{miniNext || '\u00a0'}</div>
+                        </>
+                      ) : (
+                        <div className="icl-empty">{p.lyricsLoading ? '歌词加载中…' : '暂无歌词'}</div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2487,6 +2518,34 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
             id: 'float', label: '桌面歌词', sw: true, on: floatOn, keepOpen: true,
             onClick: toggleFloat,
           }] : []),
+          {
+            /*
+             * 「这首歌词不对」的自愈入口（2026-11-21 平板「海屿你」教训）。
+             *
+             * 歌词有落盘缓存，错的那份（模糊匹配来的、时间轴是别的版本的）
+             * 平时每次播放都直接命中，永远自愈不了。这里强制绕过缓存
+             * 重新按歌曲 id 精确取一遍（reloadLyrics(true) → lyricsFor(retry)），
+             * 拿到平台正主的那份后把缓存覆盖掉。
+             */
+            id: 'lyricre', label: '重新匹配歌词',
+            onClick: () => { p.reloadLyrics(true); toast('正在重新匹配歌词…') },
+          },
+          /*
+           * 定时关闭：安卓专属（真值在原生 SleepTimer）。
+           *
+           * 放在「更多」里而不是只放设置页：用户是**躺着听的时候**才想起要定时，
+           * 那时他不会去设置页翻。标签上直接写剩余时间，不用点进去才知道开没开。
+           */
+          ...(isAndroid ? [{
+            id: 'sleep',
+            label: p.sleep.track
+              ? '定时关闭 · 播完这首'
+              : p.sleep.on
+                ? `定时关闭 · 还剩 ${Math.max(1, Math.ceil(p.sleep.remain / 60))} 分钟`
+                : '定时关闭',
+            chevron: true,
+            onClick: () => setSleepSheet(true),
+          }] : []),
           /* 锁屏播放页搬去设置页了：它是「系统层面的一个开关」，
              和收藏/下载这些「对这首歌做什么」的动作不是一类，
              而且以前打开它还会立刻把锁屏页弹出来（用户明确不要这个预览）。 */
@@ -2528,6 +2587,9 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
       {/* 频谱设置（样式 + 位置）：从「更多」面板里点开。
           z-index 比 ActionSheet 高一点，两个弹层交接时不会互相压住 */}
       <SpectrumSheet open={specSheet} onClose={() => setSpecSheet(false)} />
+
+      {/* 定时关闭（安卓）：从「更多」里点开 */}
+      <SleepSheet open={sleepSheet} onClose={() => setSleepSheet(false)} />
 
       <AddToPlaylistDialog
         open={!!addTo}

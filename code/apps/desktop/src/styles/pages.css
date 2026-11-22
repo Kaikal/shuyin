@@ -37,6 +37,17 @@
 .page-keep { position: absolute; inset: 0; }
 .page-keep[hidden] { display: none; }
 
+/*
+ * 浮层（长按菜单 / 右键菜单）不许跟着「已经滑走的页面」留在屏幕上。
+ *
+ * 菜单是 `position: fixed` 的，包含块是视口；页面切换靠 `.page-track` 平移，
+ * 移出去的那一页里如果还挂着菜单，它仍会画在屏幕中间——用户看到的就是
+ * 「点了返回，页面到了我的，菜单还浮在那儿」（用户 2026-11 反馈）。
+ * 页面不再 active 时直接把浮层藏掉（返回键那条路还有 `pushBackLayer` 兜着）。
+ */
+.page-slot:not([data-active='true']) .ctx-menu,
+.page-slot:not([data-active='true']) .ctx-scrim { display: none; }
+
 /* ============================================================
    页面切换
    ------------------------------------------------------------
@@ -382,9 +393,20 @@ html:not([data-shell='phone']) .page-slot[data-active='true'] > .page:not([hidde
 }
 .lyrics.immersive .lyrics-empty .t { font-size: 15px; }
 
-/* KTV 染色（当前句）：整行从左往右被主题色「唱」过去，边界是软的。
+/* KTV 染色（当前句）：整行从左往右被主题色「唱」过去。
    逐字换色做不到这个——它会一格一格跳，而且边界是硬的。
    --kara 必须在 @property 里注册过才吃 transition，否则照样是台阶。
+
+   **实现 v3（clip-path 揭示）：**
+   以前是 background-clip:text 渐变 + drop-shadow 辉光，--kara 每帧插值 →
+   渐变文字**每一帧都整行重绘**（低端 GPU 上就是「染色一卡一卡」，2026-11-21
+   平板 gfxinfo 实测 12% 掉帧、Slow issue draw commands 全在这）。
+   v2 曾用双层滑入（fill translateX + 外层 overflow:hidden 裁切），但 wrap
+   跑马灯模式下当前句的文字盒必须 overflow:visible（位移就挂在它身上），
+   滑入层整层漏出来和底层叠印 = 「当前句文字重影」。
+   v3：fill 永远和底层逐字对齐不位移，用 clip-path:inset 把右侧未唱部分
+   裁掉——不需要任何裁切祖先，和 wrap 完全兼容；裁切在合成器上做，
+   文字光栅仍然只做一次。
 
    **过渡挂在 .lyric-text.kara 自己身上，不挂 .lyrics 根节点。**
    挂根节点时这个值是「继承」的：上一句唱到 1.0，换行那一刻新句继承到的也是 1.0，
@@ -397,27 +419,31 @@ html:not([data-shell='phone']) .page-slot[data-active='true'] > .page:not([hidde
 }
 
 .lyric-text.kara {
-  /* 30Hz 的位置 + 40ms 的过渡：眼睛看到的是连续扫过，不是一格一格跳。
-     过渡时长就是稳态滞后量，JS 那边用 KARA_LAG 提前 40ms 抵消，改这里要同步改它。 */
+  position: relative;
   transition: --kara 40ms linear;
-  background-image: linear-gradient(
-    90deg,
-    var(--sy-accent-soft) 0%,
-    var(--sy-accent) calc(var(--kara, 0) * 100% - 0.5%),
-    /* 没唱到的部分要比「唱过的」暗一档——KTV 就是这个逻辑：
-       亮的是已经唱过去的，暗的是还没到的。两边都亮的话分不出边界。 */
-    color-mix(in srgb, var(--sy-text-1) 56%, transparent) calc(var(--kara, 0) * 100% + 2%)
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  -webkit-text-fill-color: transparent;
-  /* 字是透明的，text-shadow 会糊成一团；改用 drop-shadow 沿字形发光，
-     同时加一层近距暗影——背景现在是专辑图，亮的地方很亮 */
+  /* 没唱到的部分暗一档——KTV 逻辑：亮的是已经唱过去的，暗的是还没到的 */
+  color: color-mix(in srgb, var(--sy-text-1) 56%, transparent);
+}
+/* **不要**给 .lyric-text.kara 写 overflow:hidden。
+   wrap（跑马灯）模式下当前句的文字要撑出整行、按 --wrap-x 平移，
+   位移就挂在 .lyric-text 的 transform 上——overflow:hidden 会把移出
+   自己盒子的字裁掉，跑马灯直接只剩第一个字。裁切不在外层做：
+   .kara-fill 自己用 clip-path 揭示，天然不需要任何裁切祖先。 */
+.lyric-text.kara .kara-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  color: var(--sy-accent-soft);
+  /* fill 永远和底层文字逐字对齐（**不位移**），用 clip-path 把右侧
+     「没唱到的部分」裁掉：kara=0 → inset(0 100% 0 0) 全裁（全暗），
+     kara=1 → inset(0 0 0 0) 全露（全亮）。以前是 translateX 滑入 +
+     外层 overflow 裁切——wrap 模式外层必须 visible（跑马灯），滑入层
+     整层漏出来和底层叠印 = 「当前句文字重影」（2026-11-21 平板实拍）。
+     clip-path 裁切在合成器上做，文字光栅仍然只做一次。 */
+  clip-path: inset(0 calc((1 - var(--kara, 0)) * 100%) 0 0);
+  pointer-events: none;
   text-shadow: none;
-  filter:
-    drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5))
-    drop-shadow(0 0 24px color-mix(in srgb, var(--sy-accent) 30%, transparent));
 }
 
 .lyrics-empty {
@@ -1240,10 +1266,85 @@ html:not([data-shell='phone']) .page-slot[data-active='true'] > .page:not([hidde
 .io-msg { font-size: 11.5px; color: var(--sy-accent-soft); }
 .io-msg.err { color: var(--sy-error); }
 
-.about { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-.about-name { font-size: 15px; font-weight: 600; letter-spacing: 0.3em; }
-.about-tag { font-size: 11.5px; color: var(--sy-text-2); }
-.about-ver { font-size: 10.5px; color: var(--sy-text-3); }
+/* ---------- 关于：品牌头 + 项目主页 ---------- */
+/*
+ * 这一页以前只有「疏音 v0.6.111」一行字（手机更是收成一行再点开弹窗），
+ * 整页几乎空白。现在铺成一张卡片：品牌头（字标 + 标语 + 版本胶囊）、
+ * 项目主页两行（GitHub / Gitee，品牌色图标）、检查更新。
+ */
+.ab-card { display: flex; flex-direction: column; gap: 13px; }
+
+.ab-hero { display: flex; align-items: center; gap: 12px; }
+.ab-mark {
+  width: 46px;
+  height: 46px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: #fff;
+  background:
+    radial-gradient(130% 120% at 22% 0%, rgba(255, 255, 255, 0.32), transparent 58%),
+    linear-gradient(150deg, var(--sy-accent), color-mix(in srgb, var(--sy-accent) 52%, #0b0d13));
+  box-shadow: 0 8px 18px -9px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.26);
+}
+.ab-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ab-name { font-size: 16px; font-weight: 600; letter-spacing: 0.14em; color: var(--sy-text-1); }
+.ab-tag { font-size: 11.5px; color: var(--sy-text-3); }
+.ab-ver {
+  flex: none;
+  padding: 3.5px 9px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--sy-text-3);
+  background: var(--sy-surface);
+  box-shadow: inset 0 0 0 1px var(--sy-surface-border);
+}
+
+.ab-sub { font-size: 11px; color: var(--sy-text-2); letter-spacing: 0.06em; margin: 4px 0 -4px; }
+
+.ext-links { display: flex; flex-direction: column; gap: 8px; }
+.ext-link {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--sy-surface-border);
+  border-radius: 13px;
+  background: var(--sy-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms var(--sy-ease-soft), border-color 140ms var(--sy-ease-soft);
+}
+.ext-link:hover { background: rgba(255, 255, 255, 0.055); border-color: rgba(255, 255, 255, 0.1); }
+/* 图标块：品牌色底 + 白色图形。GitHub 那块几乎是黑的，靠一圈内描边和卡片底分开 */
+.ext-ico {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #fff;
+}
+.ext-ico-github { background: #24292f; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.11); }
+.ext-ico-gitee { background: #c71d23; }
+.ext-ico-site {
+  background:
+    radial-gradient(130% 120% at 22% 0%, rgba(255, 255, 255, 0.3), transparent 58%),
+    linear-gradient(150deg, var(--sy-accent), color-mix(in srgb, var(--sy-accent) 52%, #0b0d13));
+}
+.ext-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ext-name { font-size: 12.5px; color: var(--sy-text-1); }
+.ext-url { font-size: 10.5px; color: var(--sy-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ext-link .eq-entry-chev { flex: none; opacity: 0.55; }
+/* 「检查更新」和上面那组链接分开：一条细线比多留白更能说明"这是另一件事" */
+.ab-card > .set-row {
+  margin-top: 2px;
+  padding-top: 13px;
+  border-top: 1px solid var(--sy-surface-border);
+}
 
 @media (max-width: 1279px) {
   .page { padding-right: 24px; }

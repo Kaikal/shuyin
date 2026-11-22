@@ -29,9 +29,25 @@ export function VList<T>({
   items, rowHeight, overscan = 8, className, renderRow, getKey, empty, scrollParent,
 }: Props<T>) {
   const containerRef = useRef<HTMLDivElement>(null)
+  /**
+   * 真实行高。
+   *
+   * `rowHeight` 只是**估值**：桌面 `.track-row` 是 `height: 60px`，但手机上
+   * 那张同一行被 CSS 改成了两行网格 + `min-height: 66px`，宽屏手机（`data-wide`）
+   * 封面 52 + padding 20 → 72。JS 里写死 60 的话，每行被摆在 `index × 60` 上、
+   * 而它自己有 66 高，**每行都压住下一行 6px**，总高度也不够（滚到底少一截）。
+   * 视觉上就是滑动时一片错位和闪白（用户 2026-11-15 报的第二条）。
+   *
+   * 所以这里不猜：渲染完实测第一行的 `offsetHeight`，跟估值差超过 0.5px 就纠正。
+   * 放在 `useLayoutEffect` 里，setState 会在浏览器绘制之前生效，用户看不到跳变。
+   */
+  const [rowH, setRowH] = useState(rowHeight)
+  const measureRef = useRef<HTMLDivElement>(null)
   const [range, setRange] = useState({ start: 0, end: 30 })
   const [, setViewport] = useState(600)
   const external = !!scrollParent
+
+  useEffect(() => { setRowH(rowHeight) }, [rowHeight])
 
   const recalc = useCallback(() => {
     const el = containerRef.current
@@ -47,20 +63,27 @@ export function VList<T>({
        */
       const rel = el.getBoundingClientRect().top - parent.getBoundingClientRect().top + parent.scrollTop
       const viewTop = parent.scrollTop - rel
-      start = Math.max(0, Math.floor(viewTop / rowHeight) - overscan)
-      end = Math.min(items.length, Math.ceil((viewTop + parent.clientHeight) / rowHeight) + overscan)
+      start = Math.max(0, Math.floor(viewTop / rowH) - overscan)
+      end = Math.min(items.length, Math.ceil((viewTop + parent.clientHeight) / rowH) + overscan)
       setViewport(parent.clientHeight)
     } else {
       const h = el.clientHeight
       const scrollTop = el.scrollTop
-      start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
-      end = Math.min(items.length, Math.ceil((scrollTop + h) / rowHeight) + overscan)
+      start = Math.max(0, Math.floor(scrollTop / rowH) - overscan)
+      end = Math.min(items.length, Math.ceil((scrollTop + h) / rowH) + overscan)
       setViewport(h)
     }
     setRange(prev => (prev.start === start && prev.end === end ? prev : { start, end }))
-  }, [items.length, rowHeight, overscan, scrollParent])
+  }, [items.length, rowH, overscan, scrollParent])
 
   useLayoutEffect(() => { recalc() }, [recalc])
+
+  useLayoutEffect(() => {
+    const el = measureRef.current
+    if (!el) return
+    const h = el.offsetHeight
+    if (h > 0 && Math.abs(h - rowH) > 0.5) setRowH(h)
+  })
 
   useEffect(() => {
     const self = containerRef.current
@@ -77,7 +100,7 @@ export function VList<T>({
     return <div className={className} ref={containerRef}>{empty}</div>
   }
 
-  const total = items.length * rowHeight
+  const total = items.length * rowH
   const visible = items.slice(range.start, range.end)
 
   return (
@@ -88,11 +111,27 @@ export function VList<T>({
           return (
             <div
               key={getKey(item, index)}
-              style={{ position: 'absolute', top: index * rowHeight, left: 0, right: 0, height: rowHeight }}
+              /* 第一行挂 ref，用来量真实行高（见上面 rowH 的说明） */
+              ref={i === 0 ? measureRef : undefined}
+              /*
+               * 用 `transform` 定位，不用 `top`。
+               *
+               * 改 `top` 是布局属性，每一帧都要让浏览器重算这一行的盒子位置（30 行
+               * × 每帧）；`transform` 只改变换矩阵，布局一次都不用重排。
+               *
+               * **用 `translateY` 而不是 `translate3d`。** 3D 变体会给每一行**强制**
+               * 开一个合成层，滚动时新行进视口就要现分配/上传一张 GPU 纹理，
+               * 低端机上表现为「滑动时行一片片地闪白」（层数还随 overscan 越滚越多）。
+               * 2D 变体不触发重排，也不需要强制分层，浏览器按需自己决定。
+               *
+               * **不要给这里写 `height`**：行高由 CSS 决定（桌面 60、手机 66、
+               * 宽屏手机 72），写死就等于把测量结果盖掉，量永远是估值。
+               */
+              style={{ position: 'absolute', top: 0, left: 0, right: 0, transform: `translateY(${index * rowH}px)` }}
             >
               {renderRow(item, index)}
             </div>
-  )
+          )
         })}
       </div>
     </div>

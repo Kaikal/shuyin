@@ -31,6 +31,8 @@ let timer = 0
 let firedAt = 0
 /** 当前这次按压挂着的「别长了」监听；抬手/触发时要解掉，否则会一直累积 */
 let detach: (() => void) | null = null
+/** 最后一次真滚动的时间：定时器到点时再看一眼，刚滚过就不算长按 */
+let lastScrollAt = 0
 
 /** 长按落点。菜单要贴着手指弹，不能弹到屏幕另一头去 */
 export type HoldPoint = { x: number; y: number }
@@ -51,6 +53,8 @@ export function longPressProps(fire: (at: HoldPoint) => void) {
       if (e.pointerType === 'mouse') return
       firedAt = 0
       stop()
+      /* 只统计「这一次按压期间」的滚动：上一次滑动的余温不该压掉这一次长按 */
+      lastScrollAt = 0
       at = { x: e.clientX, y: e.clientY }
       start = at
       /*
@@ -66,11 +70,38 @@ export function longPressProps(fire: (at: HoldPoint) => void) {
        * 真滚动必发 scroll，系统长按弹层不会——比去猜 `pointercancel` 稳得多，
        * 华为那批机器会在系统长按时误发 pointercancel，所以那个信号不能用来判。
        */
-      const onScroll = () => stop()
+      const onScroll = () => { lastScrollAt = Date.now(); stop() }
       window.addEventListener('scroll', onScroll, { capture: true, passive: true })
-      detach = () => window.removeEventListener('scroll', onScroll, true)
+      /*
+       * **`scroll` 不足以覆盖「滑到列表底部还继续往上推」。**
+       *
+       * 用户 2026-11-15 反馈的原话：「滚动到列表最底部的时候继续往上滑就容易触发」
+       * —— 到底了就没有新的滚动，`scroll` 一次都不发；而 `pointermove` 在浏览器
+       * 接管手势的那一刻就停了（发完 `pointercancel` 不再派发），所以那两条判据
+       * 双双失明，480ms 一到照样弹多选。
+       *
+       * `touchmove` 是唯一还在持续发货的信号：浏览器滚动时它照发不误（只是不可取消），
+       * 到底了顶不动也照样发。用它量手指相对起点的位移，最诚实。
+       */
+      const onTouchMove = (ev: TouchEvent) => {
+        const t = ev.touches[0] ?? ev.changedTouches[0]
+        if (!t) return
+        const dx = t.clientX - start.x
+        const dy = t.clientY - start.y
+        if (dx * dx + dy * dy > SLOP * SLOP) stop()
+      }
+      window.addEventListener('touchmove', onTouchMove, { capture: true, passive: true })
+      detach = () => {
+        window.removeEventListener('scroll', onScroll, true)
+        window.removeEventListener('touchmove', onTouchMove, true)
+      }
       timer = window.setTimeout(() => {
         stop()
+        /*
+         * 到点前 300ms 内真的滚过 → 这一下是「滑完手还按着」，不是长按。
+         * 惯性滚动（fling）期间就是这种形状：`touchmove` 已经没了，`scroll` 还在发。
+         */
+        if (Date.now() - lastScrollAt < 300) return
         firedAt = Date.now()
         fire(at)
       }, HOLD_MS)

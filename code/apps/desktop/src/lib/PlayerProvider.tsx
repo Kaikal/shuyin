@@ -13,16 +13,20 @@ import {
   type LocalTrack, type LyricsDoc, type QueueState, type RepeatMode,
 } from '@shuyin/core'
 import { bridge, isAndroid, type ScanProgressPayload, type ScanScope } from './bridge'
+import { lastKnownPlayerState } from './native/android'
 import { forceOnlineLyrics, loadLyrics, lyricAt } from './lyrics'
 import { KEYS, SCAN_VERSION, settings } from './settings'
 import { NoPlayableSourceError, type PlatformSource } from '@shuyin/lx-provider'
 import { favRecOf, useFavs } from './favTracks'
+import { recordHistory } from './history'
 import {
-  coverForTrack, effectiveSong, ensureRegistry, isOnlineTrack, onlineLyric, pinSongs,
+  coverForTrack, effectiveSong, ensureRegistry, forgetSubstitute, getPreferredQuality, isCacheCopyTrack, isOnlineTrack, onlineLyric, pinSongs,
   qualityDropMatters, resolvePlayUrl, setPreferredQuality, songOf, sourceManager, trackOfId,
   usableQualities,
 } from './online'
-import { cachedAudio, hasCachedAudio, warmCache } from './audioCache'
+import { cachedAudio, cachedAudioQuality, dropCachedAudio, hasCachedAudio, warmCache } from './audioCache'
+import { cachedCoverPath, cachedLyric, rememberCover, rememberLyric, mediaCacheVersion } from './mediaCache'
+import { installIdleTracking, userActive, waitIdle } from './idle'
 import { diag } from './diag'
 import { parseLrc, plainLyricLines } from '@shuyin/core'
 
@@ -33,6 +37,35 @@ export interface PlayerSnapshot {
   volume: number
   /** 在线曲目已缓冲到的秒数（本地恒 0），进度条画淡色第二层用 */
   buffered: number
+}
+
+/**
+ * 队列的「内容指纹」。
+ *
+ * **不能用 `q.queue !== other.queue` 判断「队列变了没有」**：`commitQueue` 每次都
+ * 产出新对象，引用永远不相等。2026-11-17 真机日志里的后果是补表自激：
+ *
+ *   一轮取链还没结束 → 定时器递来同队列的 pending → 收尾时按引用判定「变了下标」
+ *   → 立刻重算 → 新一轮 `++prefetchSeq` 把上一轮作废 → `pf abort 被新一轮顶掉`
+ *   连着出现，**一张表都递不出去**，原生 `pf` 恒为 0（用户看到的「只循环两首」）。
+ *
+ * 用内容比：下标 / 循环模式 / 顺序 / 每首的 id。
+ */
+function queueFingerprint(q: QueueState): string {
+  return `${q.index}|${q.repeat}|${q.order}|${q.queue.map(t => t.id).join(',')}`
+}
+
+/**
+ * 定时关闭的状态（安卓原生是唯一真相，见 apps/android/.../SleepTimer.kt）。
+ *
+ * `remain` 是**剩余秒数**，不是时间戳：原生每秒对一次墙钟，前端拿到的就是
+ * 「还剩多久」，不用自己算 `endAt - now`（那还要处理系统时间被改的情况）。
+ */
+export interface SleepState {
+  on: boolean
+  /** 等当前这首放完就停（没有时间点） */
+  track: boolean
+  remain: number
 }
 
 interface PlayerCtx {
@@ -131,8 +164,21 @@ interface PlayerCtx {
   clearNotice(): void
   /** 换一个音源重试当前曲目 */
   switchSource(): void
+  /** 原地重试当前曲目（网络刚恢复、取链超时用；不拉黑音源） */
+  retryCurrent(): void
   /** 换音质并从当前进度继续 */
   changeQuality(q: string): void
+  /**
+   * 定时关闭（安卓）。
+   *
+   * 传分钟数、`'track'`（播完这首）或 `null`（取消）。**返回后不等结果**：
+   * 原生会把新状态塞进接下来的 `player://state`，这里只负责发命令。
+   */
+  sleep: SleepState
+  setSleep(min: number | 'track' | null): void
+  /** 音量保护（起播淡入 / 暂停淡出 / 被压低后缓慢回升），安卓原生执行 */
+  audioGuard: boolean
+  setAudioGuard(on: boolean): void
 }
 
 /**
@@ -140,6 +186,16 @@ interface PlayerCtx {
  * 在线曲目的 path 是空串，拿 path 比较会导致每帧都判定「需要重新加载」。
  */
 const trackKey = (t: LocalTrack): string => (isOnlineTrack(t) ? t.id : t.path)
+
+/**
+ * 曲库里不该出现的条目：旧版误落盘的播放缓存副本（`online_<平台>_<id>.mp3`）。
+ *
+ * 壳那边已经不再收录（`Library.kt`），但**已经写进 `library.json` 的旧条目还在**，
+ * 而 `Library.tracks()` 优先读那份缓存。所以前端在每次拿曲库时再筛一遍：
+ * 用户不需要为此重扫一次全库，也不必等下次装包。
+ */
+const cleanLibrary = (list: LocalTrack[]): LocalTrack[] =>
+  list.some(t => isCacheCopyTrack(t)) ? list.filter(t => !isCacheCopyTrack(t)) : list
 
 const Ctx = createContext<PlayerCtx | null>(null)
 
@@ -152,6 +208,15 @@ export function usePlayer(): PlayerCtx {
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [queueState, setQueueState] = useState<QueueState>(initialQueueState)
   const [snapshot, setSnapshot] = useState<PlayerSnapshot>({ playing: false, position: 0, duration: 0, volume: 0.8, buffered: 0 })
+  /**
+   * 定时关闭 / 音量保护（**安卓专属**，原生执行）。
+   *
+   * 状态由 `player://state` 每帧带回（原生是唯一真相）：这样连「设置完之后
+   * WebView 被系统冻住」这种情况也是对的——定时器在原生那边照走，
+   * 前端醒来读到的就是真实剩余时间。
+   */
+  const [sleep, setSleepState] = useState<SleepState>({ on: false, track: false, remain: 0 })
+  const [audioGuard, setAudioGuardState] = useState(true)
   /** 静音开关（真值：`snapshot.volume` 此时就是 0） */
   const [muted, setMuted] = useState(false)
   /**
@@ -199,8 +264,30 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // 兜底：真卡死（网络挂住）也不能永远转圈
     window.clearTimeout(loadingGuard.current)
     loadingGuard.current = window.setTimeout(() => {
+      /*
+       * 15 秒没等到「出声 / 时长 / 报错」：**先跟原生对一次账**。
+       *
+       * 这一步是必须的：`player://state` 事件一旦断供（订阅没建起来、
+       * WebView 被系统冻过一段），前端就再也不知道自己该不该结束加载，
+       * 于是「取链中…」永远挂在播放条上，而 `loadingRef` 会让
+       * 播放/暂停那颗键**一点反应都没有**（就是用户说的「点了都没反应」）。
+       * 原生手里有真相：它说在放、或者已经有长度，就说明这次加载其实成了。
+       */
+      /*
+       * **先无条件收掉转圈**，再去对账。
+       *
+       * 顺序不能反：兜底的全部意义是「无论如何让用户能继续操作」，
+       * 一旦被 `await` 拖住（原生那边命令排队、`player_state` 迟迟不回），
+       * 转圈就永远停在那里、`loadingRef` 永远为 true —— 按钮彻底变死。
+       * 这一步以前是同步的两行赋值，改成异步之后必须保住这个性质。
+       */
       loadingRef.current = false
       setLoading(false)
+      void bridge.playerState().then(st => {
+        /* 原生其实在放 / 已经有长度：说明这次加载是成的，只是事件没送到，别报错 */
+        if (st.playing || st.duration > 0) return
+        setLastError('「正在解析播放地址」卡住了：网络或音源没响应，再点一次播放试试')
+      }).catch(() => {})
     }, 15000)
   }, [])
   const stopLoading = useCallback(() => {
@@ -212,6 +299,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [onlineBusy, setOnlineBusy] = useState(false)
   const [onlineSource, setOnlineSource] = useState<string | null>(null)
   const [onlineQuality, setOnlineQuality] = useState<string | null>(null)
+  /** 同步给 changeQuality 判断「点的是不是正在播的档位」——ref 不触发重渲染 */
+  const onlineQualityRef = useRef<string | null>(null)
+  useEffect(() => { onlineQualityRef.current = onlineQuality }, [onlineQuality])
   const [onlineVia, setOnlineVia] = useState<string | null>(null)
   const [onlineActual, setOnlineActual] = useState<{ name: string; singer: string } | null>(null)
   const [onlineNotice, setOnlineNotice] = useState<string | null>(null)
@@ -256,6 +346,51 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   /** 本轮连续失败次数（成功出声/取链成功即清零）：跳满一整圈还不行就停，别无限跳 */
   const pullFail = useRef(0)
   /**
+   * 「这一轮加载我不想让它出声」。
+   *
+   * 用户在**取链途中**点了暂停：那一刻原生手里还没有播放器（`mp == null`），暂停
+   * 命令落到空处；等 2~8 秒后链取回来，`startLoad` 照样按 `autoplay: true` 下发 ——
+   * 声音就这么在「我已经按过暂停」之后响起来（用户 2026-11-15 报的
+   * 「暂停了还是会继续播放音乐」，在线慢歌最容易复现）。
+   *
+   * 置 true 之后这一轮下发 `autoplay: false`：链照样取、播放器照样建（进度条/时长
+   * 都正常），只是不自动起播；用户再点播放走 resume，不用再等一次取链。
+   * 每次 `startLoad` 开头清掉，只影响被暂停的那一轮。
+   */
+  const autoCancel = useRef(false)
+  /**
+   * 用户意图代号：每按一次（播放 / 暂停 / 换歌）就 +1。
+   *
+   * 为什么光有 `autoCancel` 还不够（2026-11-15 真机日志）：
+   *   `13:55:56.617 src=frontend pause` → `after pause playing=false`
+   *   `13:55:56.748 open autoplay=true index=22`   ← 130ms 之后，迟到的加载
+   *
+   * `autoCancel` 是**前端自己**在「算 autoplay 的那一刻」读的布尔值，它管不住
+   * 「已经在路上」的命令：这一轮取链在暂停**之前**出发，回来时暂停已经落地，
+   * 但原生那边 `open(autoplay=true)` 照样把 `wantPlay` 置回 true，prepare 一完成
+   * 就出声。弱网时这条链路能拖几秒，用户听到的就是「我明明暂停了，过一会儿又响」。
+   *
+   * 代号交给原生做最终裁决（见 PlaybackService.intentEpoch）：比当前代号旧的
+   * `play_file/play_url` **照样准备音源，但强制不出声**——进度条、时长、后续
+   * 秒播都在，只是不背叛用户按下的那一下。
+   *
+   * 注意 `startLoad` 必须在**入口**取一次代号并一路带着，不能在下发时现读：
+   * 现读会拿到暂停之后的新号，等于把「迟到」这个事实抹掉了。
+   */
+  const epochRef = useRef(1)
+  /** 用户按了一下 → 代号 +1 */
+  const bumpEpoch = useCallback(() => ++epochRef.current, [])
+  /**
+   * 用户的动作明确表达了「我要听」：解开暂停锁。
+   *
+   * 只有点歌 / 上一首 / 下一首 / 按播放这几个入口调它。`startLoad` 自己**不调**——
+   * 加载可能是后台发起的（队列编辑、原生对齐、试听重试），不该替用户改主意。
+   */
+  const resumeIntent = useCallback(() => {
+    autoCancel.current = false
+    bumpEpoch()
+  }, [bumpEpoch])
+  /**
    * 刚下发的 seek 目标。
    *
    * Rust 的 `player://state` 是 250ms 一帧的「解码器当前位置」，但 `Cmd::Seek` 要在音频线程
@@ -264,6 +399,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 与目标差得远的位置一律丢弃（等到位置已经追上、或者窗口超时）。
    */
   const seekGuard = useRef<{ target: number; until: number } | null>(null)
+  /**
+   * 「这一首取链失败了」的记录，专供**网络恢复后自动重来一次**。
+   *
+   * 断网 / 刚重连那几秒里，所有平台的搜索都会超时（真机日志：
+   * `msgs=各平台都没有可用音源（酷狗搜索超时；酷我搜索超时）`），用户清完缓存后
+   * 每首都得重新取链，于是「好多歌都播放不了」。网一旦回来，这一首其实立刻能成功，
+   * 可前端只在失败当时弹了个提示就停在原地 —— 用户只能自己去再点一遍。
+   * 这里记住失败的那首，等 `navigator.onLine` 恢复（或看门狗发现网络通了）再试，
+   * 最多两次，避免把请求打成雪崩。
+   */
+  const failRetry = useRef<{ track: LocalTrack; index: number; at: number; n: number } | null>(null)
+  /** 自动重试次数（按曲目记）：重试本身会再调 `startLoad`，会把 `failRetry` 清掉，次数得单独存 */
+  const retryTries = useRef<{ key: string; n: number }>({ key: '', n: 0 })
   /** Rust 侧当前已加载的曲目路径（用于「恢复上次曲目后点播放」时判断是否需要先加载） */
   const loadedRef = useRef<string | null>(null)
   /** 恢复完成前不要回写队列：否则首帧的空队列会把上次的曲单覆盖掉 */
@@ -296,6 +444,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 该回滚就回滚，不能永远卡在假状态上）。
    */
   const playWant = useRef<{ want: boolean; until: number } | null>(null)
+  /**
+   * 「刚才那一下 resume 到底响没响」的守护定时器。
+   *
+   * 用户报过的形状（2026-11-15）：「偶尔点击播放按钮但歌曲播不起来，这首歌是
+   * 已缓存的歌曲，然后切换下一曲又切换上一曲又可以播放了」。
+   *
+   * 缓存歌不走取链，所以问题不在网络，在**原生那台播放器还起不起得来**：
+   * 放完（ENDED）、被 `stop()` 过（IDLE）、或者解码器已经废了。这时 `resume()`
+   * 是条静默命令——服务收到了、执行了、什么声音都没有，前端也没有任何回执可以
+   * 分辨「已经响了」和「发出去没落地」。
+   *
+   * 所以按下去之后留一次回查：900ms 内原生还没报 `playing`，说明这台播放器救不回来，
+   * 直接走一次完整加载（`startLoad`）——反正用户要的就是出声。切下一首再切回来
+   * 能好，是因为那条路本来就走 `startLoad`；这里只是把它自动化。
+   */
+  const resumeGuard = useRef(0)
 
   /**
    * 进度快照的**合并提交**。
@@ -340,23 +504,105 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    */
   const startLoad = useCallback((
     track: LocalTrack, index: number,
-    opts?: { startAt?: number; autoplay?: boolean; restore?: boolean },
+    opts?: {
+      startAt?: number | (() => number)
+      autoplay?: boolean; restore?: boolean; keepPause?: boolean; why?: string
+      bypassCache?: boolean; fallbackQuality?: string
+      /**
+       * **换音质专用**：取链期间不把正在响的上一版按住。
+       *
+       * 换歌必须静音（界面已经换、声音还是旧的会被当成「没点中」），
+       * 但换音质是**同一首歌**——旧档位继续响、新档位好了无缝换过去，
+       * 用户听到的是「音质变好了」而不是「断了 N 秒才有声」。
+       * 取链失败还有 fallbackQuality 兜着，歌不会断。
+       */
+      keepSound?: boolean
+    },
   ) => {
     lazyRestored.current = false
     loadExpect.current = track.duration || 0
+    /*
+     * **这里绝不主动清「暂停锁」。**
+     *
+     * 以前开头是 `if (!opts?.keepPause) autoCancel.current = false`，本意是
+     * 「用户点了新歌，就该出声」。但 `startLoad` 不只被用户动作调用：
+     * 队列编辑、原生对齐下标、试听重试、预告接下一首，都会进来。
+     * 于是出现一个真机上抓到的形状（2026-11-15 日志）：
+     *
+     *   `src=frontend pause`  → 用户按了暂停
+     *   `open[play_url] autoplay=true index=46`  ← 同一秒里，另一轮加载把它顶回来了
+     *
+     * 现在这条锁**只由用户的动作来解**（点歌 / 上一首 / 下一首 / 按播放，见
+     * `resumeIntent()`）。谁发起的加载都不重要：用户最后一次是「暂停」，
+     * 那这一轮就只准备音源、不出声。`keepPause` 参数因此失去了意义，保留只为
+     * 兼容调用点。
+    /*
+     * 这一轮加载的代号：**入口取一次**，三条下发路径都带同一个值（见 epochRef）。
+     * 取完就自增，等于「这一轮比之前所有操作都新」。
+     */
+    const ep = ++epochRef.current
+    /*
+     * 前端自己的这一笔也记进原生日志。
+     *
+     * 「歌自己停了」最难查的地方在于：原生的 `setPlaying want=false` 只说明**停了**，
+     * 是换歌前的静音？某个 effect 又加载了一遍？还是用户真的按了？只有前端知道。
+     * 现在每轮加载都留一行（`why` 说明来路），两端的日志能对上同一条时间轴。
+     */
+    const why = opts?.why ?? '?'
+    void bridge.trace(
+      `load ep=${ep} idx=${index} why=${why} online=${isOnlineTrack(track) ? 1 : 0}`
+      + `${opts?.restore ? ' restore' : ''}${opts?.autoplay === false ? ' noAuto' : ''}`,
+    )
     /* 手动换歌 / 上一首 / 下一首都从这里过：把上一次失败排的「3 秒后下一首」撤掉，
        否则用户刚点的新歌会被旧倒计时顶掉 */
     window.clearTimeout(skipTimer.current)
+    /* 新的一轮开始：上一次失败留下的「网络回来再试」作废（用户已经自己换了一首） */
+    failRetry.current = null
+    /* 上一次「resume 没响」的回查也一并作废：它查的是上一首，不能拿它把新歌顶掉 */
+    window.clearTimeout(resumeGuard.current)
+    resumeGuard.current = 0
     const key = trackKey(track)
     const online = isOnlineTrack(track)
     /* 试听重试的记忆跟着曲目走：换一首就清零，别把上一首跳过的平台带过来 */
     if (trialSkip.current.key !== key) trialSkip.current = { key, platform: null }
     curLoad.current = { track, index }
+    /*
+     * 这一轮取链的序号：任何新的一轮都会 +1，旧一轮在下一个 await 边界自己退出
+     * （见 online.ts 的 cancel）。**必须在所有定时器/副作用之前取**，
+     * 否则 900ms 那个「按住上一首」的定时器分不清自己是不是已经被顶掉了。
+     */
+    const seq = ++onlineSeq.current
     startLoading(online)
+    /*
+     * **换歌立刻把进度条拉回起点。**
+     *
+     * 这一步只能在前后端这里做：`snapshot.position` 要等原生 `open` 成功、推回第一帧
+     * 之后才会有新值，而在线曲目取链慢的时候要 3~13 秒（平台超时更久）。这段空窗里，
+     * 封面 / 标题 / 歌词**已经**换成新歌了（它们来自 `queueState`，点下去就换），
+     * 只有进度条还指着上一首的位置 —— 用户看到的就是
+     * 「封面歌词都出来了，进度条还停留在原地」（2026-11-16 反馈）。
+     * 取链失败时更糟：进度条永远停在那儿，看着像界面卡死。
+     *
+     * 两个例外：`restore`（恢复上次播放位置）和 `startAt`（换源 / 换音质保持进度），
+     * 它们本来就要停在某个指定位置，清掉反而会跳回 0。
+     */
+    if (!opts?.restore && !opts?.startAt) {
+      seekGuard.current = null
+      commitSnapshot({ ...snapRef.current, position: 0, duration: track.duration || 0, buffered: 0 })
+    }
+    /*
+     * `startAt` 支持函数形式：**在真正下发的那一刻**再取位置。
+     *
+     * 换音质那轮（keepSound）取链要 1~3 秒，期间旧档位一直在响、进度一直在走；
+     * 位置若在点击那一下就定死，换过去会往回跳这几秒（把刚听过的再播一遍）。
+     */
+    const startAtNow = (): number =>
+      typeof opts?.startAt === 'function' ? Math.max(0, opts.startAt()) : Math.max(0, opts?.startAt ?? 0)
+
     if (!online) {
       /* 本地曲目交给原生直接读文件，这一下就算「已加载」 */
       loadedRef.current = key
-      void bridge.playFile(track.path, index, opts)
+      void bridge.playFile(track.path, index, { ...opts, startAt: startAtNow(), autoplay: (opts?.autoplay ?? true) && !autoCancel.current, epoch: ep })
       return
     }
 
@@ -379,15 +625,38 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      * 正在出声——真被这里 pause 掉，就正好是用户说的「一打开就停」。
      * 会话接管的判据在前面的恢复段（`liveReady`），这里再兜一层：
      * 拿不准的时候，宁可让旧声音多响一秒，也不要无端掐断。
+     *
+     * **别按得太早**（2026-11-15 用户报「打开新歌单连点两次下一首，歌曲就会暂停播放」）：
+     * 以前是进入这个分支立刻 `pause()`，之后整段取链都是静音。取链快（缓存 / 秒回）
+     * 时听不出来，可一旦某一轮慢个几秒、或者干脆失败，用户听到的就是**点了就停、
+     * 而且再也不响**。现在给 900ms 缓冲：
+     *   · 900ms 内链回来了 → 从头到尾没静音，换歌是无缝的；
+     *   · 超过 900ms → 才按下去，避免「界面已经换歌、声音还是上一首」；
+     *   · 这一轮失败 → 上一首还在响（比一停到底好得多），提示照常弹。
+     * 定时器跟着 `onlineSeq` 走：被下一轮顶掉的那一轮，不许再动播放状态。
      */
-    if (!opts?.restore) {
-      setSnapshot(s => (s.playing ? { ...s, playing: false } : s))
-      void bridge.pause().catch(() => { /* 还没加载过 / 命令不存在：都无所谓 */ })
+    /*
+     * `keepSound`（换音质）那一轮不按：同一首歌，旧档位继续响到新档位接上。
+     */
+    let pressTimer = 0
+    const cancelPress = () => {
+      if (pressTimer) {
+        window.clearTimeout(pressTimer)
+        pressTimer = 0
+      }
+    }
+    if (!opts?.restore && !opts?.keepSound) {
+      pressTimer = window.setTimeout(() => {
+        pressTimer = 0
+        if (seq !== onlineSeq.current) return
+        setSnapshot(s => (s.playing ? { ...s, playing: false } : s))
+        /* 带上代号：这一轮的暂停比之前所有操作都新，旧一轮还没落地的加载就此作废 */
+        void bridge.pause(ep, `load:${why}`).catch(() => { /* 还没加载过 / 命令不存在：都无所谓 */ })
+      }, 900)
     }
 
     if (excluded.current.key !== key) excluded.current = { key, ids: [] }
 
-    const seq = ++onlineSeq.current
     setOnlineBusy(true)
     setOnlineSource(null)
     setOnlineQuality(null)
@@ -400,16 +669,35 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      * 听过的歌在本地有一份（见 lib/audioCache.ts），直接当本地文件播：
      * 点下去就出声，不用等「取链 → 探活」那两秒，也不再受直链过期影响。
      * 取链逻辑原封不动留在下面，缓存没命中就走它——两条路互不影响。
+     *
+     * 音质切换那一轮（`bypassCache`）必须**跳过缓存查询**：缓存里那份是旧档位
+     * 出链落盘的，命中它等于把切换前的东西又播了一遍（2026-11-21 用户实测
+     * 「切了音质没反应」）。直接走取链，成功后由 success 分支换掉缓存。
      */
-    void cachedAudio(track.id, effectiveSong(track.id)?.interval || track.duration || 0, effectiveSong(track.id)?.name || track.title || '').then(hit => {
+    const cacheLookup: Promise<string | null> = opts?.bypassCache
+      ? Promise.resolve(null)
+      : cachedAudio(track.id, effectiveSong(track.id)?.interval || track.duration || 0, effectiveSong(track.id)?.name || track.title || '')
+    void cacheLookup.then(hit => {
       if (seq !== onlineSeq.current) return
       if (hit) {
+        /* 链已经在手上：不需要那 900ms 的「按住上一首」，直接换源 */
+        cancelPress()
         setOnlineBusy(false)
         setOnlineSource('本地缓存')
         pullFail.current = 0
+        retryTries.current = { key: '', n: 0 }
         setLastError(null)
+        /*
+         * 缓存命中也要把音质选中态补上：这条路不走 resolvePlayUrl，
+         * `onlineQuality` 以前一直没人设置，音质下拉「没有对应选中」。
+         * 档位以缓存索引里记的为准（没有就按用户当前偏好兜底）。
+         */
+        void cachedAudioQuality(track.id)
+          .then(q => q ?? getPreferredQuality())
+          .then(q => { if (seq === onlineSeq.current) setOnlineQuality(q) })
+          .catch(() => {})
         loadedRef.current = trackKey(track)
-        void bridge.playFile(hit, index, opts)
+        void bridge.playFile(hit, index, { ...opts, startAt: startAtNow(), autoplay: (opts?.autoplay ?? true) && !autoCancel.current, epoch: ep })
         return
       }
       resolvePlayUrl(track, {
@@ -427,13 +715,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       })
         .then(r => {
           if (seq !== onlineSeq.current) return
+          cancelPress()
           setOnlineBusy(false)
           pullFail.current = 0
+          retryTries.current = { key: '', n: 0 }
           /* 上一首的失败提示不能赖在新歌上：取链成功就撤掉 */
           setLastError(null)
           lastSourceId.current = r.sourceId
           lastPlatform.current = r.platform
-          setOnlineSource(r.sourceName)
+          /* 未校验的地址要标出来：用户听出「有点不对劲」时，界面上得有据可查 */
+          setOnlineSource(r.unverified ? `${r.sourceName} · 未校验` : r.sourceName)
           // 存原始 key（320k / flac …）：音质下拉的 option value 用它，存中文标签会对不上
           setOnlineQuality(r.quality)
           setOnlineVia(r.switched ? r.platformName : null)
@@ -458,26 +749,65 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
            */
           const bits: string[] = []
           if (r.switched && r.fresh) {
-            bits.push(`该平台暂无可用资源，已自动切到${r.platformName}`)
+            bits.push(`当前平台暂无资源，已切换至${r.platformName}`)
           }
           if (qualityDropMatters(r.requestedQuality, r.quality)) {
-            bits.push(`音质自动降到${r.qualityLabel}`)
+            bits.push(`音质已降至${r.qualityLabel}`)
           }
           if (bits.length) setOnlineNotice(bits.join(' · '))
           loadedRef.current = trackKey(track)
           void bridge.playUrl(r.url, index, {
             // 换平台后时长可能和搜索结果的元数据不同，进度条要用真实那条的时长
             durationHint: r.duration || track.duration,
-            startAt: opts?.startAt ?? 0,
-            autoplay: opts?.autoplay ?? true,
+            /* keepSound 那轮在这里取「此刻」的位置：旧档位响到这一刻才换过去 */
+            startAt: startAtNow(),
+            /* 取链途中用户按过暂停：照样建播放器，但别出声（见 autoCancel） */
+            autoplay: (opts?.autoplay ?? true) && !autoCancel.current,
+            /* 这一轮出发时的代号：比它新的暂停/播放已经发生时，原生会强制静音 */
+            epoch: ep,
           })
-          // 出链成功就顺手在后台存一份，下次秒开
-          warmCache(track.id, r.url)
+          /*
+           * 出链成功就顺手在后台存一份，下次秒开。15 秒后才起手：前十几秒的带宽
+           * 全留给「当前这首的缓冲」（用户听到的是「一卡一卡」）。
+           *
+           * 音质切换那一轮（`bypassCache`）要先把旧档位的缓存丢掉再存：
+           * 同一首只按 id 存一份，不清的话 warmCache 看到已有条目直接跳过，
+           * 缓存永远停在切换前的档位。**成功之后才丢**——离线时取不到链走不到这里，
+           * 旧的缓存还是唯一的可播资源，不能先删。
+           */
+          if (opts?.bypassCache) {
+            /* 先删后存：warmCache 的去重检查是同步的，得等索引里没有这条再调它 */
+            void dropCachedAudio(track.id).then(() => warmCache(track.id, r.url, 15000, r.quality))
+          } else {
+            warmCache(track.id, r.url, 15000)
+          }
         })
         .catch(e => {
           if (seq !== onlineSeq.current) return
+          cancelPress()
           setOnlineBusy(false)
           stopLoading()
+          /*
+           * 音质切换取不到链：回退原音质继续播 + 一句浅提示，不算失败。
+           *
+           * 用户的拍板（2026-11-21）：「取不到链接应该切换为原音质播放，给个提示
+           * 就行，就说找不到这个音质的音乐」。不弹错误条、不排自动下一首——
+           * 歌还在，只是这个档位没有资源。
+           *
+           * 原音质的缓存**还在**：旧档位落盘的文件只有在新档位取链成功后才被
+           * dropCachedAudio 换掉，失败走不到那一步。所以回退这一轮不 bypass，
+           * 大概率直接命中缓存秒回。
+           */
+          if (opts?.fallbackQuality) {
+            void bridge.trace(`quality-fallback ep=${ep} idx=${index} from=${opts.fallbackQuality} msg=${String(e instanceof Error ? e.message : e).slice(0, 60)}`)
+            setOnlineNotice('找不到这个音质的音乐，已切回原音质')
+            /* 偏好也要跟着回退：否则之后每首歌都先试这个拿不到的档位 */
+            void setPreferredQuality(opts.fallbackQuality).then(() => {
+              /* keepSound 一路带上：回退轮大概率直接命中缓存，歌不该再断一次 */
+              startLoad(track, index, { startAt: opts?.startAt, autoplay: true, keepSound: opts?.keepSound, why: 'quality-fallback' })
+            })
+            return
+          }
           // `NoPlayableSourceError` 自带一句人话（「暂时取不到播放地址…」），直接用它
           const detail = e instanceof Error ? e.message : String(e)
           const name = track.title.length > 18 ? track.title.slice(0, 18) + '…' : track.title
@@ -492,6 +822,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
            */
           pullFail.current += 1
           /*
+           * **这一首没加载成功，把「已加载」的记录抹掉。**
+           *
+           * `togglePlay` 判「要不要重新加载」看的是
+           * `loadedRef.current !== trackKey(t) || snapshot.duration <= 0`。
+           * 取链失败时如果 `loadedRef` 还留着这一首（上一轮缓存命中设的、或者
+           * 原生对齐时写的），上面两条都不成立 —— 用户点播放只会发一个 `resume`
+           * 到**没有音源的播放器**上，什么都不发生，看起来就是「这首彻底废了，
+           * 怎么点都不响」（2026-11-16「好多歌都播放不了」）。
+           * 抹掉之后同一首再点会老老实实重新取链。
+           */
+          if (loadedRef.current === key) loadedRef.current = null
+          /*
            * 冷启动的预加载不排「3 秒后自动切下一首」。
            *
            * 那一刻音源脚本可能刚热起来、网卡刚连上（见 SourceManager.waitLoaded），
@@ -499,21 +841,37 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
            * 启动失败就静静停在当前这首，点播放会重来一遍，那次是真有准备的。
            */
           const canSkip = !opts?.restore && queueLenRef.current > 1 && pullFail.current <= 5 && skipToNext.current != null
+          /* 取链失败也要留痕：不然「点了下一首就没声音」只能靠猜是网络还是音源 */
+          void bridge.trace(
+            `loadfail ep=${ep} idx=${index} why=${why} pull=${pullFail.current} skip=${canSkip ? 1 : 0}`
+            + ` msg=${detail.slice(0, 70)}`,
+          )
           setLastError(canSkip ? `「${name}」${detail}　3 秒后自动切到下一首` : `「${name}」${detail}`)
+          /*
+           * 留一个「网回来就自己重来」的记号。
+           *
+           * 断网 / 刚重连那几秒所有平台都超时，这时候**不是歌的问题**：网一回来同一首
+           * 立刻能取到。以前前端弹完提示就撒手，用户清完缓存后遇到的就是
+           * 「好多歌都播放不了，得一首首自己重点」（2026-11-16）。
+           */
+          failRetry.current = { track, index, at: Date.now(), n: 0 }
           if (canSkip) {
             window.clearTimeout(skipTimer.current)
             skipTimer.current = window.setTimeout(() => {
               skipTimer.current = 0
+              void bridge.trace(`skipfail ep=${ep} idx=${index} pull=${pullFail.current}`)
               skipToNext.current?.()
             }, 3000)
           }
         })
     })
-  }, [startLoading, stopLoading])
+  }, [startLoading, stopLoading, commitSnapshot])
 
   /* 启动：恢复音量/队列 + 拉取曲库 + 订阅事件 */
   useEffect(() => {
     let unsubs: Array<() => void> = []
+    /* 「用户正在操作」的全局信号：后台预加载/落盘靠它让路（见 lib/idle.ts） */
+    installIdleTracking()
     ;(async () => {
       const vol = await settings.get<number>(KEYS.volume)
       if (vol != null) {
@@ -564,7 +922,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
 
       // 增量刷新不阻塞 UI（有曲库时）
-      const existing = await bridge.getTracks().catch(() => [] as LocalTrack[])
+      const existing = cleanLibrary(await bridge.getTracks().catch(() => [] as LocalTrack[]))
       const savedVer = await settings.get<string>(KEYS.scanVersion)
       const needFullRescan = savedVer !== SCAN_VERSION
       if (existing.length) {
@@ -572,7 +930,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setLibraryVersion(v => v + 1)
         // 扫描规则升级过：跑一次全量，把旧规则收进来的录音/假音频清掉
         void bridge.scanMusic(scope ?? 'fast', [], !needFullRescan).then(async () => {
-          const tracks = await bridge.getTracks()
+          const tracks = cleanLibrary(await bridge.getTracks())
           setLibrary(tracks)
           setLibraryVersion(v => v + 1)
           if (needFullRescan) void settings.set(KEYS.scanVersion, SCAN_VERSION)
@@ -588,7 +946,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
        */
       if (isAndroid && !existing.length) {
         void bridge.scanMusic('fast', [], false).then(async () => {
-          const tracks = await bridge.getTracks()
+          const tracks = cleanLibrary(await bridge.getTracks())
           setLibrary(tracks)
           setLibraryVersion(v => v + 1)
           setLastScanAt(Date.now())
@@ -629,7 +987,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
         const tracks = ids
           .map(id => map.get(id) ?? snap.get(id) ?? trackOfId(id))
-          .filter((t): t is LocalTrack => !!t)
+          /* 旧版误落盘的缓存副本（`online_平台_id.mp3`）不是歌：留在队列里就永远存盘，
+             播放条上一直挂着文件名当曲名（见 isCacheCopyTrack 的注释） */
+          .filter((t): t is LocalTrack => (t ? !isCacheCopyTrack(t) : false))
           /*
            * 在线曲目的封面**不进队列快照**（快照存的是当时的 LocalTrack，cover 是 null），
            * 只存在在线注册表里。老版本没做这一步，于是每次重启后播出来的歌
@@ -642,6 +1002,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             return img ? { ...t, cover: img } : t
           })
         if (tracks.length) {
+          /*
+           * 过滤掉坏条目之后立刻回写存档。
+           *
+           * 不回写的话，那份含着 6 条 `online_xxx` 的旧快照会一直躺在存储里：
+           * 每次启动都要再过滤一遍（无害，但白做），而且用户在「清缓存」之前
+           * 永远看不到它消失。
+           */
+          if (tracks.length !== ids.length) {
+            void settings.set(KEYS.queueIds, tracks.map(t => t.id))
+            void settings.set(KEYS.queueTracks, tracks)
+          }
           const lastId = await settings.get<string>(KEYS.lastTrackId)
           const idx = lastId ? tracks.findIndex(t => t.id === lastId) : -1
           if (idx >= 0) lastPlayedIndex.current = idx // 阻止 effect 自动开播
@@ -722,7 +1093,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               const autoplay = wasPlaying && autoResume
               restored.current = true
               resumePos.current = pos
-              setSnapshot(s => ({ ...s, position: pos, duration: dur, playing: autoplay }))
+              /*
+               * `playing` **不能**拿 `autoplay` 当代言。
+               *
+               * `autoplay` 只是「等会儿加载完就播」的意图，这一刻原生手上连播放器都
+               * 还没有（`playerState().trackPath` 是空的）。把界面写成「正在播」，用户
+               * 就会看到暂停图标、听到没有声音；他点一下想暂停，前端按「我这边在播」
+               * 发一条 `pause` 给一个空服务 —— **点了完全没有反应**，再点还是一样。
+               * 真实状态一律等 `player://state` 推上来（第一帧就会到）。
+               */
+              setSnapshot(s => ({ ...s, position: pos, duration: dur, playing: false }))
               // 只有时长可信（>5s）的曲目才在启动时预加载：
               // 0 时长多半是残缺/损坏文件，开机去解码会拉出一串报错。
               if (dur > 5) {
@@ -734,7 +1114,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
                  * 「点播放没反应」）。交给 `startLoad` 在真正成功那一刻去写。
                  */
                 resumePos.current = 0
-                startLoad(t, idx, { startAt: pos, autoplay, restore: true })
+                startLoad(t, idx, { startAt: pos, autoplay, restore: true, why: 'restore' })
               } else {
                 lazyRestored.current = true
               }
@@ -744,6 +1124,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
 
       const st = await bridge.playerState()
+      /*
+       * 服务被系统回收、进程被重建之后，原生那边**没有任何播放器**，
+       * 但前端 `loadedRef` 记的是「我让它加载过」——两边不一致。
+       *
+       * 不一致的后果用户已经报过两次：「点了播放没反应」（命令落到空处），
+       * 「点了暂停一会儿又自己播」（原生没有播放器时把命令退回前端 = 一记切换）。
+       * `trackPath` 为空就是「原生手上没东西」的铁证，据此把 `loadedRef` 清掉，
+       * 下一次点播放就会老老实实走 `startLoad` 重新加载。
+       */
+      if (!st.trackPath) loadedRef.current = ''
       // 已从存档恢复：Rust 那边的加载命令还在通道里排队，此刻读到的 0:00 不能回写 UI
       if (!restored.current) {
         setSnapshot(s => ({ ...s, playing: st.playing, position: st.position, duration: st.duration }))
@@ -751,7 +1141,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       hydrated.current = true
 
       unsubs.push(bridge.onPlayerEvent(({ payload }) => {
-        const p = payload as PlayerSnapshot & { ended?: boolean; error?: string | null; seeking?: boolean }
+        const p = payload as PlayerSnapshot & {
+          ended?: boolean; error?: string | null; seeking?: boolean
+          sleep?: number; sleep_track?: boolean
+          /** 原生手里「下一首预告表」还剩几首（见 PlaybackService.push） */
+          pf?: number
+        }
+        /*
+         * 定时关闭的剩余时间：只在**真的变了**的时候写 state。
+         *
+         * 每秒一帧，而 `snapshot` 那条路本来就每 250ms 变一次；但 `sleep` 变化会
+         * 单独触发一次 context 更新，所以「没设定时器」（=0）时必须原样返回旧对象，
+         * 否则整个应用每秒白白重渲染一次。
+         */
+        {
+          const remain = typeof p.sleep === 'number' ? p.sleep : 0
+          const track = !!p.sleep_track
+          const on = remain > 0 || track
+          setSleepState(prev => (
+            prev.on === on && prev.track === track && prev.remain === remain
+              ? prev
+              : { on, track, remain }
+          ))
+        }
         /*
          * 加载结束判定：出声了 / 解码器报出了正确的时长（暂停态起播也算加载完了）/ 报错。
          * 不能只看 `duration > 0`：`Cmd::Play` 在换歌时并不清零时长，
@@ -806,7 +1218,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               loadExpect.current = t.duration || 0
               curOnlineRef.current = isOnlineTrack(t)
               lastPlayedIndex.current = auto
+              /*
+               * **`queueRef` 必须在这里同步写掉。**
+               *
+               * `setQueueState` 只是排一次渲染，而 `queueRef` 是由 effect 跟着渲染同步的
+               * （见下方 `useEffect(() => { queueRef.current = queueState })`）。
+               * 也就是说：这一帧对齐完下标之后，**同一个回调里**读 `queueRef.current`
+               * 拿到的还是上一首的下标。
+               *
+               * 下面那段「预告表空了就补」正好在同一个回调里、就在几行之后 —— 它拿
+               * 旧下标重新算一遍预告表，算出来的还是刚放完的那两首。原生照着这份表
+               * 接着放，于是同一对歌来回放：用户 2026-11-17 报的
+               * 「过一段时间就只有 2 首循环」。先摊平这个时序，别指望 React 的批次。
+               */
+              queueRef.current = { ...q, index: auto }
               setQueueState(s => (s.index === auto ? s : { ...s, index: auto }))
+              void bridge.trace(`auto 对齐 idx=${auto}`)
             }
           }
         }
@@ -814,13 +1241,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           const expect = loadExpect.current
           const here = curLoad.current
           const sameTrack = here && (p as { index?: number }).index === here.index
-          if (here && sameTrack && expect >= 90 && p.duration < expect * 0.6 && expect - p.duration >= 40) {
+          /*
+           * `p.playing` 这道闸是必须的：这一支会把同一首歌**从 0 重新加载**，
+           * 而它挂在每 250ms 一帧的状态流上。用户按了暂停、播放器停在 20 秒，
+           * 帧还在来 —— 于是「试听识别」替他又发起一轮加载，取链几秒后
+           * `autoplay` 把声音放出来，用户听到的就是「暂停了，过几秒自己又响」。
+           * 只有真的在出声时才值得判断「这是不是试听版」。
+           */
+          if (here && sameTrack && p.playing && expect >= 90 && p.duration < expect * 0.6 && expect - p.duration >= 40) {
             const k = trackKey(here.track)
             if (trialRetry.current.key !== k) trialRetry.current = { key: k, n: 0 }
             if (trialRetry.current.n < 2) {
               trialRetry.current.n += 1
               trialSkip.current = { key: k, platform: lastPlatform.current }
-              startLoad(here.track, here.index, { startAt: 0 })
+              startLoad(here.track, here.index, { startAt: 0, why: 'trial' })
             } else if (trialRetry.current.n === 2) {
               /* 只提示一次：这段 state 每 250ms 推一帧，不设闸会重复写同一个值 */
               trialRetry.current.n = 3
@@ -860,31 +1294,165 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
               seekGuard.current = null
             }
           }
-          commitSnapshot({ ...snapRef.current, playing: settlePlaying(p.playing), position: pos, duration: p.duration, volume: p.volume, buffered: p.buffered ?? 0 })
+          /*
+           * **手指还在屏幕上就别推位置了。**
+           *
+           * `snapshot` 是**整个应用**共用的上下文：位置一变，`Ctx.Provider` 的 value
+           * 就是新对象，于是播放条、页头、搜索页、歌单详情里那几百行全都重渲染一遍。
+           * 平时 250ms 一帧无所谓，可用户正在滑一个长歌单时，每 250ms 插一次全树
+           * diff，渲染线程一排队，手指感受到的就是**一格一格地卡**（用户 2026-11-15：
+           * 「歌单里面快速滑动感觉会一卡一卡的」）。
+           *
+           * 位置只喂进度条，而进度条这会儿不在视野里（在滑列表），跳过它完全看不出来；
+           * 播放态 / 时长 / 缓冲这些「变了要马上反映」的字段照旧提交。
+           */
+          if (userActive(400)) {
+            commitSnapshot({ ...snapRef.current, playing: settlePlaying(p.playing), duration: p.duration, volume: p.volume, buffered: p.buffered ?? 0 })
+          } else {
+            commitSnapshot({ ...snapRef.current, playing: settlePlaying(p.playing), position: pos, duration: p.duration, volume: p.volume, buffered: p.buffered ?? 0 })
+          }
         } else {
           commitSnapshot({ ...snapRef.current, playing: settlePlaying(p.playing), duration: p.duration, volume: p.volume, buffered: p.buffered ?? 0 })
         }
         // 播放失败：提示 + 自动跳下一首（连续失败 3 次后停止，避免疯狂跳歌）
         if (p.error) setLastError(p.error)
         if (p.ended) {
-          setQueueState(q => {
-            const n = advance(q)
-            if (!n) {
-              void bridge.stop()
-              return q
-            }
-            lastPlayedIndex.current = n.index
-            loadedRef.current = trackKey(n.queue[n.index])
-            startLoad(n.queue[n.index], n.index)
+          /*
+           * 放完自动接下一首：**副作用放在 updater 外面**（同 commitQueue 的注释）。
+           * `p.ended` 是原生每一帧都可能带着的标志，updater 一旦被 React 重放，
+           * 就会多接一首、多一次「换歌前的静音」。
+           */
+          const n = advance(queueRef.current)
+          if (!n) {
+            void bridge.stop()
+          } else {
             const { event: _e, ...rest } = n
-            return rest
-          })
+            const t = rest.queue[rest.index]
+            if (t) {
+              lastPlayedIndex.current = rest.index
+              loadedRef.current = trackKey(t)
+              commitQueue(rest)
+              startLoad(t, rest.index, { why: 'ended' })
+            }
+          }
+        }
+        /*
+         * **凭空了就补预告表——用状态帧驱动，不用 setTimeout。**
+         *
+         * 这条链路存在的唯一理由是「熄屏后 WebView 的定时器会被节流到分钟级」：
+         * `prefetchTimer` 那一版在后台几乎不跑，在线歌的预告表于是越来越短，
+         * 原生放完手里那两首就停在曲末（用户看到的「在线歌单放一段时间就停」）。
+         * 缓存歌不受影响——它们进表时不需要取链，一次 `setPrefetch` 就能撑到底。
+         *
+         * 每一帧状态都是原生 `evaluateJavascript` 推过来的，**不受定时器节流影响**，
+         * 所以「表空了」这件事在任何时候都能被看见。12 秒防抖只是避免连续取链
+         * 把平台打出限流（那反而会让失败率更高）。
+         */
+        if (p.playing && typeof p.pf === 'number' && p.pf <= 0 && !loadingRef.current && !pfBusy.current) {
+          const now = Date.now()
+          if (now - pfBeatAt.current > pfGap.current) {
+            pfBeatAt.current = now
+            const q = queueRef.current
+            void bridge.trace(`pf beat 补表 pf=0 idx=${q.index} n=${q.queue.length}`)
+            /* 表真空了：允许重取同一份计划（skip 只拦「例行重算」） */
+            void buildPrefetchRef.current(q, { force: true })
+          }
         }
       }))
 
       unsubs.push(bridge.onScanProgress(p => setScanProgress(p)))
     })()
-    return () => unsubs.forEach(u => u())
+
+    /*
+     * 看门狗：每 2 秒跟原生对一次账。
+     *
+     * 为什么要它：这个界面所有「在放 / 没在放」都只靠 `player://state` 事件流喂。
+     * 事件一旦断供（页面被系统冻过一段、WebView 重挂、订阅那段初始化里某个 await
+     * 抛了错），前端就永远停在最后一帧：明明在出声，按钮却显示「播放」、
+     * 或者转圈永远不停 —— 用户点它，发出去的是**相反**的那条命令，
+     * 表现就是「点暂停它又接着播」「点了完全没反应」。
+     * 这里用最笨也最可靠的办法兜住：原生手里有真相，隔两秒问一次，不一致就纠正。
+     * 只在「确实不一样」时写 state，不会让界面抖。
+     */
+    /*
+     * 网络真的回来了：把重试额度还回去，让看门狗立刻再试一次那一首。
+     *
+     * 为什么不能只靠看门狗自己轮询：`navigator.onLine` 在安卓 WebView 里经常
+     * **一直返回 true**（它只看有没有网卡，不看到不到外网），所以「网断过又回来」
+     * 这件事它看不见；而 `online` 事件在部分机型换 WiFi / 关飞行模式时也不发。
+     * 两条路都挂上，谁先醒谁知道。
+     */
+    const netBack = () => {
+      const f = failRetry.current
+      if (!f || loadingRef.current) return
+      retryTries.current = { key: '', n: 0 }
+      failRetry.current = { ...f, at: 0 }
+      void bridge.trace('netback 额度重置，准备重试 idx=' + f.index)
+    }
+    window.addEventListener('online', netBack)
+
+    const dog = window.setInterval(() => {
+      if (!hydrated.current) return
+      /*
+       * 断网期间取链失败的那一首：网回来了自己再试。
+       *
+       * 为什么要跟看门狗绑在一起、而不是只听 `window 'online'`：安卓 WebView 的
+       * `online` 事件在「换了 WiFi / 热点恢复 / 飞行模式关掉」这几种情况下未必发，
+       * 而 `navigator.onLine` 又常常一直是 true（它只看有没有网卡，不看到不到外网）。
+       * 所以这里退一步：**间隔 6 秒、最多两次**的无脑重试。真没网时也就是两条
+       * 注定超时的请求，比「用户以为 App 坏了」便宜得多。
+       */
+      const f = failRetry.current
+      if (f && !loadingRef.current && !playWant.current && !autoCancel.current && Date.now() - f.at > 6000) {
+        const k = trackKey(f.track)
+        if (retryTries.current.key !== k) retryTries.current = { key: k, n: 0 }
+        if (retryTries.current.n < 2) {
+          retryTries.current.n += 1
+          failRetry.current = null
+          void bridge.trace(`retry ${retryTries.current.n}/2 idx=${f.index} why=net`)
+          startLoad(f.track, f.index, { why: 'retry-net' })
+          return
+        }
+        /*
+         * 额度用完了**不要**把记录删掉。
+         *
+         * 真机上「断网几分钟再连回来」才是最常见的形状：两次轮询（十几秒）早就打空了，
+         * 这时网才回来。删掉记录等于彻底放弃那一首，用户还是得自己再点一遍。
+         * 留着它，等 `online` 事件 / `navigator.onLine` 翻转时把额度还回去再试。
+         */
+      }
+      void bridge.playerState().then(st => {
+        const cur = snapRef.current
+        /* 转圈卡住：原生已经有播放器或已经在出声，说明加载其实成了 */
+        if (loadingRef.current && (st.playing || st.duration > 0)) stopLoading()
+        /* 用户刚点完、在等原生回声：别抢方向盘 */
+        if (playWant.current) return
+        /*
+         * 位置也要对账，**不能只看播放态**。
+         *
+         * 事件流断掉的时候（WebView 重挂、订阅那段某个 await 抛错），界面会冻在
+         * 最后一帧：歌在响、封面歌词都对，**只有进度条不动**。以前这条判断只比
+         * `playing`，两边都是 true 就什么都不做——于是「在放但进度条停住」这个
+         * 症状没有任何自愈路径（2026-11-16 用户报的那条）。
+         * 3 秒是容差：正常一帧 250ms，差到 3 秒说明前端已经跟不上了。
+         */
+        const drift = Math.abs(st.position - cur.position)
+        if (st.playing !== cur.playing || (st.playing && drift > 3)) {
+          commitSnapshot({
+            ...cur,
+            playing: st.playing,
+            position: st.position > 0 ? st.position : cur.position,
+            duration: st.duration > 0 ? st.duration : cur.duration,
+          })
+        }
+      }).catch(() => { /* 问不到就算了，下一次再试 */ })
+    }, 2000)
+
+    return () => {
+      window.clearInterval(dog)
+      window.removeEventListener('online', netBack)
+      unsubs.forEach(u => u())
+    }
   }, [])
 
   /* 队列变化 → 播放当前曲 */
@@ -893,7 +1461,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const t = currentTrack(queueState)
     if (t && queueState.index !== lastPlayedIndex.current) {
       lastPlayedIndex.current = queueState.index
-      startLoad(t, queueState.index)
+      /*
+       * **原生手里正在响的已经是这首：什么都别做。**
+       *
+       * 这条 effect 只看「队列变了、下标变了」，可分不清「真的换了歌」和
+       * 「别的 state 更新把队列对象换了个新的」。后者一旦走到 `startLoad`，
+       * 第一件事就是「换歌前的静音」（`bridge.pause`）→ 取链 → 再出声，
+       * 用户听到的就是**歌自己停了**（用户 2026-11-15 报的「连点两次下一首，
+       * 歌曲就会暂停播放」）。原生那帧状态是同步可读的，先问一句最便宜。
+       */
+      const live = lastKnownPlayerState() as { index?: number; playing?: boolean } | null
+      if (live && live.playing === true && live.index === queueState.index) return
+      /*
+       * 队列被编辑（删歌、拖排序）导致「当前曲」换了一首时，**别替用户按播放**。
+       * 他要是正暂停着，就静默把这一首准备好；`autoCancel` 此刻正是「用户在暂停」
+       * 的真值（按播放时会被清掉）。
+       */
+      startLoad(t, queueState.index, { keepPause: autoCancel.current, why: 'queue' })
     }
   }, [queueState])
 
@@ -906,17 +1490,58 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    */
   const lyricsFor = useCallback(async (t: LocalTrack, retry = false): Promise<LyricsDoc> => {
     if (!isOnlineTrack(t)) return loadLyrics(t, { retry })
-    const text = await onlineLyric(t)
-    const lines = parseLrc(text)
-    if (lines.length) return { source: 'online', lines, plain: text }
-    if (text.trim()) return { source: 'online', lines: plainLyricLines(text), plain: text }
+    /*
+     * 断网也要有词：先看上次在线拿到的那份有没有落盘（见 `mediaCache`）。
+     * 在线曲目的音频已经能离线播（`audioCache`），歌词却每次都得重新联网，
+     * 结果就是「没网时歌在响、词是空的」（用户 2026-11 反馈）。
+     * 只有用户点「重新加载」（retry）时才无条件走网络并覆盖存量。
+     */
+    if (!retry) {
+      const saved = await cachedLyric(t.id).catch(() => null)
+      if (saved) {
+        const lines = parseLrc(saved)
+        if (lines.length) return { source: 'online', lines, plain: saved }
+        if (saved.trim()) return { source: 'online', lines: plainLyricLines(saved), plain: saved }
+      }
+    }
+    /*
+     * 平台歌词（按歌曲 id 精确取）。**只有这一路拿到的词才落盘**：
+     * 跨平台兜底 / lrclib 的结果是按歌名模糊匹配来的——歌名对得上、
+     * 时间轴却可能是另一个版本（MV / 加长版 / DJ 版）的，高亮全错。
+     * 缓存是**永久性**的（见 mediaCache），模糊结果一旦落盘就再也
+     * 不会自愈（2026-11-21 平板「海屿你歌词对不上」就是这么来的：
+     * 本平台偶尔失败一次，别家那份错时间轴的词存了一辈子）。
+     * 模糊结果只在**本次会话**显示，下次播再重新问——本平台恢复后
+     * 自然拿到对的那份。
+     */
+    const r = await onlineLyric(t)
+    if (r.text.trim()) {
+      const lines = parseLrc(r.text)
+      if (r.exact) void rememberLyric(t.id, r.text, retry)
+      return lines.length
+        ? { source: 'online', lines, plain: r.text }
+        : { source: 'online', lines: plainLyricLines(r.text), plain: r.text }
+    }
+    /* lrclib 兜底同样不落盘（按歌名模糊匹配，无法核对时间轴） */
     const fallback = await forceOnlineLyrics(t).catch(() => null)
     return fallback ?? { source: 'none', lines: [], plain: '' }
   }, [])
 
   /* 歌词：跟随当前曲目加载（本地优先，miss 后在线），全应用共享 */
   const currentId = currentTrack(queueState)?.id ?? null
+  const curCover = currentTrack(queueState)?.cover ?? null
   curOnlineRef.current = isOnlineTrack(currentTrack(queueState))
+
+  /*
+   * 当前这首的封面**顺手存一份到本地**。
+   *
+   * 断网时在线曲目只有音频能播（缓存过的），封面是 CDN 直链、拿不到就只剩
+   * 一块灰渐变。存一份之后 `coverUrlOf` 会优先用本地那张。
+   * 只存「正在听的这一首」：列表里几十张全下会白烧流量（见 `rememberCover`）。
+   */
+  useEffect(() => {
+    if (curCover) rememberCover(curCover)
+  }, [curCover])
 
   /*
    * 同步给系统媒体会话（SMTC）。
@@ -932,24 +1557,143 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const favs = useFavs()
   const curFavOn = currentId ? favs.has(currentId) : false
 
+  /* ---------------- 播放历史：真正出声了才记 ---------------- */
+  /**
+   * 只在「这首真正开始播」时记一条：`playing` 来自事件流（不能拿意图充数），
+   * 同一首歌只记第一次（暂停再续不算新的一次）。换歌必换 `currentId`，
+   * 所以 ref 一比对就知道该不该记。
+   */
+  const lastHist = useRef<string | null>(null)
+  useEffect(() => {
+    if (!snapshot.playing || !currentId || lastHist.current === currentId) return
+    const t = currentTrack(queueState)
+    if (!t) return
+    lastHist.current = currentId
+    void recordHistory(t)
+  }, [snapshot.playing, currentId, queueState])
+
   /* ---------------- 下一首预告（安卓：息屏时自动接歌靠它） ---------------- */
   /**
    * 往前预告几首。
    *
    * 这个数就是「熄屏后还能自己播多久」：预告表是原生**唯一**的续播依据，
    * 用完就只剩 `ended` 一帧推给 JS（那时 WebView 往往已经被系统摁住，
-   * 没人接就停在两首之间）。原来给 3 首 ≈ 12 分钟，用户听一张歌单听到
-   * 第 4 首就发现「停了、锁屏上还挂着上一首」，反馈过两次。
+   * 没人接就停在两首之间）。所以它不能是 0。
    *
-   * 6 首 ≈ 25 分钟，仍然是个可控的出网量（只取直链、不下载整首；
-   * 整首落盘是另一个 `warmCache`，有它自己的节流）。
+   * **但也不能是 10。** 每一项都要走一遍 `resolvePlayUrl`：注册表重搜 +
+   * 本平台各档取链（并行竞速）+ 700ms 后起跑的「其它平台搜索」，10 项叠起来
+   * 是几十个请求同时打到同一批平台上。真机表现是：点开一首没听过的歌，
+   * 出声之后网就开始被这些后台请求挤，缓冲走走停停，用户以为「加载一半坏了」。
+   *
+   * 用户 2026-11-15 的原话：「顶多预加载下一首我感觉就差不多了」。
+   * 取 2：下一首 + 再下一首兜底（第一首取链失败时表里还有一条，不至于断）。
    */
-  const PREFETCH_N = 6
+  const PREFETCH_N = 2
+  /**
+   * 取链并发度。
+   *
+   * 4 路在真机上被量出来是会拖慢「点歌那一下」的（2026-11-15 A/B：同一批歌
+   * 3.7s vs 2.1s）——每条 `resolvePlayUrl` 内部本来就有三条泳道在跑。
+   * 现在整表只有 2 首，直接串行：**任何时刻都不和用户点的那首歌抢请求**。
+   */
+  const PREFETCH_CONC = 1
   /** 每次重算都换号：旧轮次在下一个 await 边界自己退出（同 resolvePlayUrl 的 cancel） */
   const prefetchSeq = useRef(0)
   const prefetchTimer = useRef(0)
+  /**
+   * 上一次「按状态帧补表」的时间。
+   *
+   * 补表原来只有 `prefetchTimer` 一条路（1200ms setTimeout），而熄屏后 WebView 会把
+   * 定时器节流到分钟级，在线歌的预告表就补不上——原生放完手里那两首就停在曲末。
+   * 现在多一条：原生每 250ms 推一帧（走 evaluateJavascript，不受定时器节流），
+   * 帧里带 `pf`（表里还剩几首），这里看到 0 就补。这个 ref 只是防抖，别每帧都取链。
+   */
+  const pfBeatAt = useRef(0)
+  /**
+   * 有没有一次补表正在进行。
+   *
+   * 没有这个闸会出现**自我取消的死循环**（2026-11-17 真机日志确认）：
+   *
+   *   状态帧每 250ms 一帧，`pf=0` 一直成立 → 每 12 秒触发一次补表 →
+   *   每次 `buildPrefetch` 开头都 `++prefetchSeq`，把**上一次还没跑完**的那次取消 →
+   *   上一次在 `await resolvePlayUrl` 里返回，`seq !== prefetchSeq` 直接退出，
+   *   一张表都没递出去 → `pf` 还是 0 → 12 秒后又来一遍。
+   *
+   * 日志里的形状是：`pf beat 补表 pf=0` 每 10~16 秒重复一次，而
+   * `setPrefetch n=` 一行都没有 —— 也就是说原生手里那张表**一直是空的**，
+   * 在线歌放到当前这首结束就没人接；能接着放全靠 `ended` 交给 JS 走完整加载
+   * （而这条链在后台随时会被冻住）。这正是「放着放着就停/只在两首之间来回」。
+   *
+   * 所以：补表期间不许再起一次；真需要立刻重算（换歌、改队列）时，
+   * 由调用方先 `prefetchSeq.current++` 把它作废，那个口子留给 `buildPrefetch` 的
+   * 常规入口，不在这里堵。
+   */
+  const pfBusy = useRef(false)
+  /** 正在跑的那一轮是「从哪首算起」：用来区分「纯重算」和「真换歌」 */
+  const pfRunningIdx = useRef(-1)
+  /** 跑的过程中来的重算请求（只留最新的一个） */
+  const pfPending = useRef<QueueState | null>(null)
+  /**
+   * 两次补表之间至少隔多久。
+   *
+   * 正常情况下 12 秒（一次取链最多十来秒，别再往上叠）。但如果这次**一首都没取到**，
+   * 说明平台这会儿正在限流 / 没网 —— 再按 12 秒硬刷，等于用更高的频率去撞同一堵墙，
+   * 反而把限流拖得更久。空表之后退到 60 秒。
+   */
+  const pfGap = useRef(12_000)
+  /**
+   * 上一次**真的递交成功**的那张表长什么样（起点 + 循环模式 + 计划下标）。
+   *
+   * 为什么需要：定时器（队列一变就 1.2s 重排）和 `visibilitychange` 会在同一首
+   * 歌上反复触发重算，每次都要走 2 条 `resolvePlayUrl`。真机日志里一首 4 分钟
+   * 的歌能看到 5 次 `pf plan base=0/4 -> [1,2] send=2` —— 同样的两首歌被反复
+   * 取链，白烧平台配额（限流会直接抬高失败率）。
+   *
+   * 同一份计划在 2 分钟内已经递交过就不再取链；`force` 的那条路（原生 pf=0，
+   * 表真的空了）不受这个限制。
+   */
+  const pfSentSig = useRef('')
+  const pfSentAt = useRef(0)
   const queueRef = useRef(queueState)
-  queueRef.current = queueState
+  /*
+   * 镜像只在**状态真的变化之后**对齐，不在渲染期赋值。
+   *
+   * 渲染期赋值（`queueRef.current = queueState`）看起来更及时，但它会把
+   * `commitQueue` 刚写进去的「乐观值」冲回上一版：`setQueueState` 提交之前，
+   * 任何一次无关的重渲染（快照 250ms 一帧）都会先把旧队列写回镜像，
+   * 「连点两下下一首」第二下就基于旧队列算回了同一首。
+   */
+  useEffect(() => { queueRef.current = queueState }, [queueState])
+  /**
+   * 用户动作改队列：**先写镜像，再交给 React**。
+   *
+   * 为什么不能只在 `setQueueState(updater)` 里做（以前的写法就是这样）：
+   *
+   *   · updater 必须是纯函数，React 有权**重放**它（并发渲染回滚、重新计算队列）。
+   *     以前 `next()` / `playList()` 把 `startLoad()` 这种带副作用的调用塞在
+   *     updater 里 —— 一旦被重放，就凭空多出一次「换歌前的静音 + 取链」，
+   *     用户听到的就是**歌自己停了**，而且时序随机、极难复现。
+   *   · 副作用里还要读「下一首是谁」，那必须读**算完之后**的状态；渲染还没发生，
+   *     闭包里的 `queueState` 是旧的。
+   *
+   * 现在的分工：动作函数同步算出新队列 → 写镜像（连点两下也一步一算）→
+   * `setQueueState` 只负责把这份新状态交给 React → 再在外面发起加载。
+   */
+  const commitQueue = useCallback((st: QueueState) => {
+    queueRef.current = st
+    setQueueState(st)
+  }, [])
+  /**
+   * 最新一版 `buildPrefetch`。
+   *
+   * **不能把 `buildPrefetch` 直接放进 effect 的依赖里**：它 `useCallback` 的依赖
+   * 是 `favs`，而 `useFavs()` 每次都返回一个新对象 —— 这个函数每帧都是新的，
+   * effect 于是每帧「清定时器 → 重排定时器」，1200ms 的定时器在播放时
+   * （位置 250ms 一帧）**永远等不到触发**。2026-11-15 实测：`[pf]` 一行日志都没有，
+   * 原生 `setPrefetch` 也从没被调用过 —— 也就是说「预告表」这条链路当时压根没跑，
+   * 息屏后能连着听几首全靠运气。
+   */
+  const buildPrefetchRef = useRef<(q: QueueState, opts?: { force?: boolean }) => Promise<void>>(async () => {})
 
   /**
    * 把「接下来会放的几首」的直链递给原生。
@@ -962,9 +1706,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    *   · 单曲循环 → 同一首预告 N 份（原生放完重开这条链，不再等 JS）
    *   · 走到队列末尾 → `advance` 返回 null，表就短一截
    */
-  const buildPrefetch = useCallback(async (base: QueueState) => {
+  const buildPrefetch = useCallback(async (base: QueueState, opts?: { force?: boolean }) => {
     if (!isAndroid) return
+    /*
+     * 同一个「起点」的重算没有任何意义 —— 挡在门外。
+     *
+     * 2026-11-17 真机日志里出现过 `pf abort 被新一轮顶掉` 连着来：状态帧那条路
+     * 已经被 `pfBusy` 挡住了，但**定时器（队列一变就 1.2s）和 `visibilitychange`
+     * 这两条路没挡**。它们在同一首歌上反复重算，每次都把上一轮还在 `await
+     * resolvePlayUrl` 里的那次作废，结果又是「一轮都没递出去，pf 一直是 0」。
+     *
+     * 注意不能简单 return：换歌时必须让旧表作废（否则原生会拿上一首算出来的
+     * 「下一首」去放别的歌）。判据就是起点下标：同一下标＝纯重算，记一笔排队；
+     * 下标变了＝真的换歌，放行并打断旧的。
+     */
+    if (pfBusy.current) {
+      if (base.index === pfRunningIdx.current) {
+        pfPending.current = base
+        return
+      }
+      void bridge.trace(`pf 换歌打断 base=${base.index} 旧=${pfRunningIdx.current}`)
+    }
     const seq = ++prefetchSeq.current
+    pfBusy.current = true
+    pfRunningIdx.current = base.index
+    try {
     const plan: { index: number; track: LocalTrack }[] = []
     let walk = base
     for (let k = 0; k < PREFETCH_N; k++) {
@@ -977,41 +1743,155 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (walk.repeat !== 'one' && plan.some(x => x.index === walk.index)) break
       plan.push({ index: walk.index, track: t })
     }
-    const items: Record<string, unknown>[] = []
-    for (const it of plan) {
-      if (seq !== prefetchSeq.current) return
-      const t = it.track
-      const head = {
-        index: it.index,
-        title: t.title,
-        artist: t.artist,
-        album: t.album,
-        cover: t.cover ?? effectiveSong(t.id)?.img ?? '',
-        fav: favs.has(t.id),
-        duration: t.duration || 0,
-      }
-      if (!isOnlineTrack(t)) { items.push({ ...head, path: t.path }); continue }
-      try {
-        const r = await resolvePlayUrl(t, { cancel: () => seq !== prefetchSeq.current })
-        items.push({ ...head, url: r.url, duration: r.duration || head.duration })
-      } catch {
-        /* 单条取不到就少撑一首：不写进表，原生放到那儿会走老路（交还前端） */
+    /*
+     * **同一份计划刚递交过就别再取链。**
+     *
+     * 定时器（队列一变就 1.2s 重排）和 `visibilitychange` 会在同一首歌上反复
+     * 触发重算，算出来的还是同样两首。2026-11-17 真机日志里，一首 4 分钟的歌
+     * 出现 5 次 `pf plan base=0/4 -> [1,2] send=2` —— 也就是同两首歌被取链
+     * 5 遍，白烧平台配额（限流本身就是失败率的一大来源）。
+     *
+     * `force` 那条路（原生状态帧里 pf=0，表真的空了）不受限制：宁可多取一次，
+     * 也不能让播放器手里没货。
+     */
+    /* 计划里带 track id：队列被重排/换歌但下标恰好相同时，不能当成同一份计划 */
+    const sig = `${base.index}|${base.repeat}|${base.order}|` +
+      plan.map(x => `${x.index}:${x.track.id}`).join(',')
+    if (!opts?.force && sig === pfSentSig.current && Date.now() - pfSentAt.current < 120_000) {
+      void bridge.trace(`pf skip 同一计划 [${plan.map(x => x.index).join(',')}] base=${base.index}`)
+      return
+    }
+    /*
+     * 并发取链，不再一首一首 await。
+     *
+     * 串行的代价在「秒」这个量级上：每首 1~3 秒，10 首就是十几秒，而页面一进
+     * 锁屏就被冻住——冻住那一刻拿到几首算几首。用户点开播放随手熄屏时，串行
+     * 版往往一首都还没递出去，于是「只播一首就停」。
+     */
+    const slots: (Record<string, unknown> | null)[] = new Array(plan.length).fill(null)
+    let cursor = 0
+    const worker = async () => {
+      for (;;) {
+        const i = cursor++
+        if (i >= plan.length || seq !== prefetchSeq.current) return
+        const t = plan[i].track
+        const head = {
+          index: plan[i].index,
+          title: t.title,
+          artist: t.artist,
+          album: t.album,
+          cover: t.cover ?? effectiveSong(t.id)?.img ?? '',
+          fav: favs.has(t.id),
+          duration: t.duration || 0,
+        }
+        if (!isOnlineTrack(t)) { slots[i] = { ...head, path: t.path }; continue }
+        try {
+          /*
+           * **等用户的手停下来再取链。**
+           *
+           * 一条 `resolvePlayUrl` 里至少三条泳道（本平台竞速 + 兜底 + 700ms 后起跑的
+           * 跨平台搜索），每条都要解析 JSON、走一遍桥；这在用户滑列表的时候插进去，
+           * 就是一次几十毫秒的主线程卡顿。预告表本来就不着急（当前这首已经在放了），
+           * 让它排在手指后面完全没损失。
+           */
+          await waitIdle(700)
+          if (seq !== prefetchSeq.current) return
+          const r = await resolvePlayUrl(t, { cancel: () => seq !== prefetchSeq.current })
+          slots[i] = { ...head, url: r.url, duration: r.duration || head.duration }
+        } catch (e) {
+          /*
+           * 单条取不到就少撑一首：不写进表，原生放到那儿会走老路（交还前端）。
+           *
+           * 但**必须留下原因**：`send=0` 这种「计划有两首、一首都没取到」是
+           * 「后台只循环两首」的直接原因（表一直是空的），以前这里是静默 catch，
+           * 真机上只能看到 `send=0` 却不知道是限流、断网还是没源。
+           */
+          void bridge.trace(`pf 取链失败 idx=${plan[i].index} "${t.title}" ${(e as Error)?.message ?? String(e)}`)
+        }
       }
     }
-    if (seq !== prefetchSeq.current) return
+    await Promise.all(Array.from({ length: Math.min(PREFETCH_CONC, plan.length) }, worker))
+    if (seq !== prefetchSeq.current) { void bridge.trace('pf abort 被新一轮顶掉'); return }
+    /* 取链失败的项留空，压掉——原生按 FIFO 播，缺一首就是少撑一首 */
+    const items = slots.filter(Boolean) as Record<string, unknown>[]
+    /*
+     * 一行日志要能回答三个问题：从哪首算起、算出来是哪几首、真递过去了几首。
+     * 「只剩两首循环」这类症状，靠这一行就能看出是「计划本来就只有两首」还是
+     * 「计划有 4 首但取链只成功 2 首」。
+     */
+    void bridge.trace(
+      `pf plan base=${base.index}/${base.queue.length} -> [${plan.map(x => x.index).join(',')}] send=${items.length}`,
+    )
+    /* 一首都没取到 → 退到 60 秒再试（见 pfGap 的注释） */
+    pfGap.current = items.length > 0 ? 12_000 : 60_000
+    /* 记住这份表：同样的计划 2 分钟内不再重取（见上面 sig 的注释） */
+    if (items.length > 0) {
+      pfSentSig.current = sig
+      pfSentAt.current = Date.now()
+    }
     void bridge.invoke('next_prefetch', { items }).catch(() => { /* 桌面端没有这条命令 */ })
+    } finally {
+      pfBusy.current = false
+      pfRunningIdx.current = -1
+      /*
+       * 跑的过程中有人要重算（队列/循环模式/喜欢状态变了）：等这一轮收工再算。
+       * 现在就重算等于把刚取到的几首扔掉——真机上「只剩两首循环」那阵子，
+       * 一半的时间花在重复取同一批歌上。
+       */
+      const pend = pfPending.current
+      pfPending.current = null
+      /*
+       * 只有**内容真的变了**才重算。
+       *
+       * 之前写的是 `pend.queue !== base.queue`（引用比较）—— `commitQueue` 每次都
+       * 造新对象，于是「同一队列的重算请求」也会被当成换队列，收尾时立刻再算一轮，
+       * 新一轮又把下一轮顶掉…… 真机表现就是 `pf abort 被新一轮顶掉` 每几秒一次、
+       * `send=` 一次都没有。比内容（`queueFingerprint`）才断得干净。
+       */
+      if (pend && queueFingerprint(pend) !== queueFingerprint(base)) {
+        void buildPrefetchRef.current(pend)
+      }
+    }
   }, [favs])
+  /* 每帧同步一次：定时器/可见性回调都从 ref 取，避免被「每帧都是新函数」拖着重排 */
+  buildPrefetchRef.current = buildPrefetch
 
   /*
    * 队列一变就重算预告（当前曲 / 顺序 / 循环模式都会影响「下一首是谁」）。
-   * 延迟 1.5s：切歌那一下先把当前这首的链取好、出声，别和它抢平台请求。
+   *
+   * **必须等当前这首真的出声（`playing`）再排。**
+   *
+   * 2026-11-15 用户报「加载歌曲变慢了」：上一版为了抢在熄屏冻结之前，把延迟压到
+   * 0.3s 并开 4 路并发取链——可这 0.3s 正好撞上「点歌那一下」自己还在取链。
+   * 一条 `resolvePlayUrl` 内部就有本平台音源竞速 + 兜底平台 + 700ms 后起跑的
+   * 「其它平台搜索」三条泳道，4 条预取叠上去就是十几个请求同时打同一批平台，
+   * QQ/酷狗一限流，当前这首的链就排在后面 —— 用户等的那几秒全花在这儿。
+   * 改成「当前这首出声了再排」：此刻它的链已经拿到，预取只和**下载**抢带宽，
+   * 抢带宽有 `warmCache` 那套节流兜着，不会拖慢起播。
+   *
+   * 冻结风险仍然由下面那条 `visibilitychange` 兜：真·点开就锁屏的，那条会再递一次。
    */
   useEffect(() => {
     if (!isAndroid) return
     window.clearTimeout(prefetchTimer.current)
-    prefetchTimer.current = window.setTimeout(() => { void buildPrefetch(queueRef.current) }, 1500)
+    if (!snapshot.playing) return
+    prefetchTimer.current = window.setTimeout(() => { void buildPrefetchRef.current(queueRef.current) }, 1200)
     return () => window.clearTimeout(prefetchTimer.current)
-  }, [queueState.index, queueState.queue, queueState.repeat, queueState.order, buildPrefetch])
+  }, [queueState.index, queueState.queue, queueState.repeat, queueState.order, snapshot.playing])
+
+  /*
+   * 切后台 / 熄屏前最后一搏：`visibilitychange` 是页面彻底被冻住之前**还能跑完
+   * 的最后一个同步钩子**。这里再递一次整表，把「刚点开就锁屏」这种最常见的情况
+   * 兜住；取链是异步的，能不能跑完看运气，但试一次不亏。
+   */
+  useEffect(() => {
+    if (!isAndroid || typeof document === 'undefined') return
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') void buildPrefetchRef.current(queueRef.current)
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
 
   /* ---------------- 把手边这几首提前落盘（停着的时候最该干这事） ---------------- */
   const warmSeq = useRef(0)
@@ -1034,15 +1914,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!currentTrack(queueState)) return
     const seq = ++warmSeq.current
     /*
-     * 暂停时一次补 8 首、播放中只补 1 首。
+     * **只补下一首，播放和暂停都一样。**
      *
-     * 用户第二次提这件事：「暂停时还是会停止加载」。原来只补 3 首——那是按
-     * 「暂停一下马上就走」估的，实际用户会停很久，听两首就发现又没了。
-     * 8 首 ≈ 40MB ≈ 半小时，够撑过任何一次「放下手机」。
-     * 下载是**串行 await** 的（warmCache 现在返回 Promise），恢复播放时
-     * 不会有一堆下载跟当前这首抢带宽。
+     * 这里以前是「暂停时连下 8 首、播放中补 1 首」，理由是「暂停时带宽闲着，
+     * 多下几首下次切歌就秒切」。真机上的代价是：8 首整曲串行下载要跑几十秒，
+     * 用户随手按了播放，**正在下载的那一首不会让路**（`warmCache` 只是一次
+     * 阻塞式 download，中途不可取消），于是正在听的这首开始卡、缓冲走走停停。
+     * 用户 2026-11-15 的原话：「预加载太多了，导致卡顿，顶多预加载下一首」。
+     *
+     * 现在的分工：
+     *   · 当前这首 —— 出链成功就顺手落盘（见 startLoad 里的 `warmCache`，延迟 6 秒）；
+     *   · 下一首   —— 这里补，播放中 12 秒后起手、暂停时 1.2 秒后起手；
+     *   · 再往后   —— 一朵都不碰，真放到它时再取一次链（现在有预告表 2 首兜底）。
      */
-    const ahead = snapshot.playing ? 1 : 8
+    const ahead = 1
     const delay = snapshot.playing ? 12000 : 1200
     const seen = new Set<string>()
     const timer = window.setTimeout(() => {
@@ -1061,6 +1946,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             /* 已经有缓存的别再去要一次直链：既慢又快被平台限流 */
             if (await hasCachedAudio(nt.id)) continue
             if (seq !== warmSeq.current) return
+            /* 同预告表：用户还在滑/切歌时别插队（一次取链就是三条请求的连锁） */
+            await waitIdle(700)
+            if (seq !== warmSeq.current) return
             const r = await resolvePlayUrl(nt, { cancel: () => seq !== warmSeq.current })
             /* await：串行落盘，避免暂停期间开一堆下载（恢复播放时抢带宽） */
             await warmCache(nt.id, r.url, 0)
@@ -1075,6 +1963,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   /* 元数据里这几个字段都要进依赖：冷启动时封面是**后来补**的（见下面的封面补全），
      只在 currentId/playing 变化时推的话，通知栏那张卡会一直停在「应用图标 + 疏音」。 */
   const metaTrack = currentTrack(queueState)
+  /*
+   * 封面落盘缓存的变化版本：离线时原生拿 CDN 直链只会失败（通知/锁屏黑封面），
+   * 所以 meta 里的 cover 要优先换成本地路径；缓存是异步补的（boot 载索引、
+   * rememberCover 1.5s 后落盘），落盘完成版本号 +1，靠它在依赖里触发重推。
+   */
+  const cacheVer = mediaCacheVersion()
   useEffect(() => {
     if (!bridge.isTauri && !isAndroid) return
     const t = currentTrack(queueState)
@@ -1102,10 +1996,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       artist: t.artist ?? '',
       album: t.album ?? '',
       playing: snapshot.playing,
-      cover: t.cover ?? '',
+      cover: cachedCoverPath(t.cover) ?? t.cover ?? '',
       fav: curFavOn,
     }).catch(() => { /* 系统媒体会话不可用不影响播放 */ })
-  }, [currentId, snapshot.playing, curFavOn,
+    /*
+     * 留痕：通知栏「切了歌但信息不跟」时，最需要分清的是
+     *   · 前端根本没推（这条不出现）→ 是 `currentId` 没变，队列下标没动；
+     *   · 推了但原生没吃（原生侧有 `meta <-` 那条，成对看）。
+     */
+    void bridge.trace(`meta push "${t.title ?? ''}" idx=${queueState.index}`)
+  }, [currentId, snapshot.playing, curFavOn, cacheVer,
       metaTrack?.title, metaTrack?.artist, metaTrack?.album, metaTrack?.cover])
 
   /*
@@ -1120,6 +2020,37 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 但把 prog 量化到 1%，否则一首歌要发几万次无意义的重复包。
    */
   const lastFloat = useRef('')
+  /**
+   * 整首歌词的时间轴 → 原生（每首歌只推一次）。
+   *
+   * 锁屏播放页的歌词以前靠下面那条 250ms 的 `float_lyric` 推「当前句」，中间压着
+   * React 的提交阈值（位置跨过半秒才提交一次）和浏览器对不可见页面的定时器节流——
+   * 两段延迟叠起来，金线比歌声慢半句到一句（用户：「歌词跟不上歌曲的进度」）。
+   * 现在把整张表交给原生，让它拿 `currentPosition` 自己算，误差只剩一拍（≤250ms）。
+   * 一张表几十行、换歌才发一次，代价可以忽略。
+   */
+  const lastTimeline = useRef('')
+  useEffect(() => {
+    if (!isAndroid) return
+    /* 切歌立刻清空：新歌开头几秒不该还唱着上一首的歌词 */
+    lastTimeline.current = ''
+    void bridge.invoke('lyric_timeline', { lines: [] }).catch(() => {})
+  }, [currentId, isAndroid])
+  useEffect(() => {
+    if (!isAndroid) return
+    const lines = lyrics?.lines ?? []
+    if (!lines.length) return
+    const head = lines[0]
+    const tail = lines[lines.length - 1]
+    const sig = `${lines.length}|${head?.time ?? ''}|${head?.text ?? ''}|${tail?.time ?? ''}`
+    if (sig === lastTimeline.current) return
+    lastTimeline.current = sig
+    void bridge.invoke('lyric_timeline', {
+      lines: lines.map(l => ({ t: l.time, x: l.text ?? '' })),
+    }).catch(() => { /* 推不过去只是退回老路（前端推当前句），不影响播放 */ })
+    /* 真机上没有 logcat 可看：留个记号，排查「锁屏歌词不动」时一眼就知道表有没有送到 */
+    try { localStorage.setItem('__tl', `${lines.length}|${Date.now()}`) } catch { /* 隐私模式写不进去 */ }
+  }, [lyrics, isAndroid])
   useEffect(() => {
     if (!isAndroid) return
     const lines = lyrics?.lines ?? []
@@ -1401,16 +2332,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const skip = onlineNow ? 0 : window.setTimeout(() => {
       if (failCount.current < 3) {
         failCount.current += 1
-        setQueueState(q => {
-          const st = skipNext(q)
-          if (!st) return q
-          lastPlayedIndex.current = st.index
-          loadedRef.current = trackKey(st.queue[st.index])
-          resumePos.current = 0
-          startLoad(st.queue[st.index], st.index)
-          const { event: _e, ...rest } = st
-          return rest
-        })
+        const st = skipNext(queueRef.current)
+        if (!st) return
+        const { event: _e, ...rest } = st
+        const t = rest.queue[rest.index]
+        if (!t) return
+        lastPlayedIndex.current = rest.index
+        loadedRef.current = trackKey(t)
+        resumePos.current = 0
+        commitQueue(rest)
+        startLoad(t, rest.index, { why: 'badfile' })
       } else {
         failCount.current = 0
         void bridge.stop()
@@ -1443,15 +2374,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   /* ---------------- 动作 ---------------- */
 
   const playList = useCallback((tracks: LocalTrack[], index: number) => {
-    setQueueState(q => {
-      const st = playTracks(q, tracks, index)
-      lastPlayedIndex.current = st.index
-      loadedRef.current = trackKey(st.queue[st.index])
-      resumePos.current = 0
-      startLoad(st.queue[st.index], st.index)
-      const { event: _e, ...rest } = st
-      return rest
-    })
+    /* 用户点了「播放全部 / 播这首」= 明确要听：解开暂停锁（见 resumeIntent） */
+    resumeIntent()
+    const st = playTracks(queueRef.current, tracks, index)
+    const { event: _e, ...rest } = st
+    const t = rest.queue[rest.index]
+    if (!t) return
+    lastPlayedIndex.current = rest.index
+    loadedRef.current = trackKey(t)
+    resumePos.current = 0
+    commitQueue(rest)
+    startLoad(t, rest.index, { why: 'list' })
   }, [])
 
   /**
@@ -1466,64 +2399,168 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 而且听完这首要等中间几十首放完才轮得到它后面那首。
    */
   const playOne = useCallback((track: LocalTrack) => {
-    setQueueState(q => {
-      const at = q.queue.findIndex(t => t.id === track.id)
-      // 已经在队列里：跳过去就行，别插入重复的一条
-      if (at >= 0) {
-        lastPlayedIndex.current = at
-        loadedRef.current = trackKey(track)
-        resumePos.current = 0
-        startLoad(track, at)
-        return { ...q, index: at }
-      }
-      const base = enqueue(q, track, 'next')
-      const index = base.queue.findIndex(t => t.id === track.id)
-      lastPlayedIndex.current = index
-      loadedRef.current = trackKey(track)
-      resumePos.current = 0
-      startLoad(track, index)
-      return { ...base, index }
-    })
+    /* 用户点名要这首歌：解开暂停锁（见 resumeIntent） */
+    resumeIntent()
+    const q = queueRef.current
+    const at = q.queue.findIndex(t => t.id === track.id)
+    // 已经在队列里：跳过去就行，别插入重复的一条
+    const nextState: QueueState = at >= 0
+      ? { ...q, index: at }
+      : (() => {
+        const base = enqueue(q, track, 'next')
+        return { ...base, index: base.queue.findIndex(t => t.id === track.id) }
+      })()
+    if (nextState.index < 0) return
+    lastPlayedIndex.current = nextState.index
+    loadedRef.current = trackKey(track)
+    resumePos.current = 0
+    commitQueue(nextState)
+    startLoad(track, nextState.index, { why: 'one' })
   }, [])
 
   const next = useCallback(() => {
-    setQueueState(q => {
-      const st = skipNext(q)
-      if (!st) return q
-      lastPlayedIndex.current = st.index
-      loadedRef.current = trackKey(st.queue[st.index])
-      resumePos.current = 0
-      startLoad(st.queue[st.index], st.index)
-      const { event: _e, ...rest } = st
-      return rest
-    })
+    /* 用户按了「下一首」= 想听：解开暂停锁 */
+    resumeIntent()
+    const st = skipNext(queueRef.current)
+    if (!st) return
+    const { event: _e, ...rest } = st
+    const t = rest.queue[rest.index]
+    if (!t) return
+    lastPlayedIndex.current = rest.index
+    loadedRef.current = trackKey(t)
+    resumePos.current = 0
+    commitQueue(rest)
+    startLoad(t, rest.index, { why: 'next' })
   }, [])
 
   /* 取链失败倒计时要能调到「下一首」：`next` 定义在 startLoad 之后，用 ref 转一道 */
   skipToNext.current = next
 
   const prev = useCallback(() => {
-    setQueueState(q => {
-      const st = skipPrev(q)
-      if (!st) return q
-      lastPlayedIndex.current = st.index
-      loadedRef.current = trackKey(st.queue[st.index])
-      resumePos.current = 0
-      startLoad(st.queue[st.index], st.index)
-      const { event: _e, ...rest } = st
-      return rest
-    })
+    resumeIntent()
+    const st = skipPrev(queueRef.current)
+    if (!st) return
+    const { event: _e, ...rest } = st
+    const t = rest.queue[rest.index]
+    if (!t) return
+    lastPlayedIndex.current = rest.index
+    loadedRef.current = trackKey(t)
+    resumePos.current = 0
+    commitQueue(rest)
+    startLoad(t, rest.index, { why: 'prev' })
   }, [])
+
+  /**
+   * 「按了播放，原生到底响了没有」的回查（见 `resumeGuard` 的说明）。
+   *
+   * 只在**用户想要它响**的时候挂；900ms 是留给 `resume` 落地 + 一帧 state（250ms）
+   * 再加一点余量的时长。到时原生还没报 `playing`，就说明这台播放器救不回来
+   * （放完 / 被 stop 过 / 解码器废了），直接走完整加载把它重建一遍 —— 位置不丢。
+   */
+  const armResumeGuard = (track: LocalTrack, index: number) => {
+    window.clearTimeout(resumeGuard.current)
+    const at = snapRef.current.position
+    let tries = 0
+    const check = () => {
+      resumeGuard.current = 0
+      /* 用户在这段里又按了暂停：那就该停着，别替他放 */
+      if (autoCancel.current) return
+      const live = lastKnownPlayerState() as { playing?: boolean; want?: boolean; track_path?: string | null; track_url?: string | null } | null
+      if (live && live.playing === true) return
+      /*
+       * 原生说「我要播，只是还没出声」（`want === true`）：那是在准备，
+       * 不是死路。再给它一次机会——网络曲目 prepare + 首段缓冲偶尔真的超过 900ms，
+       * 这时候推倒重来反而会让进度归零、白等一轮。最多再看两次。
+       */
+      if (live?.want === true && (live.track_path || live.track_url) && tries < 2) {
+        tries += 1
+        resumeGuard.current = window.setTimeout(check, 1200)
+        return
+      }
+      void bridge.trace(`resumefail idx=${index} at=${at.toFixed(1)} live=${live ? 1 : 0} want=${live?.want === true ? 1 : 0}`)
+      autoCancel.current = false
+      lastPlayedIndex.current = index
+      loadedRef.current = trackKey(track)
+      setSnapshot(s => ({ ...s, playing: true }))
+      startLoad(track, index, { startAt: at, autoplay: true, why: 'resume-dead' })
+    }
+    resumeGuard.current = window.setTimeout(check, 900)
+  }
 
   const togglePlay = useCallback(() => {
     /*
      * 正在为下一首取链：这一刻点播放没有意义，而且会 `resume()` 把**上一首**放出声，
      * 看起来就像「切歌失败了，还是那首」。等加载结束再说。
      */
-    if (loadingRef.current) return
     /* 读 ref 而不是闭包里的 `snapshot`：同一个渲染帧里连点两下时，
        两次拿到的 `snapshot` 是同一份，第二下会被算成第一下的重复 */
+    /*
+     * 这一下是用户的动作：先领一个新代号。
+     * 之后无论走「暂停」「续播」还是「重新加载」，原生都拿它当分界线——
+     * 代号更旧的加载即使还在路上，也只能准备音源、不许出声（见 epochRef）。
+     */
+    const ep = bumpEpoch()
     const nowPlaying = snapRef.current.playing
+    const t0 = currentTrack(queueState)
+    const live = lastKnownPlayerState() as {
+      index?: number
+      track_path?: string | null
+      track_url?: string | null
+      want?: boolean
+      playing?: boolean
+    } | null
+    const onNative = !!t0 && !!live && live.index === queueState.index
+      && (!!live.track_path || !!live.track_url)
+
+    /*
+     * **①「还没有声音，但已经在往响的路上」——这一下是「停」。**
+     *
+     * 覆盖两个窗口，用户报的「点了暂停它反而响起来」正是这两处：
+     *   · 正在取链（`loadingRef`，`play_url` 还没下发）；
+     *   · `play_url` 已下发、prepare 还在跑——原生此刻 `want === true`，
+     *     几秒后 `onPrepared` 就会 `start()`。界面上这会儿显示的是「播放」图标
+     *     （因为确实还没出声），用户点它当然是想「别放了」。
+     *
+     * 以前这两个窗口的点击被当成「我要听」：`bridge.resume()` 把 `wantPlay`
+     * 又写回 true，或者干脆继续往下取链（`autoplay: true`），于是几秒后自己响。
+     * 现在统一翻成取消：`autoCancel` 让这一轮取链落地时不出声，`pause()` 把
+     * 原生那边的待播意图撤掉。真想让它在加载完之后播，再点一下就行（走 ②）。
+     */
+    if (!nowPlaying && (loadingRef.current || (live?.want === true && live?.playing !== true))) {
+      playWant.current = { want: false, until: performance.now() + 800 }
+      autoCancel.current = true
+      snapRef.current = { ...snapRef.current, playing: false }
+      setSnapshot(s => (s.playing ? { ...s, playing: false } : s))
+      void bridge.pause(ep, 'toggle:cancel-loading')
+      return
+    }
+    /*
+     * **② 原生手上就是这首、而且已经停了 → 一个 resume 就够。**
+     *
+     * 这是「点了没反应」最要命的那个形状：前端记的 `loadedRef` 和原生实际状态
+     * 一旦脱钩（会话恢复、服务被回收重建、上一轮加载走了缓存分支），
+     * 点播放就会掉进 `startLoad` → 在线曲目要重新取链 → 网络一慢就十几秒没有声音，
+     * 而界面上那个键看着完全正常。原生本来就有这首、位置也对，一个 resume 就够了。
+     * `lastKnownPlayerState()` 是同步读最近一帧，不引入 await。
+     */
+    if (!nowPlaying && onNative) {
+      playWant.current = { want: true, until: performance.now() + 800 }
+      autoCancel.current = false
+      snapRef.current = { ...snapRef.current, playing: true }
+      setSnapshot(s => ({ ...s, playing: true }))
+      loadedRef.current = trackKey(t0!)
+      armResumeGuard(t0!, queueState.index)
+      void bridge.resume(ep, 'toggle:resume-native')
+      return
+    }
+    /*
+     * 取链中的点击已经在 ① 里统一处理成「取消」了。
+     *
+     * 原来这里有一条「加载中点一下 = 我想听」的分支（`loadingThis`），本意是修
+     * 「冷启动恢复会话的那几秒里点播放没反应」。代价是：用户点了一首没听过的歌，
+     * 还在取链时改主意点一下，前端把这一下当成「我要听」，等链回来 `autoplay: true`
+     * ——于是声音在用户已经按过暂停之后自己响起来。现在宁可让他多点一下。
+     */
     if (!nowPlaying) {
       // 恢复上次曲目后 Rust 侧尚未加载任何音频：从上次进度接着播，否则是「点了没声」
       const t = currentTrack(queueState)
@@ -1552,7 +2589,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         loadedRef.current = trackKey(t)
         lastPlayedIndex.current = queueState.index
         setSnapshot(s => ({ ...s, playing: true, position: start || s.position }))
-        startLoad(t, queueState.index, { startAt: start, autoplay: true })
+        startLoad(t, queueState.index, { startAt: start, autoplay: true, why: 'toggle:reload' })
         return
       }
     }
@@ -1569,9 +2606,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     playWant.current = { want, until: performance.now() + 800 }
     snapRef.current = { ...snapRef.current, playing: want }
     setSnapshot(s => ({ ...s, playing: want }))
-    if (want) void bridge.resume()
-    else void bridge.pause()
-  }, [snapshot.duration, queueState])
+    if (want) {
+      autoCancel.current = false
+      /* 同上：这条 resume 也可能是条静默命令，留一次回查 */
+      if (t0) armResumeGuard(t0, queueState.index)
+      void bridge.resume(ep, 'toggle:play')
+    } else {
+      /*
+       * 暂停要能「拦住还没回来的那一轮取链」。
+       *
+       * 此刻原生手里可能根本没有播放器（在线歌还在取链），`pause()` 落到空处；
+       * 几秒后链回来了，`startLoad` 如果照旧 `autoplay: true` 下发，声音就会在
+       * 用户已经按过暂停之后响起来 —— 这就是「暂停了还是会继续播放音乐」。
+       * 置上这个标记，那一轮只建播放器不出声（见 autoCancel）。
+       */
+      autoCancel.current = true
+      void bridge.pause(ep, 'toggle:pause')
+    }
+  }, [snapshot.duration, queueState, bumpEpoch])
 
   const seek = useCallback((secs: number) => {
     setSnapshot(s => ({ ...s, position: secs, }))
@@ -1678,7 +2730,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (q.index >= 0 && q.queue[q.index]?.id === id) {
         if (next.index !== q.index) {
           lastPlayedIndex.current = next.index
-          startLoad(next.queue[next.index], next.index)
+          startLoad(next.queue[next.index], next.index, { why: 'remove' })
         } else {
           lastPlayedIndex.current = -1
         }
@@ -1715,7 +2767,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           loadedRef.current = null
           if (snapRef.current.playing) {
             loadedRef.current = trackKey(t)
-            startLoad(t, next.index)
+            startLoad(t, next.index, { why: 'removeBatch' })
           } else {
             setSnapshot(s => ({ ...s, position: 0, duration: t.duration }))
           }
@@ -1735,11 +2787,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [])
 
   /** 重载当前在线曲目：keepProgress 时从当前位置续上（换音质用） */
-  const reloadOnline = useCallback((keepProgress: boolean) => {
+  const reloadOnline = useCallback((keepProgress: boolean, opts?: { bypassCache?: boolean; fallbackQuality?: string; keepSound?: boolean }) => {
     const t = currentTrack(queueState)
     if (!t || !isOnlineTrack(t)) return
-    const at = keepProgress ? snapRef.current.position : 0
-    startLoad(t, queueState.index, { startAt: at, autoplay: true })
+    /*
+     * 续播位置给成**函数**：换音质那轮（keepSound）取链期间旧档位一直在响，
+     * 位置要到下发那一刻才取（见 startLoad 的 startAtNow）——否则换过去
+     * 会往回跳取链耗掉的那几秒。
+     */
+    startLoad(t, queueState.index, {
+      startAt: keepProgress ? () => snapRef.current.position : 0,
+      autoplay: true,
+      ...opts,
+    })
   }, [queueState, startLoad])
 
   /**
@@ -1759,12 +2819,60 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [queueState, reloadOnline])
 
   /** 换音质：保持进度，不清空已排除的音源（那是另一个维度的问题） */
-  const changeQuality = useCallback((q: string) => {
-    void setPreferredQuality(q).then(() => reloadOnline(true))
+  /**
+   * 原地重试当前曲目：**不**把上次的音源拉黑。
+   *
+   * 和 `switchSource` 的区别就是这一条：取链超时（尤其断网重连后的头几秒）不是
+   * 音源的问题，把人家拉黑等于自己把可用音源一个个删掉。所以这条只重新取一次。
+   */
+  const retryCurrent = useCallback(() => {
+    failRetry.current = null
+    retryTries.current = { key: '', n: 0 }
+    setLastError(null)
+    reloadOnline(false)
   }, [reloadOnline])
 
+  /**
+   * 换音质：保持进度重取。
+   *
+   * **必须绕过本地缓存**（`bypassCache`）：缓存里的那份是旧档位出链落盘的，
+   * 命中缓存的话这一轮直接把同一份文件又播了一遍——用户看到的就是
+   * 「切了音质没反应，选中态也没变」（2026-11-20）。绕过缓存重新取链，
+   * 成功后才把旧档位的缓存换成新的（见 success 分支）；离线取不到链时
+   * 旧缓存还在，不影响播放。
+   */
+  const changeQuality = useCallback((q: string) => {
+    const t = currentTrack(queueState)
+    /* 点的就是正在播的这一档：什么都不做。三处入口（胶囊菜单 / 更多面板 / 设置页）
+       都不过滤当前档，误点当前档以前会触发一整轮「暂停 → 重新取链 → 续播」——
+       用户看到的就是「每点一下音乐断一下，好像不能正常播了」（2026-11-21）。
+       真想强制重取有「换源 / 重试」入口，不走这里。 */
+    if (!t || !isOnlineTrack(t) || onlineQualityRef.current === q) return
+    const prev = onlineQualityRef.current
+    /*
+     * **反馈要立刻出现**：以前要等 setPreferredQuality 落盘 → reloadOnline →
+     * startLoad 里才把 busy 点亮，手机上存储写入慢半拍，这几百毫秒里界面纹丝不动，
+     * 用户不知道有没有点中（2026-11-21「没有立马出现加载动画」）。
+     * 这里同步先把「取链中」点亮——startLoad 随后会原样再设一遍，失败路径也会收掉。
+     */
+    setOnlineBusy(true)
+    setOnlineQuality(null)
+    setOnlineNotice(null)
+    /* 换音质是「对**这首歌**要一个档位」：先清掉跨平台兜底记录，回到最初找到
+     * 它的音源去取。兜底平台往往只有标准档，不清的话高音质永远回不来——
+     * 下一次取链还会从兜底平台出发（2026-11-21）。 */
+    forgetSubstitute(t.id)
+    /* 切音质 = 明确要听：解开暂停锁，取到链就从原位置接着放。
+       用户暂停中切音质以前不会自动播（autoCancel 锁着），被当成「切换了不播放」（2026-11-21）。 */
+    resumeIntent()
+    /* 带上原档位：新档位取不到链时回退原音质继续播（见 startLoad 的失败分支）。
+       keepSound：取链期间旧档位继续响，新档位好了无缝换——「切音质等好几秒
+       没声音」的体感主要就来自那段静音（2026-11-21）。 */
+    void setPreferredQuality(q).then(() => reloadOnline(true, { bypassCache: true, fallbackQuality: prev ?? undefined, keepSound: true }))
+  }, [queueState, reloadOnline, resumeIntent])
+
   const refreshLibrary = useCallback(async () => {
-    const tracks = await bridge.getTracks()
+    const tracks = cleanLibrary(await bridge.getTracks())
     setLibrary(tracks)
     setLibraryVersion(v => v + 1)
   }, [])
@@ -1808,6 +2916,41 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setQueueState(q => removeFromQueue(q, id))
   }, [])
 
+  /* ---------------- 定时关闭 / 音量保护（安卓原生执行，前端只发命令） ---------------- */
+
+  const setSleep = useCallback((min: number | 'track' | null) => {
+    if (!isAndroid) return
+    /*
+     * 乐观更新：先按用户选的值画上，等原生下一帧把真值带回来（`sleep` 字段）。
+     * 不乐观的话，点了「30 分钟」面板要等 250ms 才变成「30 分钟」，
+     * 用户会以为没点上、再点一次。
+     */
+    if (min === null) setSleepState({ on: false, track: false, remain: 0 })
+    else if (min === 'track') setSleepState({ on: true, track: true, remain: 0 })
+    else setSleepState({ on: true, track: false, remain: Math.max(0, Math.round(min * 60)) })
+    void bridge.invoke('sleep_set', min === null ? { minutes: 0 } : min === 'track' ? { track: true } : { minutes: min })
+      .catch(() => { /* 老版本没有这条命令：下一个 tick 会把状态改回去 */ })
+  }, [])
+
+  const setAudioGuard = useCallback((on: boolean) => {
+    setAudioGuardState(on)
+    void settings.set(KEYS.audioGuard, on)
+    if (isAndroid) {
+      void bridge.invoke<boolean>('audio_guard', { on }).catch(() => { /* 同上 */ })
+    }
+  }, [])
+
+  /* 挂载时把音量保护的真值推给原生：原生自己也存了一份（见 Bridge.init），
+     这里再推一次是为了「设置文件比 prefs 新」的所有情况（换机恢复、手改文件） */
+  useEffect(() => {
+    if (!isAndroid) return
+    void settings.get<boolean>(KEYS.audioGuard).then(v => {
+      if (v === null || v === undefined) return
+      setAudioGuardState(!!v)
+      void bridge.invoke('audio_guard', { on: !!v }).catch(() => {})
+    })
+  }, [])
+
   const value = useMemo<PlayerCtx>(() => ({
     queueState, current: currentTrack(queueState), snapshot, scanning, scanProgress,
     online: isOnlineTrack(currentTrack(queueState)),
@@ -1820,6 +2963,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     onlineVia, onlineActual, onlineNotice,
     clearNotice: () => setOnlineNotice(null),
     switchSource,
+    retryCurrent,
     changeQuality,
     library, libraryVersion, lastScanAt, lastRoots, lastSkipped, lastTruncated, scanScope,
     playList, playOne, next, prev, togglePlay, seek, setVolume, cycleMode,
@@ -1827,15 +2971,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setScrubbing: (b: boolean) => { scrubRef.current = b },
     addToQueue, addManyToQueue, reorder, remove, removeTracks, clear, refreshLibrary, scan, rescan, removeTrack,
     lastError, clearError, lyrics, lyricsLoading, reloadLyrics,
+    sleep, setSleep, audioGuard, setAudioGuard,
   }), [queueState, snapshot, scanning, scanProgress, library, libraryVersion, lastScanAt, lastRoots,
     lastSkipped, lastTruncated, scanScope, loading,
     onlineBusy, onlineSource, onlineQuality, onlineVia, onlineActual, onlineNotice,
-    switchSource, changeQuality,
+    switchSource, changeQuality, retryCurrent,
     playList, playOne, next, prev, togglePlay, seek, setVolume, cycleMode,
     muted, toggleMute, nudgeVolume,
     addToQueue, addManyToQueue, reorder, remove,
     removeTracks, clear,
-    refreshLibrary, scan, rescan, removeTrack, lastError, clearError, lyrics, lyricsLoading, reloadLyrics])
+    refreshLibrary, scan, rescan, removeTrack, lastError, clearError, lyrics, lyricsLoading, reloadLyrics,
+    sleep, setSleep, audioGuard, setAudioGuard])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

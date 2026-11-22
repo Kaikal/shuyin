@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ALL_PLATFORMS, type LoadedSource } from '@shuyin/lx-provider'
 import { bridge } from '../lib/bridge'
 import { getPreferredQuality, qualityLabel, setPreferredQuality, sourceManager } from '../lib/online'
+import { usePlayer } from '../lib/PlayerProvider'
 import { KEYS, settings } from '../lib/settings'
 import { IconFolder, IconImport, IconRefresh, IconTrash } from './icons'
 import { Modal } from './Modal'
@@ -386,6 +387,7 @@ export function SourcesSection() {
 export function QualitySection() {
   const [quality, setQuality] = useState('320k')
   const [qualitys, setQualitys] = useState<string[]>(FALLBACK_QUALITY)
+  const p = usePlayer()
 
   useEffect(() => {
     void getPreferredQuality().then(setQuality).catch(() => {})
@@ -419,7 +421,18 @@ export function QualitySection() {
           width={220}
           title="优先音质：取不到就自动降档 / 换平台，不用手动切"
           options={qualitys.map(q => ({ id: q, name: qualityLabel(q), note: q }))}
-          onPick={q => { setQuality(q); void setPreferredQuality(q) }}
+          onPick={q => {
+            setQuality(q)
+            /* 偏好先落盘：没在播在线歌时 changeQuality 是 no-op，不能把选择弄丢 */
+            void setPreferredQuality(q)
+            /*
+             * 正在播在线歌时**当场切过去**（changeQuality 内部会保持进度重取，
+             * 播放条上立刻能看到「取链中」）。以前这里只写偏好不动播放，
+             * 用户点完毫无反馈，不知道有没有点中（2026-11-21）。
+             * 没在播在线歌 / 点的就是当前档时 changeQuality 自己会 no-op。
+             */
+            p.changeQuality(q)
+          }}
         />
       </div>
     </section>

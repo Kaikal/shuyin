@@ -723,6 +723,12 @@
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
+  /*
+   * 和 `.q-list` 同一套：把行的重排/绘制关在这一层里。
+   * 行本身不再做 `content-visibility`（见 mobile.css 里那段说明：占位高度是猜的，
+   * 滑动时每行第一次进视口都要"换高度"，整表跟着跳 = 用户说的闪烁）。
+   */
+  contain: layout paint;
 }
 .plp-row {
   display: flex;

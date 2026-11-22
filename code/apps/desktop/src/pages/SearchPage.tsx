@@ -29,7 +29,9 @@ import { toast } from '../lib/toast'
 import { queueToast } from '../lib/queueToast'
 import { consumeLongPress, longPressProps } from '../lib/longPress'
 import { usePlaylists } from '../lib/localPlaylists'
-import { IconMusicNote, IconNext, IconPause, IconPlay, IconPlus, IconSearch, IconStar, IconUser } from '../components/icons'
+import { favRecOf, useFavs } from '../lib/favTracks'
+import { rememberCover } from '../lib/mediaCache'
+import { IconHeart, IconHeartFilled, IconMore, IconMusicNote, IconNext, IconSearch, IconStar, IconUser } from '../components/icons'
 import { OnlineSongMenu } from '../components/OnlineSongMenu'
 
 type Tab = 'song' | 'playlist'
@@ -65,6 +67,8 @@ function mark(text: string, q: string) {
 
 export function SearchPage({ onOpenPlaylist }: Props) {
   const bookmarks = usePlaylists()
+  /** 收藏的歌曲（行尾那颗心 / 菜单里的「添加到喜欢」共用同一份状态） */
+  const favs = useFavs()
   /** 收藏/取消收藏的轻提示 */
   const p = usePlayer()
   const [tab, setTab] = useState<Tab>('song')
@@ -90,6 +94,16 @@ export function SearchPage({ onOpenPlaylist }: Props) {
   const [songs, setSongs] = useState<Row[]>([])
   const [playlists, setPlaylists] = useState<PlaylistSearchItem[]>([])
   const [loading, setLoading] = useState(false)
+  /*
+   * 「这一次搜索」的编号。
+   *
+   * 搜索 effect 的依赖是 keyword / 平台 / tab——**同一个词再点一次「搜索」
+   * 依赖一个都没变，effect 不会重跑**。以前离网搜过一次失败，联网后再搜同一个词
+   * 屏幕上就一直是上次那排错误/空白，用户只能换一个字或者退出重进
+   * （用户 2026-11 的原话：「第一次没联网，后续就一直是加载失败」）。
+   * 每次显式提交都 +1，依赖里带上它，点一次就真发一轮。
+   */
+  const [nonce, setNonce] = useState(0)
   const [errors, setErrors] = useState<Array<{ platform: PlatformSource; message: string }>>([])
   /** 平台限流造成的「暂时跳过」：不是失败，单独用一行灰字提示，不糊红条 */
   const [busy, setBusy] = useState<PlatformSource[]>([])
@@ -158,19 +172,34 @@ export function SearchPage({ onOpenPlaylist }: Props) {
     const jobs = targets.map(async (s): Promise<{ s: PlatformSource; songs?: SearchSong[]; playlists?: PlaylistSearchItem[]; err?: string; busy?: boolean }> => {
       const api = apiFor(s)
       if (!api) return { s, err: '该平台暂不支持' }
-      try {
+      /*
+       * 一次真实请求 + **失败重试一次**。
+       *
+       * 冷启动 / 刚从后台回来时，这一发请求常常赶上网络还没醒（Wi-Fi 刚从休眠
+       * 重连、DNS 没就绪），一失败就四个平台全红，用户看到「搜什么都失败」。
+       * 重试只花几百毫秒，能把这批「假失败」清掉；限流不算（那是平台明确拒绝）。
+       */
+      const once = async () => {
         if (tab === 'song') {
-          if (!api.supportsSearch) return { s, err: '该平台不支持搜索' }
+          if (!api.supportsSearch) throw new Error('该平台不支持搜索')
           const r = await api.search(keyword, 1, 30)
           return { s, songs: r.list }
         }
-        if (!api.supportsPlaylistSearch || !api.searchPlaylist) return { s, err: '该平台不支持歌单搜索' }
+        if (!api.supportsPlaylistSearch || !api.searchPlaylist) throw new Error('该平台不支持歌单搜索')
         const r = await api.searchPlaylist(keyword, 1, 24)
         return { s, playlists: r.list }
+      }
+      try {
+        return await once()
       } catch (e) {
-        // 限流是可以自己恢复的，对用户来说什么也做不了：不当错误展示
         if (e instanceof PlatformBusyError) return { s, busy: true }
-        return { s, err: e instanceof Error ? e.message : String(e) }
+        await new Promise(r => window.setTimeout(r, 700))
+        try {
+          return await once()
+        } catch (e2) {
+          if (e2 instanceof PlatformBusyError) return { s, busy: true }
+          return { s, err: e2 instanceof Error ? e2.message : String(e2) }
+        }
       }
     })
 
@@ -194,16 +223,32 @@ export function SearchPage({ onOpenPlaylist }: Props) {
       setLoading(false)
       if (rows.length || lists.length) pushHistory(keyword)
     })
-  }, [keyword, platforms, tab, pushHistory])
+    // nonce：同一个词再点一次「搜索」也要真发一轮（见上面 nonce 的注释）
+  }, [keyword, platforms, tab, pushHistory, nonce])
 
   const submit = useCallback((kw?: string) => {
     const v = (kw ?? input).trim()
     setInput(v)
     setKeyword(v)
+    /* 同一个词重复提交时 keyword 不变、effect 不会重跑，靠 nonce 强制发一轮 */
+    setNonce(n => n + 1)
     /* 搜了就把联想收起来：面板还挂着会挡住第一屏结果 */
     setSugDismissed(true)
     setHi(-1)
   }, [input])
+
+  /*
+   * 网络回来时，把当前这个词**自动重发一轮**。
+   *
+   * 用户不需要自己发现「哦网好了，我再点一次搜索」——离线那一轮留下的
+   * 四行红字会自己换成结果。词没变时也靠 nonce 真正打出去。
+   */
+  useEffect(() => {
+    if (!keyword) return
+    const up = () => setNonce(n => n + 1)
+    window.addEventListener('online', up)
+    return () => window.removeEventListener('online', up)
+  }, [keyword])
 
   /**
    * 点行内播放。
@@ -441,6 +486,8 @@ export function SearchPage({ onOpenPlaylist }: Props) {
           {errors.map(e => (
             <span key={e.platform} className="sr-error">{platformName(e.platform)}：{e.message}</span>
           ))}
+          {/* 一键重发：词没变也真的打一轮（靠 nonce），不必让人再去点输入框旁边的「搜索」 */}
+          <button className="sr-retry" onClick={() => setNonce(n => n + 1)}>重试</button>
         </div>
       )}
 
@@ -495,15 +542,56 @@ export function SearchPage({ onOpenPlaylist }: Props) {
                       </div>
                       <span className="sr-badge sm" data-src={plat}>{platformName(plat)}</span>
                       <span className="sr-dur num">{fmtTime(row.song.interval)}</span>
-                      <div className="sr-acts">
-                        {/* 当前这首：按钮变成暂停；其余仍是播放 */}
-                        <button className="icon-btn" title={live ? (livePlaying ? '暂停' : '继续播放') : '播放'}
-                          onClick={e => { e.stopPropagation(); playSong(row) }}>
-                          {livePlaying ? <IconPause width={14} height={14} /> : <IconPlay />}
-                        </button>
-                        <button className="icon-btn" title="下一首播放" onClick={e => { e.stopPropagation(); addSong(row, 'next') }}><IconNext /></button>
-                        <button className="icon-btn" title="加入队列" onClick={e => { e.stopPropagation(); addSong(row, 'end') }}><IconPlus /></button>
-                      </div>
+                      {/*
+                       * 行尾三颗：收藏 / 下一首播放 / ⋯。
+                       *
+                       * 以前这里是「播放 / 下一首 / 加入队列」，手机 CSS 又把前三颗
+                       * 砍到只剩最后一颗——于是**搜索页根本没有收藏的入口**，
+                       * 想收一首搜到的歌只能先点开播一遍（用户 2026-11 反馈）。
+                       * 现在对齐歌单详情页那一套（`data-acts='fav-next-more'`）：
+                       * 手机上三颗常显、桌面悬停显形，动作也一致（更多里还有下载 / 加队列）。
+                       */}
+                      {(() => {
+                        const favOn = favs.has(onlineId(row.song))
+                        return (
+                          <div className="sr-acts" data-acts="fav-next-more">
+                            <button
+                              className={'icon-btn' + (favOn ? ' on' : '')}
+                              title={favOn ? '取消喜欢' : '添加到喜欢'}
+                              aria-label={(favOn ? '取消喜欢 ' : '添加到喜欢 ') + row.song.name}
+                              aria-pressed={favOn}
+                              onClick={async e => {
+                                e.stopPropagation()
+                                const on = await favs.toggle(favRecOf(toLocalTrack(row.song)))
+                                if (on) rememberCover(row.song.img, 0)
+                                toast(on ? '已添加到喜欢' : '已取消喜欢', { ok: on })
+                              }}
+                            >
+                              {favOn ? <IconHeartFilled width={16} height={16} /> : <IconHeart width={16} height={16} />}
+                            </button>
+                            <button
+                              className="icon-btn"
+                              title="下一首播放"
+                              aria-label={'下一首播放 ' + row.song.name}
+                              onClick={e => { e.stopPropagation(); addSong(row, 'next') }}
+                            >
+                              <IconNext />
+                            </button>
+                            <button
+                              className="icon-btn"
+                              title="更多操作"
+                              aria-label={'更多操作：' + row.song.name}
+                              onClick={e => {
+                                e.stopPropagation()
+                                const r = e.currentTarget.getBoundingClientRect()
+                                setMenu({ x: Math.round(r.right), y: Math.round(r.bottom + 4), song: row.song })
+                              }}
+                            >
+                              <IconMore width={16} height={16} />
+                            </button>
+                          </div>
+                        )
+                      })()}
                     </div>
                   )
                 })}

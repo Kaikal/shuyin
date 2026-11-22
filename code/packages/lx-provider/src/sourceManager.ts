@@ -11,6 +11,7 @@
  */
 import {
   NoPlayableSourceError,
+  SoftVerifyError,
   type LxHostAdapter, type LoadedSource, type PlatformSource, type SourceSupport,
 } from './types'
 
@@ -80,16 +81,21 @@ function pickQuality(supported: string[], wanted: string): string {
 }
 
 /**
- * 同一音源内要依次尝试的档位：请求档位 + 往下最多两级。
+ * 同一音源内要依次尝试的档位：请求档位 + **逐级往下一直到最低档**。
  *
  * 为什么需要它：高音质档（flac / hires / master）经常要 VIP，第三方接口直接 403 或者
  * 返回空；而降一档往往立刻能出链。只试一个档位，用户看到的就是「很多歌播不了」。
- * 上限三级是延迟与成功率的折中——每次都可能是 8s 超时，再多就没法用了。
+ *
+ * 以前上限三级（请求档 + 往下两级），用户拍板（2026-11-21）：
+ * 「从最低音质切到最高音质，应该逐级往下尝试，逐级轮换到最低或者当前已缓存的音质」
+ * —— 母带切过去要是整个平台只有标准档，三级上限就会在 192k 处放弃整首歌。
+ * 现在放开通吃：总时长仍由 getMusicUrl 的 budget（7~9s）兜底，试得快的失败
+ * （403 / 无版权，1 秒内返回）能一路降到底，试得慢的到点就收，不会拖长失败。
  */
-function qualitiesToTry(supported: string[], wanted: string, max = 3): string[] {
+function qualitiesToTry(supported: string[], wanted: string): string[] {
   const out = [wanted]
   let i = QUALITY_ORDER.indexOf(wanted)
-  while (out.length < max && i > 0) {
+  while (i > 0) {
     i -= 1
     const q = QUALITY_ORDER[i]
     if (supported.includes(q) && !out.includes(q)) out.push(q)
@@ -378,8 +384,13 @@ export class SourceManager {
     platform: PlatformSource,
     musicInfo: unknown,
     quality = '320k',
-    opts: { exclude?: string[]; sourceId?: string; expectDuration?: number; expectTitle?: string } = {},
-  ): Promise<{ url: string; sourceId: string; sourceName: string; quality: string }> {
+    opts: {
+      exclude?: string[]; sourceId?: string; expectDuration?: number; expectTitle?: string
+      allowUnverified?: boolean
+      /** 整条降级链的总时长上限（默认 9s）。失败要快，别让用户陪着等超时 */
+      budgetMs?: number
+    } = {},
+  ): Promise<{ url: string; sourceId: string; sourceName: string; quality: string; unverified?: boolean }> {
     /*
      * 冷启动那一拍的「各平台都没有可用音源」：
      * 恢复上次曲目时会立刻预加载并取链，而音源脚本还在装载 —— 此刻
@@ -399,6 +410,44 @@ export class SourceManager {
       let pending = 0
       let done = false
       let timer: ReturnType<typeof setTimeout> | null = null
+      /**
+       * 「出链成功、但只过了软校验的一道」。
+       *
+       * 只在 `allowUnverified` 时才用它：严格路径全灭之后，把这条交出去让歌能响
+       * （见 `SoftVerifyError` 的注释）。硬校验失败（文件里写着别的歌）不会进来。
+       */
+      let soft: { url: string; sourceId: string; sourceName: string; quality: string } | null = null
+
+      /**
+       * **整条降级链的总时长上限**。
+       *
+       * 不设它的时候，失败路径是这么长出来的（2026-11 华为实测 65 秒才报错）：
+       *   3 个音源 × 3 个档位 × (出链超时 6s + 落地校验超时 6s) = 最坏 108 秒，
+       *   再加上兜底平台那一轮搜索 + 取链。
+       * 每一步单独看都合理，乘起来用户就是「点了歌，转圈一分多钟，然后说没有音源」。
+       *
+       * 所以不管内部还在干什么，到点就收：有软失败的地址就交出去（能播就行），
+       * 没有就老老实实报错。**失败要快**，这跟「成功要快」一样重要——用户只有
+       * 在快速失败之后才愿意点「换源 / 重试」。
+       */
+      const budget = opts.budgetMs ?? 7_000
+      const hardTimer = setTimeout(() => {
+        if (done) return
+        done = true
+        if (timer) clearTimeout(timer)
+        if (opts.allowUnverified && soft) {
+          resolve({ ...soft, unverified: true })
+          return
+        }
+        reject(new NoPlayableSourceError(platform, attempts.length
+          ? attempts
+          : [{ sourceId: '', sourceName: '', error: '取播放地址超时（这轮等待已到上限）' }]))
+      }, budget)
+
+      const finish = (fn: () => void) => {
+        clearTimeout(hardTimer)
+        fn()
+      }
 
       /*
        * 音源错开上场，**不是一次性全打出去**。
@@ -420,7 +469,7 @@ export class SourceManager {
             if (timer) clearTimeout(timer)
             // 记住「这个平台用哪个源成功过」，下次它排最前
             this.lastGood.set(platform, hit.sourceId)
-            resolve(hit)
+            finish(() => resolve(hit))
           },
           (e: unknown) => {
             attempts.push({
@@ -428,11 +477,24 @@ export class SourceManager {
               sourceName: src.name,
               error: e instanceof Error ? e.message : String(e),
             })
+            if (e instanceof SoftVerifyError) {
+              soft = { url: e.url, sourceId: src.id, sourceName: src.name, quality: e.quality }
+            }
             pending--
             if (!done && started >= tries.length && pending === 0) {
               done = true
               if (timer) clearTimeout(timer)
-              reject(new NoPlayableSourceError(platform, attempts))
+              /*
+               * 严格路径全灭。如果调用方允许「未校验」，就把那条能出链的交出去——
+               * 探测超时 / 时长对不上，在慢网上是常态，但它通常**是能播的**。
+               * 让用户听到声音，比让他看着「没有可用音源」去点换源要好。
+               */
+              if (opts.allowUnverified && soft) {
+                this.lastGood.set(platform, soft.sourceId)
+                finish(() => resolve({ ...soft!, unverified: true }))
+                return
+              }
+              finish(() => reject(new NoPlayableSourceError(platform, attempts)))
               return
             }
             // 一个都没在跑了：下一个立刻上，不用再等错开的那 320ms
@@ -466,32 +528,54 @@ export class SourceManager {
     const wanted = pickQuality(sup?.qualitys ?? [], quality)
     const ladder = qualitiesToTry(sup?.qualitys ?? [], wanted)
     let lastErr = ''
+    /**
+     * 「地址出得来、只是没验过」的那一档。
+     * 严格路径全灭之后由 `getMusicUrl` 交给调用方（见 SoftVerifyError）。
+     */
+    let soft: { url: string; quality: string } | null = null
     const loaded = await this.host.load({
       id: src.id,
       code: this.codes.get(src.id) ?? '',
       filePath: src.filePath,
     })
     for (const q of ladder) {
+      let url = ''
       try {
-        const url = await loaded.requestMusicUrl(platform, musicInfo, q, this.timeoutMs)
+        url = await loaded.requestMusicUrl(platform, musicInfo, q, this.timeoutMs)
         if (!/^https?:\/\//i.test(url)) throw new Error(`返回了非法的播放地址：${String(url).slice(0, 60)}`)
         // 出链成功不代表能播：落地验一次，坏的当这一档失败，继续降档/换源
         if (this.verify) {
           await withTimeout(
             this.verify(url, { duration: expectDuration, title: expectTitle }),
-            6_000,
+            /**
+             * 4 秒。正常直链的探测（Range 16KB）都在 1 秒内回来；要等更久的，
+             * 多半是服务器慢响应或者干脆连不上——这时降档/换源比继续等更划算。
+             * 以前是 6 秒，配上三档就是 18 秒，全砸在一首播不了的歌上。
+             */
+            4_000,
             '直链校验超时',
           )
         }
         return { url, sourceId: src.id, sourceName: src.name, quality: q }
       } catch (e) {
         lastErr = e instanceof Error ? e.message : String(e)
+        /*
+         * 记下「地址是好的、只是没验完」的那一档：
+         *   · verify 抛 SoftVerifyError（时长 / 码率不符，软指标）
+         *   · 校验这一跳自己超时（地址出得来，探测太慢——慢网下的常态）
+         * 出链就失败、返回非法地址这些**不记**：那些真的是坏地址。
+         */
+        if (url && (e instanceof SoftVerifyError || /直链校验超时/.test(lastErr))) {
+          soft = { url, quality: q }
+        }
         // 脚本没这个档位的能力/超时：档位问题，继续往下降
         // 其它异常（返回非法地址、直链 403 等）也往下试——代价只是一次请求
       }
     }
     // 档位都试过了：把最后一个真实原因带上，别只说「失败」
-    throw new Error(ladder.length > 1 ? `${ladder.join('/')} 均失败：${lastErr}` : lastErr)
+    const msg = ladder.length > 1 ? `${ladder.join('/')} 均失败：${lastErr}` : lastErr
+    if (soft) throw new SoftVerifyError(soft.url, soft.quality, msg)
+    throw new Error(msg)
   }
 }
 

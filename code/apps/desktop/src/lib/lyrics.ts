@@ -4,6 +4,8 @@
  */
 import { parseLrc, plainLyricLines, type LocalTrack, type LyricsDoc, type LyricLine } from '@shuyin/core'
 import { bridge } from './bridge'
+import { cachedLyric, rememberLyric } from './mediaCache'
+import { titleMismatch } from './titleMatch'
 
 const cache = new Map<string, LyricsDoc>()
 const inflight = new Map<string, Promise<LyricsDoc>>()
@@ -38,10 +40,11 @@ export async function loadLocalLyrics(track: LocalTrack): Promise<LyricsDoc> {
 /**
  * 在线歌词（lrclib.net，支持 CORS；6s 超时）。
  *
- * `q` 是用户在搜索表单里手动填的歌名 / 歌手：**改过了就按它模糊搜**，
- * 并且不带 duration——用户改名字往往就是在找另一个版本（Live、翻唱、
- * 另一个专辑收录），拿本首的时长去卡会把结果全部挡掉。没改过就还是
- * 原来的精确匹配（带专辑 + 时长），别把自动路径的结果改模糊了。
+ * `q` 是用户在搜索表单里手动填的歌名 / 歌手：**改过了就按它模糊搜**（/api/get，
+ * 不带 duration——用户改名字往往就是在找另一个版本，拿本首的时长去卡会把
+ * 结果全部挡掉）。没改过就走**核对过的搜索**（/api/search + 歌名/时长校验，
+ * 见 fetchVerified）——自动路径拿到的词必须证明是这首的，核对不过宁可没有，
+ * 也不能把别首歌的词挂上来。
  */
 export async function searchOnlineLyrics(
   track: LocalTrack,
@@ -51,14 +54,6 @@ export async function searchOnlineLyrics(
     const title = (q?.title ?? '').trim()
     const artist = (q?.artist ?? '').trim()
     const manual = !!q && (title !== (track.title || '') || artist !== (track.artist || ''))
-    const params = new URLSearchParams({
-      artist_name: manual ? artist : (track.artist || ''),
-      track_name: manual ? title : (track.title || ''),
-    })
-    if (!manual) {
-      params.set('album_name', track.album || '')
-      params.set('duration', String(Math.round(track.duration || 0)))
-    }
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 6000)
     /*
@@ -67,31 +62,23 @@ export async function searchOnlineLyrics(
      * "blocked by CORS policy: No 'Access-Control-Allow-Origin'"），
      * 安卓那台从头到尾拿不到在线歌词。改走原生 `net_request`（Kotlin Http，无同源限制）。
      */
-    const data = await (async () => {
-      if (bridge.isNative) {
-        const r = await bridge.invoke<{ status: number; body: string }>('net_request', {
-          req: {
-            url: 'https://lrclib.net/api/get?' + params.toString(),
-            method: 'GET',
-            headers: { accept: 'application/json' },
-            timeout: 6000,
-          },
-        })
-        clearTimeout(timer)
-        if (!r || r.status >= 400) return null
-        return JSON.parse(r.body) as { syncedLyrics?: string | null; plainLyrics?: string | null }
-      }
-      const res = await fetch('https://lrclib.net/api/get?' + params.toString(), {
-        signal: ctrl.signal,
-        headers: { accept: 'application/json' },
-      })
+    const req = (url: string): Promise<{ status: number; body: string } | null> =>
+      bridge.isNative
+        ? bridge.invoke<{ status: number; body: string }>('net_request', {
+            req: { url, method: 'GET', headers: { accept: 'application/json' }, timeout: 6000 },
+          })
+        : fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } })
+            .then(async res => ({ status: res.status, body: await res.text() }))
+    const getJson = async <T,>(url: string): Promise<T | null> => {
+      const r = await req(url)
       clearTimeout(timer)
-      if (!res.ok) return null
-      return await res.json() as { syncedLyrics?: string | null; plainLyrics?: string | null }
-    })()
-    if (!data) return null
-    const text = data.syncedLyrics || data.plainLyrics || ''
-    if (!text.trim()) return null
+      if (!r || r.status >= 400) return null
+      return JSON.parse(r.body) as T
+    }
+    const text = manual
+      ? await fetchGet(getJson, title || (track.title || ''), artist || (track.artist || ''), track.album || '')
+      : await fetchVerified(getJson, track)
+    if (!text?.trim()) return null
     const doc: LyricsDoc = {
       source: 'online',
       lines: parseLrc(text),
@@ -104,6 +91,64 @@ export async function searchOnlineLyrics(
   } catch {
     return null
   }
+}
+
+/** lrclib 精确查一条（/api/get）：没查到按最近似返回，**结果没法核对**——只给手动搜索用 */
+async function fetchGet(
+  getJson: <T>(url: string) => Promise<T | null>,
+  trackName: string, artistName: string, album: string,
+): Promise<string | null> {
+  const p = new URLSearchParams({ artist_name: artistName, track_name: trackName, album_name: album })
+  const data = await getJson<{ syncedLyrics?: string | null; plainLyrics?: string | null }>(
+    'https://lrclib.net/api/get?' + p.toString(),
+  )
+  return data?.syncedLyrics || data?.plainLyrics || null
+}
+
+interface LrcHit {
+  trackName: string
+  artistName: string
+  duration: number | null
+  syncedLyrics: string | null
+  plainLyrics: string | null
+}
+
+/**
+ * 自动路径：/api/search 拿一批带元数据的候选，**逐条核对再取词**。
+ *
+ * 为什么不能再用 /api/get（2026-11-21 平板「海屿你歌词不对」的教训）：
+ * 它在库里有这首时返回精确结果，没有时**悄悄返回最近似的另一首**——
+ * 歌名歌手对不上也照给，而我们拿到手只剩一坨歌词文本，根本无从核对
+ * 是不是这首歌的词。/api/search 每条都带 trackName / artistName / duration，
+ * 核对是实的：歌名必须互含（titleMismatch 挡掉完全不同的）、时长差不出
+ * 12%（音源转码差异兜 8 秒底）、都过了才收；有逐行时间轴的优先。
+ */
+async function fetchVerified(
+  getJson: <T>(url: string) => Promise<T | null>,
+  track: LocalTrack,
+): Promise<string | null> {
+  const p = new URLSearchParams({
+    track_name: (track.title || '').trim(),
+    artist_name: (track.artist || '').trim(),
+  })
+  const hits = await getJson<LrcHit[]>('https://lrclib.net/api/search?' + p.toString())
+  if (!Array.isArray(hits) || !hits.length) return null
+  const dur = track.duration || 0
+  const tol = dur > 0 ? Math.max(8, dur * 0.12) : 0
+  const artists = (track.artist || '').split(/\s*[/、]\s*/).map(s => s.trim().toLowerCase()).filter(Boolean)
+  let best: LrcHit | null = null
+  let bestScore = -1
+  for (const h of hits) {
+    if (titleMismatch(track.title, h.trackName)) continue
+    if (dur > 0 && h.duration && Math.abs(h.duration - dur) > tol) continue
+    let s = 0
+    const a = (h.artistName || '').toLowerCase()
+    if (a && artists.some(x => a.includes(x) || x.includes(a))) s += 20
+    if (h.syncedLyrics?.trim()) s += 10
+    if (s > bestScore) { bestScore = s; best = h }
+  }
+  if (!best) return null
+  return best.syncedLyrics || best.plainLyrics || null
 }
 
 /**
@@ -130,6 +175,15 @@ export function loadLyrics(
 
   const p = (async () => {
     let doc = await loadLocalLyrics(track).catch(() => EMPTY)
+    /*
+     * 本地没有就先用**上次在线拿到的那份**（断网时这是唯一能显示的东西）。
+     * 顺序是「本地文件 → 落盘的在线歌词 → 重新联网取」：网络那次要等超时，
+     * 有存量就先用存量把界面填上，用户点「重新加载」才会强制走网络。
+     */
+    if (!doc.lines.length && !opts.retry) {
+      const saved = await cachedLyric(track.id).catch(() => null)
+      if (saved) doc = fromText(saved, 'online')
+    }
     if ((!doc.lines.length) && (opts.online !== false)) {
       const online = await searchOnlineLyrics(track)
       if (online) doc = online
@@ -137,6 +191,10 @@ export function loadLyrics(
     if (doc.lines.length || doc.plain.trim()) {
       cache.set(track.id, doc)
       miss.delete(track.id)
+      /* 在线歌词顺手落盘：下次断网也有词 */
+      if (doc.source === 'online' && doc.plain.trim()) {
+        void rememberLyric(track.id, doc.plain, opts.retry === true)
+      }
     } else {
       miss.set(track.id, Date.now())
     }

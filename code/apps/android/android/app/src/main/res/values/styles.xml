@@ -14,16 +14,34 @@
     </style>
 
     <!--
-      锁屏播放页：纯黑打底（封面没加载出来时也不会闪白）、全屏、状态栏透明。
-      不要 windowIsTranslucent——压在锁屏上的窗口必须是不透明的，否则会露出桌面。
+      锁屏播放页原来有个独立的 LockTheme（纯黑打底 + 全屏），它现在是主窗口里的
+      一层覆盖视图，不再需要单独的主题：黑底由面板自己铺（lk_scrim + 布局根色）。
+    -->
+
+    <!--
+      跨应用熄屏时的锁屏宿主（LockActivity）：
+      纯黑打底（面板自己会铺封面 + 压暗层，黑底只兜首帧）、无转场动画
+      （熄屏那一刻启动，动画没人看得见；解锁 finish 时不闪）、压进刘海。
     -->
     <style name="LockTheme" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
-        <item name="android:windowFullscreen">true</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowAnimationStyle">@style/LockWindowAnim</item>
+    </style>
+
+    <style name="LockWindowAnim">
+        <item name="android:activityOpenEnterAnimation">@android:anim/fade_in</item>
+        <item name="android:activityOpenExitAnimation">@android:anim/fade_out</item>
+        <item name="android:activityCloseEnterAnimation">@android:anim/fade_in</item>
+        <item name="android:activityCloseExitAnimation">@android:anim/fade_out</item>
+        <item name="android:taskOpenEnterAnimation">@android:anim/fade_in</item>
+        <item name="android:taskOpenExitAnimation">@android:anim/fade_out</item>
+        <item name="android:taskCloseEnterAnimation">@android:anim/fade_in</item>
+        <item name="android:taskCloseExitAnimation">@android:anim/fade_out</item>
+        <item name="android:taskToBackEnterAnimation">@android:anim/fade_out</item>
+        <item name="android:taskToBackExitAnimation">@android:anim/fade_in</item>
     </style>
 </resources>

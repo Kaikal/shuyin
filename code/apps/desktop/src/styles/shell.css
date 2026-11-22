@@ -420,6 +420,17 @@ html[data-fs='true'] .rz-host { display: none; }
   overscroll-behavior: contain;
 }
 
+/*
+ * 队列行**不做**屏外跳过渲染（曾经用 `content-visibility: auto`，已撤）。
+ *
+ * 撤的理由见 search.css 里 `.sr-list > .sr-row` 那段：占位高度只能靠猜，
+ * 行第一次进视口就得换成真实高度，滑动时一行行"苏醒" = 连续抖动 + 闪白，
+ * 用户看到的就是「刚打开时滑动会闪烁」。
+ *
+ * 这里本来也不需要它：外层 `.q-list` 已经 `contain: layout paint`，
+ * 子行再怎么变都不会把重排推给整表，屏外自动跳过绘制这件事浏览器自己会做。
+ */
+
 .q-row {
   position: relative;
   height: 48px;

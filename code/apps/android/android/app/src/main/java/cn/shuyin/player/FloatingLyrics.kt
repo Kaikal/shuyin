@@ -441,6 +441,11 @@ object FloatingLyrics {
      * 进度是每 250ms 一次的，窗口没开时只存不发；开了才 setLines —
      * 重绘很便宜（一块几十像素高的画布），但不能每首歌都白建一次窗口。
      */
+    /**
+     * @param mirror 是否把这些字段写进 [NowPlaying]（锁屏页读的那份镜像）。
+     *               原生自己有歌词时间轴时传 false —— 那边按播放位置算出来的
+     *               比这条 250ms 的推送更贴人耳，再让旧值盖一遍就白算了。
+     */
     fun setLines(
         cur: String,
         next: String,
@@ -449,6 +454,7 @@ object FloatingLyrics {
         playing: Boolean,
         title: String = "",
         around: List<String> = emptyList(),
+        mirror: Boolean = true,
     ) {
         pendingCur = cur
         pendingNext = next
@@ -456,13 +462,15 @@ object FloatingLyrics {
         pendingFlip = flip
         if (title.isNotBlank()) pendingTitle = title
         /* 锁屏播放页读的是同一份镜像，顺手写下 */
-        NowPlaying.cur = cur
-        NowPlaying.next = next
-        NowPlaying.prog = prog
-        NowPlaying.flip = flip
-        NowPlaying.playing = playing
-        /* 锁屏页用它铺多行（±2）；悬浮窗不读，还是两行 */
-        if (around.isNotEmpty()) NowPlaying.around = around
+        if (mirror) {
+            NowPlaying.cur = cur
+            NowPlaying.next = next
+            NowPlaying.prog = prog
+            NowPlaying.flip = flip
+            NowPlaying.playing = playing
+            /* 锁屏页用它铺多行（±3）；悬浮窗不读，还是两行 */
+            if (around.isNotEmpty()) NowPlaying.around = around
+        }
         if (title.isNotBlank()) NowPlaying.title = title
         main.post {
             /*

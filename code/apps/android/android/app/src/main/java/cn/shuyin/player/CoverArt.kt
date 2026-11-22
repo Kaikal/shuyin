@@ -66,6 +66,15 @@ object CoverArt {
                     if (f.exists() && f.length() > 0) BitmapFactory.decodeFile(f.absolutePath)
                     else embeddedArt(ctx, id) ?: albumThumb(ctx, id)
                 }
+                /*
+                 * 前端推来的本地绝对路径（媒体缓存里落过盘的封面，见 mediaCache.ts 的
+                 * `cachedCoverPath`）：离线时这是唯一拿得到封面的路——CDN 直链联网必失败。
+                 * 路径由我们自己的前端生成（cache_slot 的返回值），直接读。
+                 */
+                cover.startsWith("/") -> {
+                    val f = File(cover)
+                    if (f.exists() && f.length() > 0) BitmapFactory.decodeFile(f.absolutePath) else null
+                }
                 cover.startsWith("http") -> Http.bytes(cover)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
                 else -> null
             }
