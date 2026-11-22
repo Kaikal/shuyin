@@ -2743,6 +2743,28 @@ pub fn run() {
             // 音频线程没有 AppHandle，日志路径从这儿注入（打包版 stderr 看不到）
             crate::player::set_log_path(log_path(app.handle()));
 
+            /* ---- 移动端（iOS）：**必须**在这里显式建窗 ----
+             *
+             * tauri.conf.json 的 `app.windows` 是空数组（桌面主窗口也在下面的代码里
+             * 建，配置驱动的那扇窗会和它撞 label），而 tauri 的 mobile 启动路径
+             * **不会**从空配置里自动造 webview —— 结果就是：App 起来了、进程活着、
+             * 日志正常，但 WKWebView 从来没实例化，用户看到纯黑一屏
+             * （2026-11-22 iPhone 实测：签名装好后打开全黑，啥也没有）。
+             *
+             * 移动端 builder 不暴露 inner_size / center / decorations /
+             * additional_browser_args 这些桌面专属方法（调了编译不过），这里只给 URL。
+             * 放在 manage(db/player) 之后：前端一加载就会 invoke，后端状态必须先就位。
+             */
+            #[cfg(mobile)]
+            {
+                match WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .build()
+                {
+                    Ok(_) => append_log(app.handle(), "window.main ok (mobile)"),
+                    Err(e) => append_log(app.handle(), &format!("window.main fail (mobile) {e}")),
+                }
+            }
+
             // 桌面歌词 / 托盘 / 桌面 / 锁屏窗口：全是桌面专属（移动端没有这些窗口）
             #[cfg(desktop)]
             {

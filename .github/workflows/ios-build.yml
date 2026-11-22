@@ -48,6 +48,9 @@ jobs:
         with:
           workspaces: 'code/apps/desktop/src-tauri'
 
+      - name: Generate app icons (before ios init so AppIcon set is included)
+        run: pnpm -F shuyin-desktop tauri icon src-tauri/icons/1024x1024.png
+
       - name: Generate iOS project (tauri ios init)
         run: pnpm -F shuyin-desktop tauri ios init --ci
 

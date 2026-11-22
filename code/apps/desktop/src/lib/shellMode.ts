@@ -23,6 +23,18 @@ function override(): ShellMode | null {
   return null
 }
 
+/**
+ * iOS 设备（iPhone / iPad / iPod）。
+ *
+ * iPadOS 13 之后 UA 伪装成 Macintosh，只能靠触摸点区分（Mac 的 maxTouchPoints 是 0）。
+ * iOS 和安卓一样是纯触摸环境：桌面布局的悬停才现的按钮、右键菜单、拖拽排序
+ * 在这上面根本点不动，所以形态判定也必须走手机那套（iPad 靠 data-wide 放大尺寸）。
+ */
+export const isIOS = typeof navigator !== 'undefined' && (
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1)
+)
+
 export function detectShell(): ShellMode {
   const forced = override()
   if (forced) return forced
@@ -33,15 +45,18 @@ export function detectShell(): ShellMode {
   const h = window.innerHeight
   const short = Math.min(w, h)
 
-  if (isAndroid) {
+  if (isAndroid || isIOS) {
     /*
-     * 安卓一律走手机那套。
+     * 安卓 / iOS 一律走手机那套。
      *
      * 原来按短边分：< 560 手机、其余平板——平板吃到的是「左侧 232 导航 + 右侧 340
      * 正在播放栏」的桌面结构，可那套交互是按鼠标写的（悬停才现的按钮、右键菜单、
      * 拖拽排序），手指在平板上根本用不了，等于把桌面功能原样搬过去却点不动。
      * 功能集要和手机一致，结构就不能分叉；大屏只做尺寸放大（见 mobile.css 里
      * `html[data-wide='1']` 那一段），不另起一套布局。
+     *
+     * iOS 同理（2026-11-22 iPhone 实测）：不加这一条会按 `w < 900` 落到 tablet，
+     * iPhone 只有 390 宽，桌面三栏直接挤成一团——第一屏就像「啥也没有」。
      */
     return 'phone'
   }
