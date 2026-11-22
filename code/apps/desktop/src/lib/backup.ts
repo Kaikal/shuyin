@@ -153,9 +153,9 @@ export async function exportBundleToFile(): Promise<string | null> {
 
 /** 从文件读配置包（不应用） */
 export async function readBundleFromFile(): Promise<BackupBundle | null> {
-  const path = await bridge.invoke<string | null>('pick_playlist_file')
-  if (!path) return null
-  const text = await bridge.invoke<string>('read_text_abs', { path })
+  const picked = await bridge.pickPlaylistFile()
+  if (!picked) return null
+  const text = await bridge.invoke<string>('read_text_abs', { path: picked.path })
   const data = JSON.parse(text) as BackupBundle
   if (!data || data.app !== BACKUP_APP) throw new Error('这不是疏音的配置包（缺少 app: shuyin 标记）')
   return data

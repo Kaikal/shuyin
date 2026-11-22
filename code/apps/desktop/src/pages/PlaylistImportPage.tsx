@@ -15,6 +15,7 @@ import {
   type MatchOutcome, type ParsedPlaylist,
 } from '../lib/playlistImport'
 import { isLxmcBuffer, parseLxmc, type LxPlaylist } from '../lib/lxmc'
+import { onIncomingPlaylist } from '../lib/incoming'
 import { toast } from '../lib/toast'
 import { queueToast } from '../lib/queueToast'
 import { Cover } from '../components/Cover'
@@ -74,11 +75,15 @@ export function PlaylistImportPage({ onBack }: { onBack?(): void }) {
     return () => { disposed = true; un?.() }
   }, [])
 
-  const loadFile = useCallback(async (path: string) => {
+  const loadFile = useCallback(async (path: string, nameHint?: string) => {
     setBusy(true)
     setError(null)
     try {
-      const name = path.replace(/^.*[\\/]/, '')
+      /*
+       * 文件名优先用原生给的：iOS 是 `file://`、安卓是 `content://`，
+       * 从地址里切 basename 会得到 `%E6%B4%9B…` 或一串数字 id。
+       */
+      const name = nameHint || path.replace(/^.*[\\/]/, '')
 
       /* 洛雪 .lxmc：gzip 容器，按文件头嗅探（扩展名只是参考）。
        * 里面的歌带平台直连 id，直接转在线曲目建歌单，不走模糊匹配。 */
@@ -144,9 +149,17 @@ export function PlaylistImportPage({ onBack }: { onBack?(): void }) {
 
   useEffect(() => { loadRef.current = path => void loadFile(path) }, [loadFile])
 
+  /*
+   * 别的应用把歌单「用疏音打开」送进来（安卓 / iOS / macOS）。
+   *
+   * 这条路上用户的意图很明确，直接解析、给出匹配结果，让他一键落库；
+   * 不静默建歌单——万一送错文件（比如一封 txt），他得看得见。
+   */
+  useEffect(() => onIncomingPlaylist(f => { void loadFile(f.path, f.name) }), [loadFile])
+
   const pick = async () => {
-    const path = await bridge.invoke<string | null>('pick_playlist_file')
-    if (path) await loadFile(path)
+    const picked = await bridge.pickPlaylistFile()
+    if (picked) await loadFile(picked.path, picked.name)
   }
 
   const matchedTracks: LocalTrack[] = outcome?.matched.map(m => m.track) ?? []

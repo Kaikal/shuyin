@@ -589,11 +589,16 @@ export const bridge = {
     return true
   },
 
-  /* ---- 其他应用「打开方式」送进来的文件（安卓）---- */
+  /* ---- 其他应用「打开方式」送进来的文件（安卓 / iOS）---- */
 
-  /** 取一次冷启动时收到的文件（取走即清空）；没有就 null */
+  /**
+   * 取一次「打开方式」收到的文件（取走即清空）；没有就 null。
+   *
+   * 两端协议一致：原生把文件拷进 `caches/inbox` 并写一行 `pending.json`，
+   * 这里读走就删。iOS 的冷启动时机比 WebView 早得多，事件必丢，只有落盘可靠。
+   */
   async takeOpenFile(): Promise<IncomingFile | null> {
-    if (!isAndroid) return null
+    if (!isNative) return null
     try {
       return await invoke<IncomingFile | null>('take_open_file')
     } catch {
@@ -603,8 +608,23 @@ export const bridge = {
 
   /** 把暂存的音源脚本导入清单，返回最终落下的名字 */
   async importSourceStaged(path: string, name?: string): Promise<string> {
-    if (!isAndroid) throw new Error('只有安卓端能从「其他应用打开」导入')
+    if (!isNative) throw new Error('当前环境不能从「其他应用打开」导入')
     return invoke<string>('import_source_staged', { path, name: name ?? '' })
+  },
+
+  /**
+   * 选一个歌单文件。
+   *
+   * `name` 由原生算好回传 —— iOS 的 `file://` URL 里中文是百分号编码的，
+   * 前端自己切 basename 会拿到 `%E6%B4%9B…` 这种串（也是音源导入报错的同源问题）。
+   */
+  async pickPlaylistFile(): Promise<{ path: string; name: string } | null> {
+    if (!isNative) return null
+    try {
+      return await invoke<{ path: string; name: string } | null>('pick_playlist_file')
+    } catch {
+      return null
+    }
   },
 
   /** 订阅扫描进度事件 */

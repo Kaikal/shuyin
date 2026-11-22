@@ -37,6 +37,7 @@ import { useShell } from './lib/shellMode'
 import { statPing } from './lib/stats'
 import { onNative, setBackHandler } from './lib/native/android'
 import { confirm } from './lib/confirm'
+import { pushIncomingPlaylist, isPlaylistFile } from './lib/incoming'
 import { sourceManager } from './lib/online'
 import { desktopLyrics } from './lib/desktopLyrics'
 import { musicDesk } from './lib/musicDesk'
@@ -670,17 +671,21 @@ export function App() {
   }, [])
 
   /*
-   * 「其他应用打开」送进来的音源脚本（安卓）。
+   * 「其他应用打开」送进来的文件（安卓 / iOS）。
    *
-   * 两条入口合起来才不漏：冷启动那一次原生先存着，这里主动取一次
-   * （`take_open_file`，取走即清空）；应用已经开着时由原生推 `app://open-file`。
-   * 原生只把文件拷到 cache/inbox —— **导不导入由用户决定**，所以这里弹确认框，
-   * 而不是闷头写进清单（别人的文件不该替你改配置）。
+   * 两条路：原生先把文件摆到 `caches/inbox` 写一行 pending.json，这里启动时取一次
+   * （`take_open_file`，取走即删）；应用已经开着时安卓还会额外推 `app://open-file`。
+   * 按 id 去重，只处理一次。
+   *
+   * 收进来的东西按扩展名分两路：
+   * - **歌单**（.lxmc / .json / .m3u…）→ 直接导，用户点了「用疏音打开」就是想导它；
+   *   中转给「我的」页去做（那边才有歌单 store），顺手切过去让他看见结果。
+   * - **音源脚本**（.js）→ 必须问一句，别人的文件不该悄悄改配置。
    */
   useEffect(() => {
-    if (!isAndroid) return
+    /* 只有移动端和 macOS 有「用疏音打开」这条系统入口（Windows 没做注册表关联） */
+    if (!isAndroid && !bridge.isMac) return
     let alive = true
-    /* 原生两条路都可能送同一份文件（启动时抢占 / 事件推送），按 id 去重只问一次 */
     const seen = new Set<string>()
 
     const ask = async (f: IncomingFile | null) => {
@@ -688,6 +693,17 @@ export function App() {
       if (f.id) {
         if (seen.has(f.id)) return
         seen.add(f.id)
+      }
+      if (isPlaylistFile(f.name)) {
+        pushIncomingPlaylist({ path: f.path, name: f.name })
+        /*
+         * 落到「导入歌单」子页：那里会把文件解析出来、跟曲库对一遍，
+         * 让用户看着匹配结果决定要不要存。静默建歌单太武断——
+         * 送错文件（一封 txt）时他连发生了什么都不知道。
+         */
+        nav('home')
+        setPlImport(true)
+        return
       }
       const name = f.name.replace(/\.[^.]+$/, '') || '未命名音源'
       const ok = await confirm(f.source
@@ -716,8 +732,20 @@ export function App() {
 
     const off = onNative('app://open-file', payload => { void ask(payload as IncomingFile) })
     void bridge.takeOpenFile().then(f => { if (f) void ask(f) })
-    return () => { alive = false; off() }
-  }, [])
+    /*
+     * iOS 没有事件推送：文件是在 App 已经在后台时送进来的话，
+     * 只会在下一次回到前台才被读走。每次可见就取一次，代价是一次读文件。
+     */
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void bridge.takeOpenFile().then(f => { if (f) void ask(f) })
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      alive = false
+      off()
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [nav])
 
   // 设置还没读出来：先铺一张同色的静态底（绝不留白屏），最多 1.2s
   if (firstLaunch === null) {

@@ -438,14 +438,15 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
   }, [pl.lists, p.library])
 
   /** 导入：选文件 → 解析 → 与曲库匹配 → 存成歌单 */
-  const doImport = useCallback(async () => {
-    if (importing) return
-    setImporting(true)
+  /**
+   * 真正干活的一段：给一个「地址 + 文件名」，解析完存成歌单。
+   *
+   * 与「选文件」分开，是因为同一段逻辑有两个入口——页头那颗「导入歌单」按钮，
+   * 以及别的应用把文件「用疏音打开」送进来（见 lib/incoming.ts）。
+   * 后者不能逼用户再自己去选一遍文件。
+   */
+  const importFrom = useCallback(async (path: string, fileName: string) => {
     try {
-      const path = await bridge.invoke<string | null>('pick_playlist_file')
-      if (!path) return
-      const fileName = path.replace(/^.*[\\/]/, '')
-
       /* 洛雪 .lxmc：歌带平台直连 id，直接建成「在线歌单」，不走路库匹配 */
       if (/\.lxmc$/i.test(fileName)) {
         const raw = await bridge.invoke<number[] | string>('read_bin_abs', { path })
@@ -495,10 +496,26 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
       void settings.set(KEYS.recentImports, [item, ...recent.filter(x => x.name !== fileName)].slice(0, 5))
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), { bad: true })
+    }
+  }, [p.library, pl])
+
+  /** 页头按钮：先让用户选文件，再交给 importFrom */
+  const doImport = useCallback(async () => {
+    if (importing) return
+    setImporting(true)
+    try {
+      const picked = await bridge.pickPlaylistFile()
+      if (!picked) return
+      await importFrom(picked.path, picked.name)
     } finally {
       setImporting(false)
     }
-  }, [importing, p.library, pl])
+  }, [importing, importFrom])
+
+  /*
+   * 别的应用把歌单「用疏音打开」送进来 —— 走的是「导入歌单」子页（PlaylistImportPage），
+   * 那边能先让用户看一眼匹配结果再落库。这里不接管，避免两条路各建一份歌单。
+   */
 
   const playList = (l: LocalPlaylist) => {
     const tracks = pl.tracksOf(l, p.library)

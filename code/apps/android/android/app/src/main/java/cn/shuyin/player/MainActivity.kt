@@ -397,12 +397,25 @@ class MainActivity : Activity() {
         val looks = head.contains("@name") || head.contains("module.exports") ||
             head.contains("musicUrl") || head.contains("lx.")
         Log.i("Shuyin", "open-file: staged ${f.name} ${f.length()}B source=$looks")
-        org.json.JSONObject()
+        val obj = org.json.JSONObject()
             .put("id", "${System.currentTimeMillis()}-${uri.hashCode()}")
             .put("path", f.absolutePath)
             .put("name", name)
             .put("size", f.length())
             .put("source", looks)
+        /*
+         * 再落一份 pending.json：前端启动时用 Rust 的 take_open_file 主动取一次。
+         *
+         * 只靠 emit 事件在冷启动会丢——WebView 就绪的时刻晚于 Intent 到达，
+         * 那一下没人接就永远丢了（真机第一次测试就是这么无声无息的）。
+         * 目录 / 文件名两端必须一致：caches/inbox/pending.json。
+         */
+        try {
+            File(dir, "pending.json").writeText(obj.toString())
+        } catch (e: Exception) {
+            Log.w("Shuyin", "open-file: 写 pending.json 失败 ${e.message}")
+        }
+        obj
     } catch (e: Exception) {
         Log.w("Shuyin", "打开方式：${e.message}")
         null

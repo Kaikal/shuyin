@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_fs::{FilePath, FsExt};
 
 /// 是否「真的要退出」（托盘菜单退出前置位，否则关窗口只是收进托盘）
 pub struct QuitFlag(pub AtomicBool);
@@ -281,43 +282,39 @@ async fn pick_music_folder(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 /// 选取歌单文件（其他音乐 APP 导出的 json / txt / csv / m3u / lxmc）
+///
+/// 返回 `{ path, name }`：`path` 原样回传（iOS 是 `file://`、安卓是 `content://`），
+/// 读的时候交给 `read_*_abs` 按方案走；`name` 由这里算好，前端不用再猜——
+/// 从 URL 里切 basename 会拿到 `%E6%B4%9B…` 这种百分号编码的鬼东西。
 #[tauri::command]
-async fn pick_playlist_file(app: AppHandle) -> Result<Option<String>, String> {
-    #[cfg(desktop)]
-    {
-        let file = app
-            .dialog()
-            .file()
-            .add_filter("歌单文件", &["json", "txt", "csv", "m3u", "m3u8", "pls", "lxmc"])
-            .add_filter("全部文件", &["*"])
-            .blocking_pick_file();
-        Ok(file.map(|p| p.to_string()))
-    }
-    #[cfg(mobile)]
-    {
-        let _ = app;
-        Err("移动端暂不支持导入本地歌单文件".to_string())
-    }
+async fn pick_playlist_file(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let picked = file_filter(
+        app.dialog().file(),
+        &["json", "txt", "csv", "m3u", "m3u8", "pls", "lxmc"],
+    )
+    .blocking_pick_file();
+    let Some(f) = picked else { return Ok(None) };
+    let name = picked_name(&f).unwrap_or_else(|| "歌单".to_string());
+    Ok(Some(serde_json::json!({ "path": f.to_string(), "name": name })))
 }
 
 /// 读二进制文件（lxmc 这类 gzip 容器走这里；大小上限与文本版一致）
 #[tauri::command]
-fn read_bin_abs(path: String) -> Result<Vec<u8>, String> {
-    let meta = std::fs::metadata(&path).map_err(|e| format!("读取文件失败：{e}"))?;
-    if meta.len() > 16 * 1024 * 1024 {
+fn read_bin_abs(app: AppHandle, path: String) -> Result<Vec<u8>, String> {
+    let bytes = read_any(&app, &path)?;
+    if bytes.len() > 16 * 1024 * 1024 {
         return Err("文件超过 16MB，疑似不是歌单文件".to_string());
     }
-    std::fs::read(&path).map_err(|e| format!("读取文件失败：{e}"))
+    Ok(bytes)
 }
 
 /// 读取任意路径的文本：UTF-8 优先，失败回落 GB18030（大量国产 APP 导出的 txt 是 GBK）
 #[tauri::command]
-fn read_text_abs(path: String) -> Result<String, String> {
-    let meta = std::fs::metadata(&path).map_err(|e| format!("读取文件失败：{e}"))?;
-    if meta.len() > 16 * 1024 * 1024 {
+fn read_text_abs(app: AppHandle, path: String) -> Result<String, String> {
+    let bytes = read_any(&app, &path)?;
+    if bytes.len() > 16 * 1024 * 1024 {
         return Err("文件超过 16MB，疑似不是歌单文件".to_string());
     }
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败：{e}"))?;
     if let Ok(s) = std::str::from_utf8(&bytes) {
         return Ok(s.trim_start_matches('\u{feff}').to_string());
     }
@@ -1245,15 +1242,86 @@ fn write_script(dir: &std::path::Path, name: &str, code: &str) -> Result<String,
     Ok(format!("{}#{}", manifest_path(dir).to_string_lossy(), safe))
 }
 
+/* ---- 选文件 / 读文件：三端差异统一收在这里 ---- */
+
+/// 把对话框或前端给的地址变成文件插件能吃的 `FilePath`。
+///
+/// 平台差异是硬伤，不统一就会踩：
+/// - **iOS**：文件对话框返回 `file://` URL，中文名还是**百分号编码**的。
+///   直接 `PathBuf::from(url)` 拿到的是 `%E6%B4%9B%E9%9B%AA…1.js` 这种字面量，
+///   于是报 `No such file or directory (os error 2)`（2026-11-22 用户导入音源那条）。
+/// - **安卓**：返回 `content://` URI，`std::fs` 完全读不了，得走 ContentResolver。
+/// - **桌面**：普通路径，两个变体都一样。
+fn to_file_path(path: &str) -> FilePath {
+    if path.contains("://") {
+        if let Ok(u) = tauri::Url::parse(path) {
+            return FilePath::Url(u);
+        }
+    }
+    FilePath::Path(PathBuf::from(path))
+}
+
+/// 跨平台读整个文件。
+///
+/// `file://` 会顺带申请 iOS 的安全作用域（沙箱外的文件必须这么做才能读），
+/// `content://` 走 ContentResolver 拿到 fd —— 这两件事 `std::fs` 都做不到。
+fn read_any(app: &AppHandle, path: &str) -> Result<Vec<u8>, String> {
+    if path.contains("://") {
+        return app
+            .fs()
+            .read(to_file_path(path))
+            .map_err(|e| format!("读取文件失败：{e}"));
+    }
+    std::fs::read(path).map_err(|e| format!("读取文件失败：{e}"))
+}
+
+/// 从对话框返回的地址里取文件名。
+///
+/// `file://` / 普通路径能转成真路径，文件名直接拿（顺带解掉百分号编码）；
+/// 安卓 `content://` 的末段是 provider 的内部 id（数字），真名得看 query 里的
+/// displayName —— 取不到就返回 None，由调用方用脚本里的 `@name` 兜底。
+fn picked_name(f: &FilePath) -> Option<String> {
+    if let Ok(p) = f.clone().into_path() {
+        if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+            if !n.is_empty() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    if let FilePath::Url(u) = f {
+        for (k, v) in u.query_pairs() {
+            if k.eq_ignore_ascii_case("displayname") || k.eq_ignore_ascii_case("display_name") || k == "name" {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 移动端的文件选择器不接受「按扩展名过滤」：安卓是按 MIME 匹配的，
+/// `.lxmc` / `.m3u8` 这类自定义后缀查不到 MIME，加了过滤反而选不中文件。
+/// 桌面上正常加，方便用户只看到候选。
+fn file_filter<R: tauri::Runtime>(
+    b: tauri_plugin_dialog::FileDialogBuilder<R>,
+    list: &[&str],
+) -> tauri_plugin_dialog::FileDialogBuilder<R> {
+    #[cfg(desktop)]
+    {
+        b.add_filter("支持的文件", list).add_filter("全部文件", &["*"])
+    }
+    #[cfg(mobile)]
+    {
+        let _ = list;
+        b
+    }
+}
+
 /// 选本地 `.js` 脚本文件（可多选），收进音源清单。返回导入后的名字列表。
 #[tauri::command]
 async fn import_source_files(app: AppHandle) -> Result<Vec<String>, String> {
-    let picked = app
-        .dialog()
-        .file()
-        .add_filter("音源脚本", &["js"])
-        .add_filter("全部文件", &["*"])
-        .blocking_pick_files();
+    let picked = file_filter(app.dialog().file(), &["js"]).blocking_pick_files();
     let files = match picked {
         Some(v) => v,
         None => return Ok(Vec::new()),
@@ -1261,18 +1329,17 @@ async fn import_source_files(app: AppHandle) -> Result<Vec<String>, String> {
     let dir = sources_dir(&app);
     let mut out = Vec::new();
     for f in files {
-        let p = PathBuf::from(f.to_string());
-        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("source.js");
-        let bytes = match std::fs::read(&p) {
-            Ok(v) => v,
-            Err(e) => return Err(format!("读取 {name} 失败：{e}")),
-        };
+        let name = picked_name(&f).unwrap_or_else(|| "source.js".to_string());
+        let bytes = app
+            .fs()
+            .read(f)
+            .map_err(|e| format!("读取 {name} 失败：{e}"))?;
         if bytes.len() > 8 * 1024 * 1024 {
             return Err(format!("{name} 超过 8MB，不像是音源脚本"));
         }
         let code = String::from_utf8_lossy(&bytes).to_string();
-        let path = write_script(&dir, name, &code)?;
-        out.push(safe_script_name(path.rsplit('#').next().unwrap_or("source")));
+        write_script(&dir, &name, &code)?;
+        out.push(safe_script_name(&name));
     }
     Ok(out)
 }
@@ -1308,6 +1375,116 @@ async fn import_source_url(app: AppHandle, url: String, name: Option<String>) ->
         .find(|s| !s.trim().is_empty())
         .unwrap_or("source.js")
         .to_string();
+    write_script(&sources_dir(&app), name.as_deref().unwrap_or(&fallback), &code)
+}
+
+/* ---- 「其他应用打开」送进来的文件 ---- */
+
+/// 文件名清洗：外部来源的名字可能带斜杠 / 引号，落盘前换成下划线。
+fn safe_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c })
+        .collect();
+    let t = cleaned.trim().to_string();
+    if t.is_empty() {
+        "open-file.bin".to_string()
+    } else {
+        t.chars().take(120).collect()
+    }
+}
+
+/// 原生侧暂存文件的目录：`caches/inbox`。
+///
+/// 安卓在 `MainActivity.stageIncoming` 里拷一次，Apple 平台在 `RunEvent::Opened`
+/// 里拷一次，都写到这个位置——目录名两端必须一致。
+fn open_file_inbox(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_cache_dir().ok().map(|d| d.join("inbox"))
+}
+
+/// 把「用疏音打开」送进来的文件摆到 inbox 上。
+///
+/// 只落盘、不推送：Apple 平台的冷启动打开早于 WebView 就绪，推事件必丢；
+/// 前端启动 / 回到前台时用 `take_open_file` 取一次，天然不漏。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn stage_opened_file(app: &AppHandle, src: &std::path::Path) {
+    let Some(inbox) = open_file_inbox(app) else { return };
+    let _ = std::fs::create_dir_all(&inbox);
+    let raw = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("open-file.bin")
+        .to_string();
+    let dest = inbox.join(safe_file_name(&raw));
+    if std::fs::copy(src, &dest).is_err() {
+        return;
+    }
+    let looks = std::fs::read_to_string(&dest)
+        .map(|s| {
+            let head: String = s.chars().take(6000).collect();
+            head.contains("@name")
+                || head.contains("module.exports")
+                || head.contains("musicUrl")
+                || head.contains("lx.")
+        })
+        .unwrap_or(false);
+    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let obj = serde_json::json!({
+        "id": format!("{now}-{raw}"),
+        "path": dest.to_string_lossy(),
+        "name": raw,
+        "size": size,
+        "source": looks,
+    });
+    let _ = std::fs::write(inbox.join("pending.json"), obj.to_string());
+}
+
+/// 运行期事件：目前只接 Apple 平台的「用疏音打开」。
+///
+/// Tauri 在 macOS / iOS 上把 openURL 转成 `RunEvent::Opened`，URL 是 `file://`。
+#[allow(unused_variables)]
+fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    if let tauri::RunEvent::Opened { urls } = event {
+        for u in urls {
+            if u.scheme() != "file" {
+                continue;
+            }
+            if let Ok(p) = u.to_file_path() {
+                stage_opened_file(app, &p);
+            }
+        }
+    }
+}
+
+/// 取走一次「其他应用打开」的文件（取走即删）。
+///
+/// 原生只负责把文件摆到桌上（`pending.json` 一行元信息），**导不导入由用户决定**，
+/// 所以这里是「读走」而不是「导入」——前端拿到后弹确认框。
+///
+/// 为什么用文件而不是事件：iOS 的冷启动打开时机比 WebView 就绪早得多，
+/// 事件必丢；文件放着不怕，前端启动/回到前台取一次就有。
+#[tauri::command]
+fn take_open_file(app: AppHandle) -> Option<serde_json::Value> {
+    let f = open_file_inbox(&app)?.join("pending.json");
+    let text = std::fs::read_to_string(&f).ok()?;
+    let _ = std::fs::remove_file(&f);
+    serde_json::from_str(&text).ok()
+}
+
+/// 把原生暂存的音源脚本收进清单，返回最终落下的名字。
+#[tauri::command]
+fn import_source_staged(app: AppHandle, path: String, name: Option<String>) -> Result<String, String> {
+    let bytes = read_any(&app, &path)?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("文件超过 8MB，不像是音源脚本".to_string());
+    }
+    let code = String::from_utf8_lossy(&bytes).to_string();
+    let fallback = picked_name(&to_file_path(&path)).unwrap_or_else(|| "source.js".to_string());
     write_script(&sources_dir(&app), name.as_deref().unwrap_or(&fallback), &code)
 }
 
@@ -2949,7 +3126,7 @@ pub fn run() {
             }
         });
 
-    builder
+    let app = builder
         .invoke_handler(tauri::generate_handler![
             check_update,
             app_version,
@@ -2992,6 +3169,8 @@ pub fn run() {
             import_source_files,
             import_source_text,
             import_source_url,
+            import_source_staged,
+            take_open_file,
             delete_source_script,
             pause,
             resume,
@@ -3049,6 +3228,13 @@ pub fn run() {
             #[cfg(desktop)]
             tray_action,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    /*
+     * 用 `build()` + `run(callback)` 而不是 `run(context)`：后者等价于
+     * 「build 之后空回调」，换成带回调的版本不改变任何现有行为，
+     * 只是给 Apple 平台留一个接收「用疏音打开」的入口。
+     */
+    app.run(|app_handle, event| on_run_event(app_handle, event));
 }

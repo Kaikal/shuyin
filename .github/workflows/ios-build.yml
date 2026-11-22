@@ -54,7 +54,7 @@ jobs:
       - name: Generate iOS project (tauri ios init)
         run: pnpm -F shuyin-desktop tauri ios init --ci
 
-      - name: Patch Info.plist (中文名 / 状态栏 / 后台音频)
+      - name: Patch Info.plist (中文名 / 状态栏 / 后台音频 / 文件关联)
         run: |
           PLIST=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*" | head -1)
           echo "plist: $PLIST"
@@ -76,9 +76,72 @@ jobs:
           if 'audio' not in modes:
               modes.append('audio')
           d['UIBackgroundModes'] = modes
+
+          # ---- 文件关联：让疏音出现在「用其他 App 打开」列表里 ----
+          # 洛雪的 .lxmc / 音源脚本 .js 都没有系统内置类型，不自己声明的话
+          # 分享面板里根本没有疏音（用户原话：「iPhone 上音源选择打开方式也没有我们的 APP」）
+          imported = d.get('UTImportedTypeDeclarations') or []
+          have = {x.get('UTTypeIdentifier') for x in imported}
+          for uti in [
+              {
+                  'UTTypeIdentifier': 'cn.shuyin.source-script',
+                  'UTTypeDescription': '疏音音源脚本',
+                  'UTTypeConformsTo': ['public.source-code'],
+                  'UTTypeTagSpecification': {'public.filename-extension': ['js', 'mjs']},
+              },
+              {
+                  'UTTypeIdentifier': 'cn.shuyin.lxmc',
+                  'UTTypeDescription': '洛雪歌单',
+                  'UTTypeConformsTo': ['public.data'],
+                  'UTTypeTagSpecification': {'public.filename-extension': ['lxmc']},
+              },
+              {
+                  'UTTypeIdentifier': 'cn.shuyin.playlist',
+                  'UTTypeDescription': '歌单文件',
+                  'UTTypeConformsTo': ['public.text'],
+                  'UTTypeTagSpecification': {'public.filename-extension': ['m3u', 'm3u8', 'pls']},
+              },
+          ]:
+              if uti['UTTypeIdentifier'] not in have:
+                  imported.append(uti)
+          d['UTImportedTypeDeclarations'] = imported
+          # LSHandlerRank=Alternate：别去抢系统的默认打开方式，只在「其他应用」里出现
+          d['CFBundleDocumentTypes'] = [
+              {
+                  'CFBundleTypeName': '音源脚本',
+                  'CFBundleTypeRole': 'Editor',
+                  'LSHandlerRank': 'Alternate',
+                  'LSItemContentTypes': [
+                      'cn.shuyin.source-script', 'public.source-code',
+                      'com.netscape.javascript-source', 'public.plain-text',
+                  ],
+                  'CFBundleTypeExtensions': ['js', 'mjs'],
+              },
+              {
+                  'CFBundleTypeName': '歌单',
+                  'CFBundleTypeRole': 'Editor',
+                  'LSHandlerRank': 'Alternate',
+                  'LSItemContentTypes': ['cn.shuyin.lxmc', 'cn.shuyin.playlist', 'public.json'],
+                  'CFBundleTypeExtensions': ['lxmc', 'm3u', 'm3u8', 'pls', 'json'],
+              },
+          ]
+          # 原地读取（不复制到临时目录）：文件本身走安全作用域，配合 Rust 侧
+          # startAccessingSecurityScopedResource 读——大歌单复制一次太慢
+          d['LSSupportsOpeningDocumentsInPlace'] = True
           plistlib.dump(d, open(p, 'wb'))
           print('displayName =', d['CFBundleDisplayName'], '| region =', d['CFBundleDevelopmentRegion'])
+          print('docTypes =', [x['CFBundleTypeName'] for x in d['CFBundleDocumentTypes']])
           EOF
+
+      - name: Inspect AppDelegate (确认 tao 是否接管 openURL)
+        run: |
+          AD=$(find apps/desktop/src-tauri/gen/apple -name "AppDelegate.swift" -not -path "*/Frameworks/*" | head -1)
+          echo "AppDelegate: $AD"
+          if [ -z "$AD" ]; then echo "没找到 AppDelegate.swift"; exit 0; fi
+          echo "--- 全文"
+          cat "$AD"
+          echo "--- 是否已有 openURL 处理（tao 会自己接管，有就不需要我们补）"
+          grep -n "open url\|openURL\|OpenURL" "$AD" || echo "(AppDelegate 里没有，交给 tao 的 Event::Opened)"
 
       - name: Force our app icon into the iOS project
         run: |
@@ -183,6 +246,12 @@ jobs:
           echo "--- 包内图标文件"
           ls -l "$APP"/AppIcon*.png 2>/dev/null || echo "(没有散图，图标走 Assets.car)"
           ls -l "$APP"/Assets.car 2>/dev/null || true
+          echo "--- 文件关联（决定「用疏音打开」里有没有我们）"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$APP/Info.plist" 2>/dev/null || echo "(没有 CFBundleDocumentTypes)"
+          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations; do
+            printf "%s = " "$k"
+            /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null | head -3 || echo "(缺失)"
+          done
 
       - name: Package unsigned IPA
         run: |

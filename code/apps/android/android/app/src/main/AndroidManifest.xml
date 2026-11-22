@@ -106,6 +106,20 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
+            <!--
+              歌单文件。洛雪的 `.lxmc` 一般上报成未知类型，上面那条已经兜住；
+              这里补的是**系统认得出类型**的那些——JSON 导出的歌单、m3u/pls 列表。
+              不加这条的话，在文件管理器里点「用其他应用打开」看不到疏音。
+            -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="audio/x-mpegurl" />
+                <data android:mimeType="audio/mpegurl" />
+                <data android:mimeType="application/vnd.apple.mpegurl" />
+            </intent-filter>
         </activity>
 
         <!--
