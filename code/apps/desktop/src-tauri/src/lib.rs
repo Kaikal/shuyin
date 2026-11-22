@@ -1407,7 +1407,8 @@ fn open_file_inbox(app: &AppHandle) -> Option<PathBuf> {
 /// 只落盘、不推送：Apple 平台的冷启动打开早于 WebView 就绪，推事件必丢；
 /// 前端启动 / 回到前台时用 `take_open_file` 取一次，天然不漏。
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn stage_opened_file(app: &AppHandle, src: &std::path::Path) {
+fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
+    let Ok(src) = url.to_file_path() else { return };
     let Some(inbox) = open_file_inbox(app) else { return };
     let _ = std::fs::create_dir_all(&inbox);
     let raw = src
@@ -1416,19 +1417,24 @@ fn stage_opened_file(app: &AppHandle, src: &std::path::Path) {
         .unwrap_or("open-file.bin")
         .to_string();
     let dest = inbox.join(safe_file_name(&raw));
-    if std::fs::copy(src, &dest).is_err() {
+    /*
+     * 必须经 fs 插件读，不能用 std::fs::copy：
+     * 「文件」App / iCloud Drive 送来的文件在沙箱外，iOS 只有先
+     * `startAccessingSecurityScopedResource` 才读得到，直接 copy 是 EPERM。
+     * 插件对 `file://` 自动做这一步（macOS 上等价于转路径再读）。
+     */
+    let Ok(bytes) = app.fs().read(FilePath::Url(url.clone())) else { return };
+    if bytes.len() > 32 * 1024 * 1024 {
         return;
     }
-    let looks = std::fs::read_to_string(&dest)
-        .map(|s| {
-            let head: String = s.chars().take(6000).collect();
-            head.contains("@name")
-                || head.contains("module.exports")
-                || head.contains("musicUrl")
-                || head.contains("lx.")
-        })
-        .unwrap_or(false);
-    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    if std::fs::write(&dest, &bytes).is_err() {
+        return;
+    }
+    let head: String = String::from_utf8_lossy(&bytes).chars().take(6000).collect();
+    let looks = head.contains("@name")
+        || head.contains("module.exports")
+        || head.contains("musicUrl")
+        || head.contains("lx.");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1437,7 +1443,7 @@ fn stage_opened_file(app: &AppHandle, src: &std::path::Path) {
         "id": format!("{now}-{raw}"),
         "path": dest.to_string_lossy(),
         "name": raw,
-        "size": size,
+        "size": bytes.len(),
         "source": looks,
     });
     let _ = std::fs::write(inbox.join("pending.json"), obj.to_string());
@@ -1451,12 +1457,7 @@ fn on_run_event(app: &AppHandle, event: tauri::RunEvent) {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     if let tauri::RunEvent::Opened { urls } = event {
         for u in urls {
-            if u.scheme() != "file" {
-                continue;
-            }
-            if let Ok(p) = u.to_file_path() {
-                stage_opened_file(app, &p);
-            }
+            stage_opened_file(app, &u);
         }
     }
 }
