@@ -50,6 +50,8 @@ symphonia = { version = "0.5", default-features = false, features = ["aac", "fla
 sha2 = "0.10"
 hex = "0.4"
 rayon = "1.10"
+# 封面转 data URL（iOS 的 Live Activity 扩展读不到 App 沙箱，只能把图塞进状态里）
+base64 = "0.22"
 
 # 出网：平台 API 代理（绕 CORS）+ 在线曲目流式读取（HTTP Range）
 # 用系统 TLS（Windows=schannel），不额外打包根证书
@@ -75,11 +77,18 @@ windows = { version = "0.62", features = ["Foundation", "Media", "Win32_Foundati
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 
-# macOS 系统媒体会话（Now Playing / 耳机线控 / 控制中心）。
+# Apple 平台的原生调用（objc2 + block2）。
+#   macOS：系统媒体会话（Now Playing / 耳机线控 / 控制中心）
+#   iOS：  同一套媒体会话 + AVAudioSession（见 smtc.rs 的 apple 模块），
+#          外加关掉 WKWebView 的双指缩放（见 lib.rs 的 disable_zoom）
 # 故意不用生成的强类型 API：NSDictionary 的泛型值类型在 objc2 各版本间
-# 反复变过，裸 msg_send 更抗版本漂移（见 smtc.rs 的 mac 分支）——
+# 反复变过，裸 msg_send 更抗版本漂移——
 # 所以连 objc2-foundation 都不需要，NSString/NSNumber 全走 class! + msg_send
-[target.'cfg(target_os = "macos")'.dependencies]
+#
+# block2 是 MPRemoteCommandCenter 的按键回调（addTargetWithHandler:）要用的，
+# macOS / iOS 两端同一套。iOS 灵动岛按钮走 Swift 侧 LiveActivityIntent，
+# 那条链路不需要 block2。
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
 

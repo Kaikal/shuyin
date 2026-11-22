@@ -54,6 +54,14 @@ jobs:
       - name: Generate iOS project (tauri ios init)
         run: pnpm -F shuyin-desktop tauri ios init --ci
 
+      - name: Install Live Activity Swift bridge into the iOS project
+        run: |
+          # 灵动岛的 Swift 桥接必须编进主 App 二进制（Rust 侧 dlsym 找
+          # shuyin_live_sync 这些 @_cdecl 符号）。脚本兼容 Xcode 16 的
+          # synchronized group 与传统 PBXGroup 两种工程格式。
+          gem install xcodeproj --no-document >/dev/null 2>&1 || sudo gem install xcodeproj --no-document
+          ruby apps/desktop/src-tauri/ios/install-swift.rb apps/desktop/src-tauri/gen/apple
+
       - name: Patch Info.plist (中文名 / 状态栏 / 后台音频 / 文件关联)
         run: |
           PLIST=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*" | head -1)
@@ -125,6 +133,9 @@ jobs:
                   'CFBundleTypeExtensions': ['lxmc', 'm3u', 'm3u8', 'pls', 'json'],
               },
           ]
+          # 实时活动（灵动岛 / 锁屏）：不写这个键，Activity.request 直接抛错，
+          # 岛永远不出现——而且系统不给任何提示，纯靠这个键
+          d['NSSupportsLiveActivities'] = True
           # 原地读取（不复制到临时目录）：文件本身走安全作用域，配合 Rust 侧
           # startAccessingSecurityScopedResource 读——大歌单复制一次太慢
           d['LSSupportsOpeningDocumentsInPlace'] = True
@@ -235,6 +246,48 @@ jobs:
         run: |
           pnpm -F shuyin-desktop tauri ios build --ci --target aarch64 --export-method debugging || true
 
+      - name: Build Live Activity widget extension and embed
+        run: |
+          APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d -path "*Applications*" | head -1)
+          if [ -z "$APP" ]; then
+            APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
+          fi
+          echo "app: $APP"
+          if [ -z "$APP" ]; then echo "主包没出来，扩展无从谈起"; exit 1; fi
+
+          # 版本号必须与宿主一致，否则安装时被系统拒（extension version mismatch）
+          MV=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          BV=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          echo "host version: $MV ($BV)"
+
+          brew install xcodegen >/dev/null 2>&1 || true
+          which xcodegen || { echo "xcodegen 装不上"; exit 1; }
+
+          WIDGET=apps/desktop/src-tauri/ios/widget
+          ( cd "$WIDGET" && xcodegen generate --quiet )
+          xcodebuild -project "$WIDGET/ShuyinWidget.xcodeproj" \
+                     -target ShuyinWidget \
+                     -sdk iphoneos \
+                     -configuration Release \
+                     -arch arm64 \
+                     MARKETING_VERSION="$MV" \
+                     CURRENT_PROJECT_VERSION="$BV" \
+                     CONFIGURATION_BUILD_DIR="$PWD/$WIDGET/build" \
+                     build 2>&1 | tail -40
+
+          APPEX=$(find "$WIDGET/build" -maxdepth 2 -name "*.appex" -type d | head -1)
+          echo "appex: $APPEX"
+          if [ -z "$APPEX" ]; then echo "扩展没编出来（看上面的 xcodebuild 日志）"; exit 1; fi
+
+          # PlugIns/ 是 Xcode 认可的扩展存放位置。未签名 IPA 直接拷进去即可，
+          # Sideloadly / 爱思重签时会连扩展一起签。
+          mkdir -p "$APP/PlugIns"
+          rm -rf "$APP/PlugIns/ShuyinWidget.appex"
+          cp -R "$APPEX" "$APP/PlugIns/"
+          echo "--- PlugIns"
+          ls -la "$APP/PlugIns"
+          /usr/libexec/PlistBuddy -c "Print :NSExtension" "$APP/PlugIns/ShuyinWidget.appex/Info.plist"
+
       - name: Verify app bundle (name / icon / status bar)
         run: |
           APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
@@ -248,9 +301,14 @@ jobs:
           ls -l "$APP"/Assets.car 2>/dev/null || true
           echo "--- 文件关联（决定「用疏音打开」里有没有我们）"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$APP/Info.plist" 2>/dev/null || echo "(没有 CFBundleDocumentTypes)"
-          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations; do
+          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations NSSupportsLiveActivities; do
             printf "%s = " "$k"
             /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null | head -3 || echo "(缺失)"
+          done
+          echo "--- 灵动岛扩展（没有它 = 岛上什么都看不到）"
+          ls -la "$APP/PlugIns" 2>/dev/null || echo "(没有 PlugIns 目录)"
+          for f in "$APP"/PlugIns/*.appex/ShuyinWidget; do
+            [ -f "$f" ] && echo "可执行文件: $f ($(ls -l "$f" | awk '{print $5}') bytes)"
           done
 
       - name: Package unsigned IPA

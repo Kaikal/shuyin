@@ -1,0 +1,64 @@
+# Windows 安装包（NSIS .exe）云打包。
+#
+# 和 iOS / macOS 那两条对称：改前端或 src-tauri 都会触发，产物挂在本次 run
+# 的 Artifacts 里。本机不用装 Rust 也能出包。
+#
+# 版本号不在这里改——跟着 code/apps/desktop/package.json 与 tauri.conf.json 走。
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-build.yml'
+      - 'code/apps/desktop/src-tauri/**'
+      - 'code/apps/desktop/src/**'
+      - 'code/packages/**'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: code
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.8.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: code/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'code/apps/desktop/src-tauri'
+
+      # tauri build 会先跑 beforeBuildCommand（vite build），再编 Rust、最后打包 NSIS。
+      # NSIS 工具由 tauri-cli 自己下载，不需要预装。
+      - name: Build installer (NSIS)
+        run: pnpm -F shuyin-desktop tauri build --bundles nsis
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p ../dist-win
+          find apps/desktop/src-tauri/target/release/bundle/nsis -name "*.exe" -exec cp {} ../dist-win/ \;
+          ls -lh ../dist-win
+          if [ -z "$(ls -A ../dist-win)" ]; then echo "没有产出 exe"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shuyin-windows
+          path: code/dist-win/*
+          if-no-files-found: error

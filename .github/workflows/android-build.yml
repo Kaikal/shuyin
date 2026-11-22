@@ -1,0 +1,88 @@
+# 安卓两个 APK（手机版 / 车机版）云打包。
+#
+# 产物：shuyin-phone-*.apk（cn.shuyin.player）+ shuyin-car-*.apk（cn.shuyin.player.car）
+#
+# 签名用的是 release 配置指向的 debug keystore（见 app/build.gradle 的注释：
+# 交付用自签名，上架再换正式 keystore）。GitHub 的 runner 上不存在这个文件，
+# 所以下面先用 keytool 按同样的 alias/口令生成一份——口令必须和 build.gradle
+# 里写死的一致（android / androiddebugkey / android），否则签名阶段会报
+# "Keystore was tampered with"。
+name: Android build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-build.yml'
+      - 'code/apps/android/**'
+      - 'code/apps/desktop/src/**'
+      - 'code/packages/**'
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: code
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.8.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: code/pnpm-lock.yaml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # 安卓壳不跑 Tauri：前端产物直接落到 app/src/main/assets/www
+      - name: Build web assets
+        run: bash apps/android/build-web.sh
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform 34
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      - name: Create debug keystore
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build APKs
+        working-directory: code/apps/android/android
+        run: ./gradlew assemblePhoneRelease assembleCarRelease --no-daemon --stacktrace
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p apps/android/dist-android
+          find apps/android/android/app/build/outputs/apk -name "*.apk" \
+            -exec cp {} apps/android/dist-android/ \;
+          # 按变体重命名，避免两个 apk 同名覆盖（Gradle 产物本身就叫 app-phone-release.apk）
+          ls -lh apps/android/dist-android
+          if [ -z "$(ls -A apps/android/dist-android)" ]; then echo "没有产出 apk"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shuyin-android
+          path: code/apps/android/dist-android/*
+          if-no-files-found: error

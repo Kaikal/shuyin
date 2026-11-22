@@ -26,6 +26,8 @@ import {
 } from './online'
 import { cachedAudio, cachedAudioQuality, dropCachedAudio, hasCachedAudio, warmCache } from './audioCache'
 import { cachedCoverPath, cachedLyric, rememberCover, rememberLyric, mediaCacheVersion } from './mediaCache'
+import { isIOS } from './shellMode'
+import { liveArtOf } from './liveArt'
 import { installIdleTracking, userActive, waitIdle } from './idle'
 import { diag } from './diag'
 import { parseLrc, plainLyricLines } from '@shuyin/core'
@@ -1989,6 +1991,40 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * rememberCover 1.5s 后落盘），落盘完成版本号 +1，靠它在依赖里触发重推。
    */
   const cacheVer = mediaCacheVersion()
+
+  /*
+   * 灵动岛（iOS Live Activity）：把「当前曲目 + 播放状态」推给原生。
+   *
+   * 只在状态**真的变了**的时候调（换歌 / 播放暂停 / 拖动进度 / 封面补全），
+   * 绝不当心跳用：进度条由扩展里的 `Text(timerInterval:)` 自己走秒，
+   * 每秒推一次只会烧掉 Live Activity 的更新预算（超了系统会限流，
+   * 表现就是「灵动岛卡在某一秒不动」）。
+   *
+   * 封面必须先压成 base64：扩展和主 App 是两个沙箱，路径在那边读不到。
+   */
+  const liveSyncNow = useCallback(
+    async (t: LocalTrack | undefined, playing: boolean, position: number, duration: number) => {
+      if (!isIOS) return
+      if (!t) {
+        // 队列空了 / 播完了：把锁屏上那条收掉，别留一块过期的卡片
+        void bridge.liveEnd().catch(() => { /* 没有活着的 activity 时是空操作 */ })
+        return
+      }
+      const art = await liveArtOf(cachedCoverPath(t.cover) ?? null)
+      void bridge.liveSync({
+        title: t.title ?? '',
+        artist: t.artist ?? '',
+        album: t.album ?? '',
+        art,
+        playing,
+        position: Math.max(0, position || 0),
+        duration: Math.max(0, duration || 0),
+        anchor: Date.now() / 1000,
+      }).catch(() => { /* 灵动岛起不来不该影响播放 */ })
+    },
+    [],
+  )
+
   useEffect(() => {
     if (!bridge.isTauri && !isAndroid) return
     const t = currentTrack(queueState)
@@ -2009,6 +2045,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (bridge.isTauri) {
         void bridge.invoke('smtc_update', { title: '', artist: '', album: '', playing: false, cover: '', fav: false }).catch(() => {})
       }
+      void liveSyncNow(undefined, false, 0, 0)
       return
     }
     void bridge.invoke('smtc_update', {
@@ -2018,6 +2055,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       playing: snapshot.playing,
       cover: cachedCoverPath(t.cover) ?? t.cover ?? '',
       fav: curFavOn,
+      /*
+       * 锁屏「正在播放」卡片靠这两个画进度条。
+       *
+       * 只在切歌 / 暂停 / 恢复时推一次——系统拿「已播秒数 + 播放速率」自己走秒。
+       * 每秒推一次不但没必要，还会让后台被节流的 App 把卡片卡在某一秒不动
+       * （和灵动岛那边是同一个教训）。
+       */
+      position: snapshot.position,
+      duration: snapshot.duration,
     }).catch(() => { /* 系统媒体会话不可用不影响播放 */ })
     /*
      * 留痕：通知栏「切了歌但信息不跟」时，最需要分清的是
@@ -2025,7 +2071,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      *   · 推了但原生没吃（原生侧有 `meta <-` 那条，成对看）。
      */
     void bridge.trace(`meta push "${t.title ?? ''}" idx=${queueState.index}`)
-  }, [currentId, snapshot.playing, curFavOn, cacheVer,
+    /*
+     * 顺手推一份给灵动岛。
+     *
+     * 这里用渲染时的 `snapshot.position` 而不是现查一次 `playerState()`：
+     * 切歌的那一帧刚发完 play_file，原生状态还没回来，现查会拿到上一首的
+     * 位置——反而更错。effect 的依赖里没有 position 是故意的：位置每秒都变，
+     * 进了依赖就等于每秒推一次。
+     */
+    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration)
+  }, [currentId, snapshot.playing, curFavOn, cacheVer, liveSyncNow,
       metaTrack?.title, metaTrack?.artist, metaTrack?.album, metaTrack?.cover])
 
   /*
@@ -2704,7 +2759,36 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // 本地文件 seek 是内存级操作，1.5s 足够；在线要重开 Range 请求，给 4s
     seekGuard.current = { target: secs, until: performance.now() + (curOnlineRef.current ? 4000 : 1500) }
     void bridge.seek(secs)
-  }, [queueState])
+    /*
+     * 拖动进度也要推一次灵动岛：扩展是按「锚点 + 已流逝时间」自己走秒的，
+     * 不推的话它会沿旧锚点继续往下跑，越走越偏，直到下次换歌才对上。
+     */
+    if (t) void liveSyncNow(t, snapRef.current.playing, secs, snapRef.current.duration)
+  }, [queueState, liveSyncNow])
+
+  /*
+   * 锁屏 / 控制中心拖进度条 → 原生那边已经直接 seek 了播放器，这里把 UI 跟上。
+   *
+   * 为什么不等 2s 看门狗对账：从锁屏切回 App，看到进度条先弹回原处、两秒后才
+   * 跳过去，观感就是「拖动没生效」。事件里带的是原生夹取过的最终位置。
+   */
+  useEffect(() => {
+    if (!isIOS) return
+    let un: (() => void) | undefined
+    let live = true
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        const off = await listen<{ position?: number }>('media://seek', e => {
+          const p = e.payload?.position
+          if (typeof p === 'number' && Number.isFinite(p) && p >= 0) seek(p)
+        })
+        if (live) un = off
+        else off()
+      } catch { /* 浏览器预览 */ }
+    })()
+    return () => { live = false; un?.() }
+  }, [seek])
 
   const setVolume = useCallback((v: number) => {
     const vol = Math.min(1, Math.max(0, v))

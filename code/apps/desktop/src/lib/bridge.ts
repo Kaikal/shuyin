@@ -210,6 +210,26 @@ export interface ScanProgressPayload {
   currentDir?: string
 }
 
+/**
+ * 推给 iOS Live Activity 的一次播放状态。
+ *
+ * 字段名必须与 `src-tauri/src/liveactivity.rs` 的 `LiveState`、
+ * 以及 `src-tauri/ios/ShuyinActivityAttributes.swift` 的 `Payload` 三方一致
+ * （Rust 用 serde 默认的 snake_case 键名，Swift 也按同名解）。
+ */
+export interface LiveActivityState {
+  title: string
+  artist: string
+  album: string
+  /** base64 JPEG，**不含** data URI 前缀；空串 = 没有封面 */
+  art: string
+  playing: boolean
+  position: number
+  duration: number
+  /** position / duration 对应的 Unix 时间戳（秒），扩展用它推算实时进度 */
+  anchor: number
+}
+
 export interface LyricsRawPayload {
   source: 'lrc' | 'embedded' | 'none'
   text: string
@@ -240,6 +260,23 @@ export const bridge = {
   async pickMusicFolder(): Promise<string | null> {
     return invoke<string | null>('pick_music_folder')
   },
+  /**
+   * iOS：推一次播放状态给灵动岛 / 锁屏实时活动。
+   *
+   * 只在**换歌、播放暂停、拖动进度、封面补全**这几个时刻调，不要当心跳：
+   * 进度条由系统自己的 `Text(timerInterval:)` 走秒，每秒推一次纯属浪费
+   * Live Activity 的更新预算（推太勤系统会限流，表现是「岛卡住了」）。
+   *
+   * 非 iOS 平台上这条命令是空转（Rust 侧没有实际动作），可以放心调用。
+   */
+  async liveSync(state: LiveActivityState): Promise<void> {
+    return invoke('live_activity_sync', { state })
+  },
+  /** iOS：收起实时活动（队列清空 / 主动停止播放时） */
+  async liveEnd(): Promise<void> {
+    return invoke('live_activity_end')
+  },
+
   async playerState(): Promise<PlayerStateSnapshot> {
     /*
      * 字段名归一化。

@@ -7,6 +7,7 @@
 
 pub mod db;
 pub mod hotkeys;
+pub mod liveactivity;
 pub mod net;
 #[cfg(desktop)]
 pub mod platform_login;
@@ -114,6 +115,13 @@ pub(crate) fn browser_args() -> &'static str {
     static ARGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ARGS.get_or_init(|| {
         let mut args = String::from("--disable-gpu-sandbox");
+        /*
+         * 触摸屏笔记本上的双指捏合会把整页放大 —— 和手机上是同一件事。
+         * 界面是固定布局的，放大之后图表、进度条、歌词位置全错，退都退不回来。
+         * 只关手势（--disable-pinch），Ctrl+滚轮留着：那是键鼠用户的明确动作，
+         * 不算误触。
+         */
+        args.push_str(" --disable-pinch");
         // 桌面歌词 / 音乐桌面常年待在别的窗口后面（音乐桌面还嵌在壁纸层里），
         // Chromium 默认把「被遮挡窗口」的 rAF 和定时器降频——表现就是频谱不动、
         // 逐字染色一顿一顿。这类窗口本来就该常驻刷新，关掉两种后台节流。
@@ -641,8 +649,31 @@ async fn update_dmg_install(
 /// 有了它，耳机按键才会路由到本应用，「音量键浮层 / 锁屏」上也会显示歌名——
 /// 这两件事是同一个机制（SMTC），不做就只能靠 RegisterHotKey 碰运气。
 #[tauri::command]
-fn smtc_update(app: AppHandle, title: String, artist: String, album: String, playing: bool) {
-    smtc::update(&app, title, artist, album, playing);
+fn smtc_update(
+    app: AppHandle,
+    title: String,
+    artist: String,
+    album: String,
+    playing: bool,
+    cover: Option<String>,
+    position: Option<f64>,
+    duration: Option<f64>,
+) {
+    /*
+     * 前四个参数四个平台一样；后三个只有 Apple 用得上（Windows 的 SMTC
+     * 也能吃封面和进度，但那条 Update() 路径得单独打开，先不混进来）。
+     * 用 Option 是为了让老前端（没传这三个字段）照样能调。
+     */
+    smtc::update(
+        &app,
+        title,
+        artist,
+        album,
+        playing,
+        cover.unwrap_or_default(),
+        position.unwrap_or(0.0),
+        duration.unwrap_or(0.0),
+    );
 }
 
 /// 探测一条在线直链是否真的能播。带上「读到的字节 / 文件总长 / Content-Type / 真实时长」，
@@ -1477,6 +1508,32 @@ fn take_open_file(app: AppHandle) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// 把一张本地封面读成 `data:` URL。
+///
+/// 只给 iOS 的 Live Activity 用：扩展进程跟主 App 各是各的沙箱，`file://`
+/// 路径在那边是读不到的，所以图必须以字节形式塞进 ContentState。前端再把它
+/// 压到 72×72（ContentState 只有 4KB 预算），尺寸压缩交给 canvas 更省事。
+///
+/// 限制 6MB：正常封面几百 KB，超了说明拿错文件了，不陪它玩。
+#[tauri::command]
+fn read_cover_data_url(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("封面读不出来：{e}"))?;
+    if bytes.len() > 6 * 1024 * 1024 {
+        return Err("封面文件过大".to_string());
+    }
+    // 只认魔数，不看扩展名：缓存目录里的文件是按哈希命名的，没有后缀
+    let mime = match bytes.first().copied() {
+        Some(0xFF) => "image/jpeg",
+        Some(0x89) => "image/png",
+        Some(b'G') => "image/gif",
+        Some(b'R') => "image/webp",
+        _ => "image/jpeg",
+    };
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
 /// 把原生暂存的音源脚本收进清单，返回最终落下的名字。
 #[tauri::command]
 fn import_source_staged(app: AppHandle, path: String, name: Option<String>) -> Result<String, String> {
@@ -1936,6 +1993,43 @@ fn restore_main_geo(app: &AppHandle) {
     append_log(app, &format!("window.geo restore {x},{y} {w}x{h} max={maximized}"));
 }
 
+/// 关掉 WebView 自己的双指缩放（iOS 捏合 / macOS 触控板）。
+///
+/// 这是**浏览器行为**，不是 App 行为：双指外滑整页放大、捏合缩小，
+/// 手机上放大之后连退出播放页都回不到原尺寸，用户只会觉得界面错位。
+///
+/// viewport 里的 `user-scalable=no` 不能指望：iOS 10 之后 WebKit 出于
+/// 无障碍考虑直接忽略它（Safari 和 WKWebView 都一样）。能钉死的只有
+/// 原生滚动视图的缩放范围 —— iOS 上缩放全在 WKWebView 内部的 UIScrollView
+/// 上，把 min/max 都压成 1，捏合手势再有效也缩不动，双击放大同样失效。
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn disable_zoom(win: &WebviewWindow) {
+    let _ = win.with_webview(|webview| {
+        let wk = webview.inner() as *mut objc2::runtime::AnyObject;
+        if wk.is_null() {
+            return;
+        }
+
+        #[cfg(target_os = "ios")]
+        unsafe {
+            use objc2::msg_send;
+            let scroll: *mut objc2::runtime::AnyObject = msg_send![wk, scrollView];
+            if !scroll.is_null() {
+                let _: () = msg_send![scroll, setMinimumZoomScale: 1.0f64];
+                let _: () = msg_send![scroll, setMaximumZoomScale: 1.0f64];
+                let _: () = msg_send![scroll, setZoomScale: 1.0f64];
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        unsafe {
+            use objc2::msg_send;
+            // macOS 上 WKWebView 自己就有开关（触控板捏合放大）
+            let _: () = msg_send![wk, setAllowsMagnification: false];
+        }
+    });
+}
+
 /*
  * 无边框窗口的两件装饰（Windows）：
  *   圆角 —— Win11 上无装饰窗口默认是直角的，跟应用内的圆角卡片气质不搭；
@@ -1943,8 +2037,7 @@ fn restore_main_geo(app: &AppHandle) {
  * 两个都是 DWM 属性调用，失败（旧系统 / 主题禁用）时静默跳过即可。
  */
 #[cfg(windows)]
-fn decorate_frameless(win: &WebviewWindow) {
-    let Ok(h) = win.hwnd() else { return };
+fn decorate_frameless(win: &WebviewWindow) {    let Ok(h) = win.hwnd() else { return };
     let hwnd = h.0;
     if hwnd.is_null() {
         return;
@@ -2634,8 +2727,17 @@ fn show_tray_menu(app: &AppHandle, at: Option<(f64, f64)>) {
                 .ok()
                 .flatten()
                 .or_else(|| win.current_monitor().ok().flatten());
-            let mut x = cx.round() as i32 - pw + 10;
-            let mut y = cy.round() as i32 - ph - 10;
+            /*
+             * 两个平台方向相反，不能共用一套：
+             *   Windows 托盘在屏幕右下角，面板要「贴光标往左上长」；
+             *   macOS 在顶部菜单栏，必须「往下长」——照 Windows 那套算出来的
+             *   y 是负数，窗口整个跑到屏幕外，再被边缘夹取顶到菜单栏上，
+             *   把状态栏盖住。
+             */
+            #[cfg(target_os = "macos")]
+            let (mut x, mut y) = (cx.round() as i32 - pw / 2, cy.round() as i32 + 6);
+            #[cfg(not(target_os = "macos"))]
+            let (mut x, mut y) = (cx.round() as i32 - pw + 10, cy.round() as i32 - ph - 10);
             if let Some(m) = mon {
                 let left = m.position().x;
                 let top = m.position().y;
@@ -2821,6 +2923,29 @@ pub fn run() {
             }));
             append_log(app.handle(), "app.start");
 
+            /* 灵动岛 / 锁屏实时活动（仅 iOS 有实际动作）。
+             * 放在这里是为了尽早接管上次残留的那条 activity——否则 App
+             * 重启后锁屏会同时挂着新旧两条。 */
+            liveactivity::init(app.handle());
+
+            /*
+             * iOS 的系统媒体会话：音频会话 + 锁屏「正在播放」卡片 + 远控命令。
+             *
+             * 必须赶在第一次播放之前配好——AVAudioSession 不设成 playback，
+             * 熄屏/切后台时系统会直接把音频掐掉（cpal 的 iOS host 从不碰
+             * 这套 API），静音拨片也会把声音吃掉。
+             *
+             * 桌面（Windows/macOS）不在这里：那两端的初始化要等主窗口建好
+             * 之后再做（Windows 要 HWND），见下面建窗成功的分支。
+             */
+            #[cfg(target_os = "ios")]
+            {
+                match crate::smtc::init(app.handle(), 0) {
+                    Ok(()) => append_log(app.handle(), "smtc ok (ios)"),
+                    Err(e) => append_log(app.handle(), &format!("smtc fail (ios) {e}")),
+                }
+            }
+
             /* ---- 桌面专属：主窗口 / 无边框修饰 / 媒体会话 / 白屏看门狗 ----
              * 移动端（iOS）的 webview 由生成的 Swift 壳提供，不在这里建窗。 */
             #[cfg(desktop)]
@@ -2858,6 +2983,9 @@ pub fn run() {
                     if let Some(w) = app.get_webview_window("main") {
                         decorate_frameless(&w);
                         install_max_fix(&w);
+                        // macOS：触控板双指缩放和手机上的捏合是同一类误触
+                        #[cfg(target_os = "macos")]
+                        disable_zoom(&w);
                         /*
                          * 系统媒体会话：耳机线控（含蓝牙 AVRCP）与键盘媒体键的**唯一**可靠入口。
                          * Windows = SMTC（绑窗口 HWND）；macOS = Now Playing（进程级，不需要 HWND）。
@@ -2946,7 +3074,14 @@ pub fn run() {
                     .background_color(tauri::window::Color(10, 11, 15, 255))
                     .build()
                 {
-                    Ok(_) => append_log(app.handle(), "window.main ok (mobile)"),
+                    Ok(w) => {
+                        append_log(app.handle(), "window.main ok (mobile)");
+                        /* 双指缩放是浏览器行为，App 里全是误触（用户原话：
+                         * 「双指外滑页面会被放大或者捏合可以缩小，就像浏览器一样」）。
+                         * 窗一建好就把它钉死，别等用户先放大一次。 */
+                        #[cfg(target_os = "ios")]
+                        disable_zoom(&w);
+                    }
                     Err(e) => append_log(app.handle(), &format!("window.main fail (mobile) {e}")),
                 }
             }
@@ -3150,6 +3285,9 @@ pub fn run() {
             play_url,
             net_request,
             smtc_update,
+            liveactivity::live_activity_sync,
+            liveactivity::live_activity_end,
+            read_cover_data_url,
             update_dmg_install,
             probe_audio_url,
             local_audio_duration,

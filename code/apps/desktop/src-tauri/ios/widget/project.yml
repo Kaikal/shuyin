@@ -1,0 +1,57 @@
+# Widget 扩展的工程描述（xcodegen 生成 .xcodeproj）。
+#
+# 为什么不塞进 Tauri 生成的那个工程里：
+#   `tauri ios init` 每次 CI 都从零生成 `gen/apple/*.xcodeproj`，用脚本往里
+#   加 target / 加 build phase 很容易被模板升级（或 Xcode 16 的
+#   PBXFileSystemSynchronizedRootGroup 新格式）打回原形。这里改成**独立工程**
+#   单独编出 .appex，再手工放进主 .app 的 PlugIns/ 目录——这是 Xcode 认可的
+#   扩展存放位置，对未签名 IPA 完全够用，且完全不碰 Tauri 的工程文件。
+#
+# 用法（在 CI 里）：
+#   cd src-tauri/ios/widget && xcodegen generate
+#   xcodebuild -project ShuyinWidget.xcodeproj -target ShuyinWidget \
+#              -sdk iphoneos -configuration Release \
+#              MARKETING_VERSION=x CURRENT_PROJECT_VERSION=y build
+
+name: ShuyinWidget
+options:
+  bundleIdPrefix: cn.shuyin.player
+  deploymentTarget:
+    iOS: "16.2"
+  createIntermediateGroups: true
+  groupSortPosition: none
+
+targets:
+  ShuyinWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      # 目录里只挑 .swift：Info.plist 也在同一层，被当成资源会撞
+      # 「Multiple commands produce Info.plist」
+      - path: .
+        includes:
+          - "*.swift"
+      # 意图文件与主 App 共用一份（AppIntents 要求双 target 成员，
+      # 少了它按钮在 App 存活时点了不响应）。路径写死在上一层。
+      - path: ../ShuyinIntents.swift
+    settings:
+      base:
+        PRODUCT_NAME: ShuyinWidget
+        PRODUCT_BUNDLE_IDENTIFIER: cn.shuyin.player.widget
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        SKIP_INSTALL: "YES"
+        # 扩展不能链接只给 App 用的 API（UIApplication.shared 之类）
+        APPLICATION_EXTENSION_API_ONLY: "YES"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.2"
+        # 未签名产物：CI 里没有证书，签名一律关掉（Sideloadly 重签时统一处理）
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        DEVELOPMENT_TEAM: ""
+        SWIFT_OPTIMIZATION_LEVEL: "-O"
+        SWIFT_COMPILATION_MODE: wholemodule
+        # appex 里的框架搜索路径必须是包内的，不能指到主 App 外面
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../../Frameworks"

@@ -11,8 +11,18 @@
       网页铺满整块屏，env(safe-area-inset-*) 也才开始返回真实值，
       样式里的安全区变量（手机壳顶栏、播放页、底部 TAB 都在用）才生效。
       安卓 WebView 上 env() 恒为 0，这条声明对它没有副作用（安全区由安卓壳写 sy-safe 变量）。
+
+      user-scalable=no / maximum-scale=1 是禁双指缩放的那一半，但它只对
+      「还认这个声明的引擎」有效（安卓 WebView、鸿蒙、车机 Chromium、国产内核）。
+      iOS 从 10 起，Safari 和 WKWebView 都出于无障碍考虑**直接忽略**
+      user-scalable=no —— iPhone 上真正生效的是原生那句「把 WKWebView 内部
+      scrollView 的缩放范围钉成 1」（Rust 侧 disable_zoom）。两边都得写，
+      只写这边，iOS 照样能捏合放大。
     -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
     <title>疏音</title>
     <style>
       /* 启动页固定底色在 HTML 层就位，先于 React 挂载，避免白闪 */
