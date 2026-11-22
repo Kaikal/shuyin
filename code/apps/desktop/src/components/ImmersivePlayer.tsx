@@ -11,6 +11,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { fmtTime, type LocalTrack } from '@shuyin/core'
 import { bridge } from '../lib/bridge'
 import { isAndroid, onNative } from '../lib/native/android'
+import { isIOS } from '../lib/shellMode'
 import { useShell } from '../lib/shellMode'
 import { coverUrlOf } from '../lib/coverUrl'
 import { useCoverBrightness } from '../lib/coverTone'
@@ -179,8 +180,16 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * 手机竖排（唱片 + 控制从上往下堆）在它上面就是「唱片 62vw 撑满全屏、
    * 进度条和控制键全被挤出屏幕外」——用户原话「车机版直接用不了」的第一成因。
    * 车机的字号 / 触摸目标放大交给 handoff.css 的 car 段做，不靠竖排结构。
+   *
+   * **触屏 = isAndroid || isIOS**（2026-11-22 iPhone 实测补的）：
+   * 这里原来写死 `isAndroid`，iPhone 命中的是桌面那套两栏 grid——悬停交互、
+   * Esc 收起、鼠标右键菜单全是给鼠标设计的，手指点不动；竖排的手机 DOM
+   * （`.imm-mpager`、`imm-top-m` 页头）压根不渲染，于是
+   * 「播放界面布局乱」「歌词页回不去」（桌面 solo 视图没有返回入口）。
+   * shellKind 的判定本身已经按 isAndroid||isIOS 走 phone 了（见 shellMode.ts），
+   * 这里的渲染分支必须和它对齐。
    */
-  const mobile = isAndroid && shellKind !== 'tablet' && shellKind !== 'car'
+  const mobile = (isAndroid || isIOS) && shellKind !== 'tablet' && shellKind !== 'car'
   /*
    * 「两栏」形态：**横屏时封面页与歌词页是并排的**（见 handoff.css 里
    * landscape 那两段——手机 520 高以内一套、平板 data-wide 一套）。
@@ -195,7 +204,7 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    */
   const [twoCol, setTwoCol] = useState(() => false)
   useEffect(() => {
-    if (!isAndroid) return
+    if (!(isAndroid || isIOS)) return
     const calc = () => {
       const wide = document.documentElement.dataset.wide === '1'
       const land = window.matchMedia('(orientation: landscape)').matches
@@ -210,6 +219,7 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
     }
   }, [])
   /*
+  /*
    * 「只留歌词」(solo) 是**桌面专属**视图：手机本来就有封面页 / 歌词页两页，
    * 再叠一层 solo 等于把封面页整个抽走——只剩一屏歌词，且没有任何入口回去。
    *
@@ -217,6 +227,13 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * 而且会持久化，下次进播放页还是那个状态：用户看到的就是
    * 「切换不回来到唱片页了」。这里直接让 solo 在手机上恒为 false，
    * 并把存档里的 true 清掉（见下面的 effect），免得一直带着这个包袱。
+   *
+   * **iPhone 上这个清档 effect 之前根本不生效**：条件写的是 `mobile`，
+   * 而 mobile 是 isAndroid 才为 true——用户 iPhone 上的存档里就躺着一个
+   * solo=true，进播放页直接是「只有歌词的页面」，没有返回键（桌面 solo
+   * 视图靠 Esc 关，触屏没有 Esc），这就是「打开歌词页就回不去了」。
+   * mobile 修成含 iOS 后这里跟着生效；**但用户设备上已经存了脏档**，
+   * 条件要写 `!desktopSolo`（= 触屏）才能把旧档清掉，不能依赖本次渲染的 mobile。
    */
   const solo = soloOn && !mobile
   /*
@@ -464,8 +481,10 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * 留着只会让「桌面开着全屏歌词」这个状态跟着账号/存档跑到手指上。
    */
   useEffect(() => {
-    if (mobile && soloOn) setSolo(false)
-  }, [mobile, soloOn, setSolo])
+    /* 触屏（含 iPhone——用户设备上已存了 solo=true 的脏档，mobile 修复前这个
+       effect 从没跑过；用触屏判定而不是 mobile，保证旧档必被清一次） */
+    if ((isAndroid || isIOS) && soloOn) setSolo(false)
+  }, [isAndroid, isIOS, soloOn, setSolo])
 
   /** 切歌回封面页：停在上一首的歌词上会让人以为「没切成功」 */
   useEffect(() => { setPager('art') }, [t?.id])

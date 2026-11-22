@@ -12,6 +12,7 @@
 import type { LocalTrack, ScanResult } from '@shuyin/core'
 import { androidInvoke, isAndroid, lastKnownPlayerState, onNative } from './native/android'
 import { toast } from './toast'
+import { isIOS } from './shellMode'
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 export { isAndroid }
@@ -559,6 +560,9 @@ export const bridge = {
    * 点了没反应比"打不开"更让人摸不着头脑。
    */
   async revealInFolder(path: string): Promise<void> {
+    /* iOS：没有「文件管理器定位」这回事，沙箱里的文件用户也看不到；
+       按钮文案已按平台分流成「复制路径」，这里直接空操作 */
+    if (isIOS) return
     if (isTauri) {
       const { revealItemInDir } = await import('@tauri-apps/plugin-opener')
       await revealItemInDir(path)

@@ -224,8 +224,12 @@ export function App() {
      * 那边的桌面歌词是系统悬浮窗，开关与真值都在原生侧（见 ImmersivePlayer 的
      * toggleFloat）。这里如果照样把 lyricsOn 翻成 true，就只是**点亮一个界面
      * 状态**：芯片亮了、歌词没出来——正是「开关显示不准确」。
+     *
+     * iOS 同理（2026-11-22 iPhone 实测）：iOS 连悬浮窗都没有，点了就是白点。
+     * 手机形态下工具行那颗按钮在 ImmersivePlayer 里已经按 isAndroid 分流，
+     * 但 iPhone 此前会漏到这条 Tauri 路径上（无窗口系统，invoke 也无意义）。
      */
-    if (isAndroid) return
+    if (isAndroid || isIOS) return
     await desktopLyrics.open()
     setLyricsOn(true)
     void settings.set(KEYS.lyricsOn, true)
@@ -463,9 +467,13 @@ export function App() {
    * 命中的是 svg，不是 button）。这里在捕获阶段统一给最近的可点元素挂 `.press`，
    * 抬手就摘掉；样式只写在 `html[data-shell='phone'|'tablet'|'car']` 下，
    * 桌面端连监听都不装。
+   *
+   * iOS 的 WKWebView 同样有「:active 不触发」的毛病（WKWebView 的
+   * touchstart 默认不带可点击判定），iPhone 上必须有同一层反馈，
+   * 否则就是「点了像没点」。
    */
   useEffect(() => {
-    if (!isAndroid) return
+    if (!(isAndroid || isIOS)) return
     /*
      * 覆盖面按「手指真会按到的东西」排：按钮、底栏、列表行、封面卡、评论行。
      * 列表行和卡片在 CSS 里走**背景压深**而不是缩放（见 handoff.css 的 .press 段）：
@@ -615,7 +623,9 @@ export function App() {
    * 淡进来，不必等 React。随后 React 以同样的值渲染，不会打架。
    */
   const flashPlayer = (on: boolean) => {
-    if (!isAndroid) return
+    /* iOS 上「先动画面再补 React」同样适用（WKWebView 首帧一样慢），
+       旧的条件是 isAndroid，iPhone 点播放条要等整树重渲染才见反应 */
+    if (!(isAndroid || isIOS)) return
     try {
       const el = document.querySelector('.imm') as HTMLElement | null
       if (el) el.setAttribute('data-open', on ? 'true' : 'false')
@@ -665,7 +675,11 @@ export function App() {
     return false
   }
   useEffect(() => {
-    if (!isAndroid) return
+    /* iOS 没有系统返回键，手势侧滑默认是「导航返回」，WKWebView 里没有
+       history 可退时它什么都不做——弹层（播放页/抽屉）关不掉。
+       先把 handler 注册上（安卓壳之外 setBackHandler 只是存了个引用，
+       没有任何副作用），等 iOS 壳接「边缘侧滑 → back」事件时直接可用。 */
+    if (!(isAndroid || isIOS)) return
     setBackHandler(() => backRef.current())
     return () => setBackHandler(null)
   }, [])

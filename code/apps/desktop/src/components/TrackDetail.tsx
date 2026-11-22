@@ -8,6 +8,7 @@
 import { fmtTime, type LocalTrack } from '@shuyin/core'
 import { Cover } from './Cover'
 import { bridge } from '../lib/bridge'
+import { isIOS } from '../lib/shellMode'
 import { usePlayer } from '../lib/PlayerProvider'
 import { qualityLabel } from '../lib/online'
 import { IconClose, IconFolder, IconNext, IconPause, IconPlay } from './icons'
@@ -110,7 +111,7 @@ export function TrackDetail({ track, onClose, onPlay, onQueueNext }: Props) {
               </button>
               {!online && (
                 <button className="ghost-btn" onClick={() => void bridge.revealInFolder(track.path)}>
-                  <IconFolder width={14} height={14} /> {bridge.isAndroid ? '复制路径' : '在文件夹中显示'}
+                  <IconFolder width={14} height={14} /> {bridge.isAndroid || isIOS ? '复制路径' : '在文件夹中显示'}
                 </button>
               )}
             </div>

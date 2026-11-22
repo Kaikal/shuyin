@@ -23,6 +23,7 @@ import { matchSongs, parsePlaylist } from '../lib/playlistImport'
 import { KEYS, settings } from '../lib/settings'
 import { loadProfile, type CloudProfile } from '../lib/cloud'
 import { toast } from '../lib/toast'
+import { isIOS } from '../lib/shellMode'
 import { confirm } from '../lib/confirm'
 import { consumeLongPress, isHoldContextMenu } from '../lib/longPress'
 import { pushBackLayer } from '../lib/native/android'
@@ -310,8 +311,10 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
      *
      * 判的是 `isAndroid` 而不是 `isNative`：桌面 Tauri 也是 native，
      * 用 isNative 会把 Windows 那张好用的二维码一起关掉。
+     * iPhone（isIOS）跟安卓同理——手机扫不了自己，而且 iOS 壳没有
+     * PlatformLoginActivity 那条原生登录页，画二维码只会卡在「等扫码」。
      */
-    if (!bridge.isAndroid && supportsQr(s)) { setQrSource(s); return }
+    if (!(bridge.isAndroid || isIOS) && supportsQr(s)) { setQrSource(s); return }
     /*
      * QQ 音乐 / 酷狗走验证码（桌面和手机都是）。
      *
