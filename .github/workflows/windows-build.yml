@@ -49,13 +49,17 @@ jobs:
       - name: Build installer (NSIS)
         run: pnpm -F shuyin-desktop tauri build --bundles nsis
 
+      # 注意这里是 dist-win（相对 code/），不是 ../dist-win。
+      # upload-artifact 的 path 是相对**仓库根**解析的，不继承 defaults.run 的
+      # working-directory；两边不一致的话构建明明成功，上传那一步却找不到文件
+      # （第一次跑就是这么挂的：shell 把 exe 放到了仓库根，上传却在 code/ 下找）。
       - name: Collect artifacts
         shell: bash
         run: |
-          mkdir -p ../dist-win
-          find apps/desktop/src-tauri/target/release/bundle/nsis -name "*.exe" -exec cp {} ../dist-win/ \;
-          ls -lh ../dist-win
-          if [ -z "$(ls -A ../dist-win)" ]; then echo "没有产出 exe"; exit 1; fi
+          mkdir -p dist-win
+          find apps/desktop/src-tauri/target/release/bundle/nsis -name "*.exe" -exec cp {} dist-win/ \;
+          ls -lh dist-win
+          if [ -z "$(ls -A dist-win)" ]; then echo "没有产出 exe"; exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:

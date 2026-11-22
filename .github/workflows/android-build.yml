@@ -50,12 +50,21 @@ jobs:
       - name: Build web assets
         run: bash apps/android/build-web.sh
 
-      - uses: android-actions/setup-android@v3
-
+      # 不用 android-actions/setup-android：它内部会跑 `sdkmanager tools`，
+      # 而 runner 的 SDK 里已经没有这个包了，直接 exit 1（第一次跑就挂在这）。
+      # GitHub 的 ubuntu 镜像本来就预装了 Android SDK + cmdline-tools，
+      # 这里只补 platform-34 就够（compileSdk / targetSdk 都是 34）。
       - name: Install SDK platform 34
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_HOME="$SDK"
+          export ANDROID_SDK_ROOT="$SDK"
+          echo "sdk = $SDK"
+          SDKMGR=$(find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -1)
+          echo "sdkmanager = $SDKMGR"
+          [ -x "$SDKMGR" ] || { echo "找不到 sdkmanager"; exit 1; }
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
       - name: Create debug keystore
         run: |

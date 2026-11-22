@@ -25,13 +25,20 @@ FILES = %w[
 
 SRC_DIR = __dir__
 
-apple_dir = ARGV[0] or abort('用法: ruby install-swift.rb <gen/apple 目录>')
+apple_dir = File.expand_path(ARGV[0] || abort('用法: ruby install-swift.rb <gen/apple 目录>'))
 pbx = Dir.glob(File.join(apple_dir, '**', 'project.pbxproj')).first
 abort("[live] 找不到 project.pbxproj: #{apple_dir}") unless pbx
 
-proj_dir = File.dirname(pbx)
+# pbx 位于 <root>/xxx.xcodeproj/ 里面：往上一层是工程包，再上一层才是模板根（gen/apple）。
+# 之前只往上取了一层，于是「源码目录」被算成 xxx.xcodeproj/Sources，而且
+# Xcodeproj::Project.open 收到的是 project.pbxproj **文件**（它要的是 .xcodeproj
+# 目录），CI 上直接抛 "plist ... project.pbxproj/project.pbxproj doesn't exist"。
+xcodeproj = File.dirname(pbx)
+proj_dir = File.dirname(xcodeproj)
 text = File.read(pbx, encoding: 'UTF-8')
 puts "[live] project: #{pbx}"
+puts "[live] template root: #{proj_dir}"
+puts "[live] root children: #{Dir.children(proj_dir).sort.inspect}"
 
 # ---- 1. 判断工程格式，算出该把文件放到哪个目录 ----
 dirs = []
@@ -75,7 +82,7 @@ if dirs.empty?
     abort('[live] 需要 xcodeproj gem：gem install xcodeproj --no-document')
   end
 
-  project = Xcodeproj::Project.open(pbx)
+  project = Xcodeproj::Project.open(xcodeproj)
   app = project.targets.find { |t| t.product_type == 'com.apple.product-type.application' }
   abort('[live] 找不到主 App target') unless app
   puts "[live] app target: #{app.name}"
