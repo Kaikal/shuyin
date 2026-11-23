@@ -16,6 +16,7 @@
  */
 import { useCallback, useEffect, useRef } from 'react'
 import { bridge, isAndroid } from './bridge'
+import { isIOS } from './shellMode'
 import { KEYS, settings } from './settings'
 
 export type HotkeyAction =
@@ -272,8 +273,11 @@ export function useGlobalHotkeys(h: HotkeyHandlers) {
      * 但**安卓不受它管**：那个开关在手机上没有入口（设置里整块是桌面专属），
      * 而安卓原生把「通知栏 / 锁屏 / 车机方控」按下的动作也用 source='smtc' 送上来。
      * 一起判的话，用户在桌面端随手关掉它，手机上整排通知栏按钮就全哑了。
+     *
+     * iOS 同理：锁屏卡那颗 ♥（`likeCommand`）与安卓通知栏同一条路数，
+     * 而「接管媒体键」在手机上根本没有入口。
      */
-    if (source === 'smtc' && !isAndroid && !mediaOn.current) return
+    if (source === 'smtc' && !isAndroid && !isIOS && !mediaOn.current) return
     switch (id) {
       case 'playpause': fn.playpause(); break
       case 'next': fn.next(); break

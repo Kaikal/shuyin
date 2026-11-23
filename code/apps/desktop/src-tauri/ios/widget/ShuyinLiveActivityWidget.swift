@@ -153,20 +153,51 @@ private struct TimeLabel: View {
     }
 }
 
+/// 可点的封面。
+///
+/// 点一下在「大封面」和「普通卡」之间切换（用户参考的是酷狗那张卡：
+/// 点封面换成整块封面，再点换回来）。切换本身不在这里做——发个 intent 出去，
+/// 由主 App 进程里的 Rust 记真值并重推 ContentState，前端 JS 冻着也不影响。
+/// iOS 16 没有 `Button(intent:)`，那边退化成纯图。
+private struct ArtTap: View {
+    let state: ShuyinActivityAttributes.ContentState
+    let size: CGFloat
+
+    var body: some View {
+        if #available(iOS 17.0, *) {
+            Button(intent: ShuyinToggleArtIntent()) {
+                Artwork(art: state.art, size: size)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Artwork(art: state.art, size: size)
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 控制按钮（iOS 17+）                                                  */
 /* ------------------------------------------------------------------ */
 
-/// 三个按钮：上一首 / 播放暂停 / 下一首。
+/// 四个按钮：收藏 / 上一首 / 播放暂停 / 下一首。
 ///
 /// 只在 iOS 17 及以上可用：`Button(intent:)` 与 `LiveActivityIntent` 都是
 /// 17 才有的。16.2~16.x 的机器退化成纯展示（锁屏那条仍然会显示）。
+///
+/// 「收藏」是 2026-11-23 用户点名要的（「别的 App 都有收藏按钮」）。
+/// 系统锁屏卡那颗 ♥ 由 `MPRemoteCommandCenter.likeCommand` 画，但**没法染成实心**；
+/// 这里这颗星是自己的，能如实反映收藏状态。
 @available(iOS 17.0, *)
 private struct Controls: View {
     let state: ShuyinActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 34) {
+        HStack(spacing: 26) {
+            Button(intent: ShuyinFavIntent()) {
+                Image(systemName: state.fav ? "star.fill" : "star")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(state.fav ? syAccent : .white)
+            }
             Button(intent: ShuyinPrevIntent()) {
                 Image(systemName: "backward.fill")
                     .font(.system(size: 16, weight: .semibold))
@@ -222,9 +253,20 @@ private struct LockScreenView: View {
     let state: ShuyinActivityAttributes.ContentState
 
     var body: some View {
+        Group {
+            if state.big { bigBody } else { compactBody }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .activityBackgroundTint(syBg)
+        .activitySystemActionForegroundColor(syText1)
+    }
+
+    /// 普通形态：封面 + 歌名/歌手 + 进度 + 一句词 + 整排控制
+    private var compactBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 11) {
-                Artwork(art: state.art, size: 52)
+                ArtTap(state: state, size: 52)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(state.title)
@@ -271,10 +313,40 @@ private struct LockScreenView: View {
                 .padding(.top, 1)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .activityBackgroundTint(syBg)
-        .activitySystemActionForegroundColor(syText1)
+    }
+
+    /// 大封面形态（点封面切过来）：整块封面 + 歌名歌手 + 进度 + 控制。
+    ///
+    /// 尺寸卡在 132：锁屏上的实时活动卡片高度是系统给的，再高会被裁掉，
+    /// 裁掉的是下半截控制键——那比封面小一点糟得多。
+    /// 歌词行在这一形态里**不画**：封面已经占了视觉主体，再挤一行词就满了。
+    private var bigBody: some View {
+        VStack(spacing: 9) {
+            ArtTap(state: state, size: 132)
+
+            VStack(spacing: 2) {
+                Text(state.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(syText1)
+                    .lineLimit(1)
+                Text(state.artist.isEmpty ? "疏音" : state.artist)
+                    .font(.system(size: 12))
+                    .foregroundStyle(syText2)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 8) {
+                ProgressBar(state: state)
+                TimeLabel(state: state, compact: true)
+            }
+
+            if #available(iOS 17.0, *) {
+                Controls(state: state)
+                    .padding(.top, 1)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .multilineTextAlignment(.center)
     }
 }
 
@@ -290,7 +362,7 @@ struct ShuyinLiveActivityWidget: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Artwork(art: context.state.art, size: 46)
+                    ArtTap(state: context.state, size: 46)
                         .padding(.leading, 2)
                 }
                 DynamicIslandExpandedRegion(.center) {

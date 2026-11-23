@@ -24,7 +24,6 @@ import { FoliaLyrics } from './FoliaLyrics'
 import { CoverRing } from './SpectrumLayer'
 import { ProgressControl } from './Shell'
 import { ActionSheet } from './ActionSheet'
-import { Modal } from './Modal'
 import { AddToPlaylistDialog } from './AddToPlaylistDialog'
 import { useFavs, favRecOf } from '../lib/favTracks'
 import { cachedAudio } from '../lib/audioCache'
@@ -51,23 +50,6 @@ import {
   IconMusicNote, IconSpeaker, IconVolume, IconVolumeMute, IconWave,
 } from './icons'
 import { LYRIC_ALIGN_LIST, useLyricAlign } from '../lib/lyricAlign'
-
-/**
- * 状态栏歌词的七套配色。
- *
- * **必须和原生 `StatusLyrics.PALETTE` 顺序逐字一致**：这里点第几个，
- * 原生就按索引取第几个颜色，两边各存一份是为了互不牵连（改一处不会连带另一处）。
- * 取值也与桌面歌词那批相同，用户在两个功能之间切换不会觉得是两个产品。
- */
-const STATUS_PALETTE = [
-  '#FFC94D', // 流金
-  '#FF6FAE', // 品红
-  '#7BA6FF', // 冰蓝
-  '#4FE0B0', // 青碧
-  '#B98BFF', // 紫霞
-  '#FF8A4C', // 霞橙
-  '#FFFFFF', // 纯白
-]
 
 interface Props {
   open: boolean
@@ -341,87 +323,6 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
         if (!on) toast('桌面歌词没能打开，请检查「显示在其他应用上层」权限')
       }).catch(() => toast('桌面歌词没能打开，请检查「显示在其他应用上层」权限'))
     })
-  }
-
-  /*
-   * ---------- 状态栏歌词（安卓） ----------
-   *
-   * 和桌面歌词是**两个独立功能**（2026-11-22 用户明确要求）：各有各的窗、
-   * 各有各的存档（`status_lyrics` / `float_lyrics`）、各有各的开关状态。
-   * 这里的 `statusOn` 只反映原生 `StatusLyrics` 的真值，绝不跟 `floatOn` 联动。
-   *
-   * 它是一条贴顶、触摸穿透的字幕——窗自己收不到点击，所以宽度和开关
-   * 只能从这个弹窗里调（这也是用户要的形态：调节面板在弹窗中）。
-   */
-  const [statusOn, setStatusOn] = useState(false)
-  /** 默认 70%：留出两侧空白，水平位置才有可调空间（原生 DEFAULT_RATIO 同值） */
-  const [statusWidth, setStatusWidth] = useState(0.7)
-  /** 水平位置：0 贴左 / 0.5 居中 / 1 贴右（宽度拉满时没有可移动空间） */
-  const [statusPos, setStatusPos] = useState(0.5)
-  const [statusColor, setStatusColor] = useState(0)
-  const [statusSheet, setStatusSheet] = useState(false)
-
-  /** 问一次原生真值（开关 / 宽度 / 位置 / 配色一起回来） */
-  const readStatus = useCallback(() => {
-    void bridge.invoke<{ on: boolean; width: number; pos: number; color: number }>('status_lyric_state')
-      .then(r => {
-        setStatusOn(!!r?.on)
-        if (typeof r?.width === 'number' && r.width > 0) setStatusWidth(r.width)
-        if (typeof r?.pos === 'number' && r.pos >= 0) setStatusPos(r.pos)
-        if (typeof r?.color === 'number' && r.color >= 0) setStatusColor(r.color)
-      })
-      .catch(() => { /* 命令不存在（旧包）就保持原样 */ })
-  }, [])
-
-  useEffect(() => {
-    if (!isAndroid) return
-    readStatus()
-  }, [readStatus])
-
-  /* 原生侧开/关落地后会推一条，跟着真值走（避免开关显示不准） */
-  useEffect(() => {
-    if (!isAndroid) return
-    return onNative('status://state', payload => {
-      setStatusOn(!!(payload as { on?: boolean } | null)?.on)
-    })
-  }, [])
-
-  /* 从后台回来补问一次：页面在后台时那条推送到不了（和 float 同样的坑） */
-  useEffect(() => {
-    if (!isAndroid) return
-    const sync = () => {
-      if (document.visibilityState === 'hidden') return
-      readStatus()
-    }
-    const off = onNative('app://resume', sync)
-    document.addEventListener('visibilitychange', sync)
-    return () => { off(); document.removeEventListener('visibilitychange', sync) }
-  }, [readStatus])
-
-  const toggleStatus = () => {
-    void bridge.invoke<{ on: boolean; needPermission?: boolean }>('status_lyric_toggle').then(r => {
-      setStatusOn(!!r?.on)
-      if (r?.needPermission) toast('请先允许「显示在其他应用上层」，再打开状态栏歌词')
-      else if (r?.on) toast('状态栏歌词已开启，会贴在屏幕顶端')
-    }).catch(() => {
-      /* 命令没回来：不猜，直接问真值。窗其实开出来了就把开关拨正 */
-      readStatus()
-    })
-  }
-
-  const changeStatusWidth = (w: number) => {
-    setStatusWidth(w)
-    void bridge.invoke('status_lyric_set', { width: w }).catch(() => { /* 窗没开时改了也只是存档 */ })
-  }
-
-  const changeStatusPos = (v: number) => {
-    setStatusPos(v)
-    void bridge.invoke('status_lyric_set', { pos: v }).catch(() => { /* 同上 */ })
-  }
-
-  const changeStatusColor = (c: number) => {
-    setStatusColor(c)
-    void bridge.invoke('status_lyric_set', { color: c }).catch(() => { /* 同上 */ })
   }
 
   const [addTo, setAddTo] = useState<string[] | null>(null)
@@ -2637,18 +2538,8 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
             id: 'float', label: '桌面歌词', sw: true, on: floatOn, keepOpen: true,
             onClick: toggleFloat,
           }] : []),
-          /*
-           * 状态栏歌词：和上面那条**完全独立**的另一扇窗（贴顶、穿透、宽度可调）。
-           *
-           * 这里只放入口不放开关键，是因为它的窗触摸穿透——用户没法在字幕上点 ×，
-           * 开关和宽度统一收进弹窗，也顺手把「调宽度」放到了同一个地方。
-           */
-          ...(isAndroid ? [{
-            id: 'status',
-            label: statusOn ? '状态栏歌词 · 已开启' : '状态栏歌词',
-            chevron: true,
-            onClick: () => setStatusSheet(true),
-          }] : []),
+          /* 状态栏歌词的开关与位置调节整块搬去设置页了（2026-11-23 用户要求）：
+             它是常驻的系统级开关，和上面这些「对这一首歌做什么」不是一类。 */
           {
             /*
              * 「这首歌词不对」的自愈入口（2026-11-21 平板「海屿你」教训）。
@@ -2686,94 +2577,6 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
         ] : []}
         onClose={() => setMoreOpen(false)}
       />
-
-      {/*
-       * 状态栏歌词的调节面板。
-       *
-       * **这是它唯一的控制入口**：字幕窗触摸穿透（否则挡死顶部的下拉通知栏手势），
-       * 窗上既没有 × 也没有可点的区域，只能从这里开关和调宽度。
-       *
-       * 参数和桌面歌词那套（设置页「桌面歌词：字号与宽度」）完全分开：
-       * 宽度存 `status_lyrics`，桌面歌词存它自己那份，改一个不会动另一个。
-       */}
-      <Modal
-        open={statusSheet}
-        title="状态栏歌词"
-        hint="贴在屏幕顶端的一条字幕，触摸穿透不挡操作；宽度和左右位置都能调，切到别的应用也能抬头看词"
-        onClose={() => setStatusSheet(false)}
-        footer={<button className="primary-btn" onClick={() => setStatusSheet(false)}>完成</button>}
-      >
-        <div className="dl-size-row">
-          <span className="dl-size-name">开关</span>
-          <button
-            className={statusOn ? 'primary-btn' : 'ghost-btn'}
-            onClick={toggleStatus}
-            aria-pressed={statusOn}
-            style={{ minWidth: 96 }}
-          >
-            {statusOn ? '已开启' : '已关闭'}
-          </button>
-          <span className="dl-size-val" />
-        </div>
-        <div className="dl-size-row">
-          <span className="dl-size-name">宽度</span>
-          <input
-            className="slider" type="range" aria-label="状态栏歌词宽度"
-            min={35} max={100} step={1}
-            value={Math.round(statusWidth * 100)}
-            onChange={e => changeStatusWidth(Number(e.target.value) / 100)}
-          />
-          <span className="dl-size-val num">{Math.round(statusWidth * 100)}%</span>
-        </div>
-        {/*
-         * 水平位置：存的是「剩余空间的占比」，所以宽度拉满时没有可移动空间，
-         * 这一行置灰（不是隐藏——隐藏会让人以为功能没做）。
-         */}
-        <div className="dl-size-row" style={{ opacity: statusWidth >= 0.995 ? 0.45 : 1 }}>
-          <span className="dl-size-name">水平位置</span>
-          <input
-            className="slider" type="range" aria-label="状态栏歌词水平位置"
-            min={0} max={100} step={1}
-            value={Math.round(statusPos * 100)}
-            disabled={statusWidth >= 0.995}
-            onChange={e => changeStatusPos(Number(e.target.value) / 100)}
-          />
-          <span className="dl-size-val" style={{ minWidth: 30 }}>
-            {statusWidth >= 0.995
-              ? '满屏'
-              : statusPos <= 0.02
-                ? '贴左'
-                : statusPos >= 0.98
-                  ? '贴右'
-                  : Math.abs(statusPos - 0.5) < 0.05 ? '居中' : `${Math.round(statusPos * 100)}%`}
-          </span>
-        </div>
-        <div className="dl-size-row">
-          <span className="dl-size-name">配色</span>
-          <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'center' }}>
-            {STATUS_PALETTE.map((c, i) => (
-              <button
-                key={c}
-                aria-label={`状态栏歌词配色 ${i + 1}`}
-                aria-pressed={i === statusColor}
-                onClick={() => changeStatusColor(i)}
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: '50%',
-                  background: c,
-                  border: 'none',
-                  padding: 0,
-                  cursor: 'pointer',
-                  boxShadow: i === statusColor
-                    ? '0 0 0 2px #fff, 0 0 0 3px rgba(0,0,0,.45)'
-                    : '0 0 0 1px rgba(255,255,255,.3)',
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      </Modal>
 
       {/* 音质选择（手机：点底部那颗「高品质」胶囊；更多面板里也有一行入口）。
           只列这首歌**真实有**的档位：平台没给的档位列出来也是点不动。

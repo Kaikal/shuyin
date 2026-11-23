@@ -230,6 +230,11 @@ export interface LiveActivityState {
    */
   line?: string
   playing: boolean
+  /**
+   * 这首歌是否已收藏（灵动岛/锁屏那颗星画实心还是空心）。
+   * 收藏列表只有前端有一份，所以由前端推上来；原生存不住也不该存。
+   */
+  fav?: boolean
   position: number
   duration: number
   /** position / duration 对应的 Unix 时间戳（秒），扩展用它推算实时进度 */

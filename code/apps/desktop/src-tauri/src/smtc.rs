@@ -499,6 +499,41 @@ mod apple {
 
     /* ---------------- 锁屏按钮 → 播放器 ---------------- */
 
+    /// 上一次推给系统的 Now Playing 内容（不含播放状态）。
+    ///
+    /// 存在的唯一理由：锁屏/控制中心按下播放暂停之后，要在**这一次回调里**就把
+    /// 状态翻过来重新推一遍。前端那条 `smtc_update` 得等 React 的 effect 跑起来，
+    /// App 在后台被挂起时可能几十秒都不来——那段时间锁屏上的键和实际状态对不上，
+    /// 用户看到的就是「明明在放，锁屏还画着 ▶」（2026-11-23 反馈）。
+    static LAST: std::sync::Mutex<Option<LastInfo>> = std::sync::Mutex::new(None);
+
+    #[derive(Clone)]
+    struct LastInfo {
+        title: String,
+        artist: String,
+        album: String,
+        cover: String,
+    }
+
+    /// 只翻播放状态，元信息沿用上一次推的。
+    ///
+    /// `pos` / `dur` 由调用方按**此刻**的快照给：暂停那一刻的 position 才是
+    /// 系统该停住的位置，拿上一次推送里的旧值会让进度条往回跳。
+    pub fn reapply(playing: bool, pos: f64, dur: f64) {
+        /*
+         * 先把要用的四个字符串抄出来，**显式扔掉这把锁**再调 apply：
+         * apply 里还会再锁一次 LAST，`std::sync::Mutex` 不可重入，
+         * 拿着锁进去就是死锁（整个 App 卡在锁屏按下播放那一下）。
+         */
+        let snap = {
+            let Ok(g) = LAST.lock() else { return };
+            g.as_ref()
+                .map(|x| (x.title.clone(), x.artist.clone(), x.album.clone(), x.cover.clone()))
+        };
+        let Some((title, artist, album, cover)) = snap else { return };
+        apply(&title, &artist, &album, playing, &cover, pos, dur);
+    }
+
     /// 锁屏 / 控制中心 / 耳机按键的落地动作。
     ///
     /// 与灵动岛按钮（`liveactivity::handle_remote_command`）是两条独立入口：
@@ -526,11 +561,14 @@ mod apple {
                 if !s.playing {
                     p.resume();
                 }
+                /* 当场把状态推回系统：不等前端那条，见 LAST 的注释 */
+                reapply(true, s.position, s.duration);
             }
             "pause" => {
                 if s.playing {
                     p.pause();
                 }
+                reapply(false, s.position, s.duration);
             }
             "playpause" => {
                 if s.playing {
@@ -538,6 +576,18 @@ mod apple {
                 } else {
                     p.resume();
                 }
+                reapply(!s.playing, s.position, s.duration);
+            }
+            /*
+             * 收藏：和灵动岛那颗星同一个落点——收藏列表只有前端有一份。
+             * 锁屏那颗 ♥ 是系统画的（见 init 里的 likeCommand），状态没法由我们
+             * 染成实心，所以「有没有收上」由前端弹一条 toast 交代。
+             */
+            "fav" => {
+                let _ = app.emit(
+                    "hotkey://action",
+                    serde_json::json!({ "id": "fav", "source": "smtc" }),
+                );
             }
             "next" | "prev" => {
                 let _ = app.emit(
@@ -666,6 +716,16 @@ mod apple {
             hook!(togglePlayPauseCommand, "playpause");
             hook!(nextTrackCommand, "next");
             hook!(previousTrackCommand, "prev");
+            /*
+             * 收藏：iOS 的锁屏卡左侧那颗 ♥ 是系统画的，**只有启用了 likeCommand
+             * 才会出现**——没启用时那格是空的（用户问「为什么别的 App 有收藏按钮，
+             * 我们没有」，根因就在这一行缺失）。
+             * macOS 上启用也不画任何东西（无系统媒体卡），同一个分支省得多一份 cfg。
+             */
+            #[cfg(target_os = "ios")]
+            {
+                hook!(likeCommand, "fav");
+            }
 
             // 锁屏/控制中心拖进度条：事件对象自带 positionTime，单独接
             {
@@ -719,6 +779,10 @@ mod apple {
              * 不撤的话锁屏上会留一张没有歌名的空壳，点进去还占着「正在播放」的位置。
              */
             if title.is_empty() {
+                /* 卡片都撤了，`reapply` 就没东西可翻状态：清掉 */
+                if let Ok(mut g) = LAST.lock() {
+                    *g = None;
+                }
                 if let Some(np_cls) = cls("MPNowPlayingInfoCenter") {
                     let center: *mut AnyObject = objc2::msg_send![np_cls, defaultCenter];
                     if !center.is_null() {
@@ -777,6 +841,25 @@ mod apple {
             };
             let center: Retained<AnyObject> = objc2::msg_send![np_cls, defaultCenter];
             let _: () = objc2::msg_send![&center, setNowPlayingInfo: &*info];
+            /*
+             * 显式告诉系统「现在是在播还是暂停」。
+             *
+             * 只给 PlaybackRate 是不够的：锁屏/控制中心那颗键画 ⏸ 还是 ▶，
+             * 认的是 `playbackState`（1=playing 2=paused）。缺了它，系统只在
+             * 自己认为合适的时候才按速率改图标，实测就是「声音在放，锁屏还画 ▶」。
+             */
+            let st: isize = if playing { 1 } else { 2 };
+            let _: () = objc2::msg_send![&center, setPlaybackState: st];
+
+            /* 记下元信息：锁屏按键后要在原地重推状态（见 reapply） */
+            if let Ok(mut g) = LAST.lock() {
+                *g = Some(LastInfo {
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    album: album.to_string(),
+                    cover: cover.to_string(),
+                });
+            }
 
             objc_autoreleasePoolPop(pool);
         }

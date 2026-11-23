@@ -2022,6 +2022,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     async (
       t: LocalTrack | undefined, playing: boolean, position: number, duration: number,
       line = '',
+      fav = false,
     ) => {
       if (!isIOS) return
       if (!t) {
@@ -2037,6 +2038,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         art,
         line,
         playing,
+        fav,
         position: Math.max(0, position || 0),
         duration: Math.max(0, duration || 0),
         anchor: Date.now() / 1000,
@@ -2075,7 +2077,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const t = currentTrack(queueState)
     if (!t) return
     /* position/playing 故意不进依赖：它们每秒都变，进来就等于每秒推一次 */
-    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine)
+    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine, curFavOn)
   }, [liveLine, currentId, liveSyncNow])
 
   useEffect(() => {
@@ -2138,7 +2140,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      * 换句那次推送由上面那个专门的小 effect 负责，这里只保证切歌那一帧
      * 不把上一首的歌词带到锁屏上。
      */
-    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine)
+    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine, curFavOn)
   }, [currentId, snapshot.playing, curFavOn, cacheVer, liveSyncNow,
       metaTrack?.title, metaTrack?.artist, metaTrack?.album, metaTrack?.cover])
 

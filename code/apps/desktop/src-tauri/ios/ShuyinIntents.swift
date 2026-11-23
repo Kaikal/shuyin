@@ -63,3 +63,35 @@ struct ShuyinNextIntent: LiveActivityIntent {
         return .result()
     }
 }
+
+/// 收藏 / 取消收藏。
+///
+/// 收藏列表只有前端有一份，所以这里只转发，由前端 `toggleFav` 落地；
+/// 落地后它会带着新的 `fav` 再推一次 ContentState，那颗星才会变实心。
+@available(iOS 17.0, *)
+struct ShuyinFavIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "收藏"
+    static var isDiscoverable: Bool = false
+    static var openAppWhenRun: Bool = false
+
+    func perform() async throws -> some IntentResult {
+        shuyinForward("fav")
+        return .result()
+    }
+}
+
+/// 点封面：锁屏卡在「大封面」和「普通卡」之间切换。
+///
+/// 真值在 Rust 侧（`liveactivity::BIG_ART`），这里只发个信号——
+/// 切换本身在那边重推一次 ContentState 完成，不依赖前端 JS 醒着。
+@available(iOS 17.0, *)
+struct ShuyinToggleArtIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "切换封面"
+    static var isDiscoverable: Bool = false
+    static var openAppWhenRun: Bool = false
+
+    func perform() async throws -> some IntentResult {
+        shuyinForward("art")
+        return .result()
+    }
+}

@@ -36,6 +36,7 @@ import { QualitySection, SourcesDirSection, SourcesSection } from '../components
 
 import { HotkeySection } from '../components/HotkeySection'
 import { AccountSection } from '../components/AccountSection'
+import { StatusLyricSection } from '../components/StatusLyricSection'
 import { HelpTip } from '../components/HelpTip'
 import { useDownloads } from '../lib/DownloadsProvider'
 import { audioCacheSize, clearAudioCache } from '../lib/audioCache'
@@ -616,6 +617,13 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
            */}
         </section>
       )}
+
+      {/*
+       * 状态栏歌词：整块从播放页「更多」搬过来（用户 2026-11-23「开关放在设置页去」）。
+       * 和上面的锁屏一样是**系统层面**的常驻开关，不是「对这一首歌做什么」，
+       * 放在播放页那张动作卡片里本来就不对路。
+       */}
+      {bridge.isAndroid && !isCar && <StatusLyricSection />}
 
       {/* 音质排在「播放」页最前：它决定听到什么，比频谱样式更靠前 */}
       <QualitySection />

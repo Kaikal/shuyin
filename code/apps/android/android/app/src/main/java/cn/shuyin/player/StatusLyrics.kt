@@ -67,6 +67,26 @@ object StatusLyrics {
     private const val K_POS = "pos"
 
     /**
+     * 上下位置：窗口**上沿离屏幕顶端**多少 dp。
+     *
+     * 0 = 顶到头（压在状态栏那一行上，异形屏会被挖孔挡住）；默认取状态栏高度，
+     * 也就是「紧贴状态栏下沿」——和以前看起来一模一样。
+     *
+     * 为什么改成「离屏顶的绝对距离」而不是继续用 `y` 偏移：
+     * 各家 ROM 的 overlay 原点到底含不含状态栏并不一致，同一段代码在小米上是
+     * 「状态栏下沿」、在别的机型上可能是「屏幕最上面」。这里统一按
+     * **实际测量值**（`getLocationOnScreen`）校正，用户拖到 0 就真的能顶到头
+     * （用户 2026-11-23：「我们的还是太靠下了…人家能顶到头」）。
+     */
+    private const val K_TOP = "top"
+
+    /** 上下位置的默认值：-1 = 还没设过，按当前设备的状态栏高度算 */
+    private const val TOP_AUTO = -1f
+
+    /** 滑块上界：再往下就压到屏幕中间了，没有意义 */
+    private const val TOP_MAX_DP = 200f
+
+    /**
      * 宽度下限 35%：再窄一点，一句正常长度的歌词就只剩省略号。
      * 上限就是满屏宽——比屏幕还宽没有意义（窗会被系统裁掉）。
      */
@@ -96,6 +116,34 @@ object StatusLyrics {
 
     private var ratio = DEFAULT_RATIO
     private var colorIdx = 0
+
+    /** 窗口上沿离屏幕顶端的距离（dp）；[TOP_AUTO] = 还没设过，用状态栏高度 */
+    private var topDp = TOP_AUTO
+
+    private fun density(): Float = appCtx?.resources?.displayMetrics?.density ?: 1f
+
+    private fun dp(v: Float): Int = (v * density()).toInt()
+
+    /**
+     * 状态栏高度（dp）。取不到时按 24dp 估——这个值只影响默认位置，
+     * 估错了也就是默认稍高/稍低一格，用户拖一下就能对。
+     */
+    private fun statusBarDp(ctx: Context): Float {
+        return try {
+            val id = ctx.resources.getIdentifier("status_bar_height", "dimen", "android")
+            val px = if (id > 0) ctx.resources.getDimensionPixelSize(id) else dp(24f)
+            px / ctx.resources.displayMetrics.density
+        } catch (_: Exception) {
+            24f
+        }
+    }
+
+    /** 生效中的上下位置（dp）：没设过就用状态栏高度 */
+    private fun effectiveTopDp(): Float {
+        if (topDp >= 0f) return topDp
+        val ctx = appCtx ?: return 24f
+        return statusBarDp(ctx)
+    }
 
     /**
      * 水平位置：0 = 贴左、0.5 = 居中、1 = 贴右。
@@ -156,6 +204,8 @@ object StatusLyrics {
                 ratio = prefs.getFloat(K_WIDTH, DEFAULT_RATIO).coerceIn(MIN_RATIO, MAX_RATIO)
                 colorIdx = prefs.getInt(K_COLOR, 0).coerceIn(0, PALETTE.size - 1)
                 posX = prefs.getFloat(K_POS, 0.5f).coerceIn(0f, 1f)
+                val storedTop = prefs.getFloat(K_TOP, TOP_AUTO)
+                topDp = if (storedTop < 0f) TOP_AUTO else storedTop.coerceIn(0f, TOP_MAX_DP)
 
                 val dm = ctx.resources.displayMetrics
                 val widthPx = (dm.widthPixels * ratio).toInt().coerceAtLeast(1)
@@ -193,18 +243,32 @@ object StatusLyrics {
                      * NOT_TOUCHABLE：整条穿透——它是字幕，不是控件，挡住顶部下拉手势区
                      * 比看不到歌词更糟。
                      *
-                     * **刻意不加 LAYOUT_NO_LIMITS**：加上它窗口就能画进状态栏那一行，
-                     * 把时间、信号、电量图标盖住（视觉上很脏）。不加的话 y=0 就是
-                     * 「紧贴状态栏下沿」，全屏时状态栏消失则自动贴到屏幕最顶端——
-                     * 两种情形都正好，也不需要去算状态栏高度。
+                     * LAYOUT_NO_LIMITS（2026-11-23 起）：允许窗沿顶出「内容区」。
+                     * 用户要的是「能顶到头」，也就是文字可以压在状态栏那一行上；
+                     * 不开这个标志，系统会把窗口夹在状态栏下沿，滑块拖到 0 也不动。
+                     * 挡住时间/电量的风险由用户自己权衡——把默认值定在状态栏高度，
+                     * 想上去才拖（酷狗也一样让它能压上去）。
                      */
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.TRANSLUCENT,
                 ).apply {
                     gravity = Gravity.TOP or Gravity.START
-                    /* y=0 在这个坐标系里就是紧贴状态栏下沿（overlay 层级低于 SystemUI） */
-                    y = 0
+                    /*
+                     * 异形屏（水滴/挖孔）还要单独开口子：不声明 cutout 模式时，
+                     * 系统把「安全区」当成不可用，NO_LIMITS 也顶不进那一块。
+                     * ALWAYS 是 API 30 才公开的常量，28~29 用 SHORT_EDGES。
+                     */
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    } else if (Build.VERSION.SDK_INT >= 28) {
+                        layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
+                    /* 真正的 y 由 applyTop() 按实测值校正，这里只是初始猜一个 */
+                    y = dp(effectiveTopDp())
                     x = xFor(dm.widthPixels, widthPx)
                 }
 
@@ -214,6 +278,8 @@ object StatusLyrics {
                 board = b
                 lp = params
                 shown = true
+                /* 建窗之后按「实际贴屏顶的像素」校正一次 y（各 ROM 坐标系不一样） */
+                applyTop()
                 notifyFrontend(true)
             } catch (_: Exception) {
                 /* 个别 ROM 在权限被回收后 addView 会抛：吞掉，不影响播放 */
@@ -302,11 +368,56 @@ object StatusLyrics {
         main.post { board?.hl = Color.parseColor(PALETTE[colorIdx]) }
     }
 
-    /** 开关 + 宽度 + 水平位置 + 配色，供前端弹窗显示 */
+    /**
+     * 调上下位置：窗口上沿离屏幕顶端多少 dp（0 = 顶到头）。
+     *
+     * 落盘 + 当场重排。窗没开时只落盘，下次 [show] 生效。
+     */
+    fun setTop(v: Float) {
+        topDp = v.coerceIn(0f, TOP_MAX_DP)
+        appCtx?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()
+            ?.putFloat(K_TOP, topDp)?.apply()
+        applyTop()
+    }
+
+    /**
+     * 把窗口挪到「上沿离屏顶 [effectiveTopDp]」的位置。
+     *
+     * 分两步：先按 `y = 目标像素` 摆一次，再用 `getLocationOnScreen` **实测**
+     * 它到底落在哪，差的像素补回 `y`。
+     *
+     * 为什么不能直接算：`TYPE_APPLICATION_OVERLAY` 的原点含不含状态栏，
+     * 各 ROM / 各版本不一致（有的从屏幕最上面算，有的从状态栏下沿算），
+     * 差的就是一个状态栏高度——而那正好是用户抱怨的「太靠下」。
+     * 实测一次就与坐标系无关了：平移量是线性的，补一次即到位。
+     */
+    private fun applyTop() {
+        main.post {
+            val p = lp ?: return@post
+            val c = root ?: return@post
+            val s = wm ?: return@post
+            val target = dp(effectiveTopDp())
+            p.y = target
+            try { s.updateViewLayout(c, p) } catch (_: Exception) { return@post }
+            c.post {
+                val loc = IntArray(2)
+                try { c.getLocationOnScreen(loc) } catch (_: Exception) { return@post }
+                val d = target - loc[1]
+                if (d != 0) {
+                    p.y += d
+                    try { s.updateViewLayout(c, p) } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    /** 开关 + 宽度 + 水平位置 + 上下位置 + 配色，供前端显示 */
     fun stateJson() = org.json.JSONObject()
         .put("on", shown)
         .put("width", ratio.toDouble())
         .put("pos", posX.toDouble())
+        .put("top", effectiveTopDp().toDouble())
+        .put("topMax", TOP_MAX_DP.toDouble())
         .put("color", colorIdx)
 
     private fun notifyFrontend(on: Boolean) {

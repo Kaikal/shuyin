@@ -31,6 +31,15 @@ struct ShuyinActivityAttributes: ActivityAttributes {
         /// 空串表示「这张图没取到」，扩展那边会画一个占位音符。
         var art: String
         var playing: Bool
+        /// 这首歌是否已收藏：灵动岛/锁屏那颗星画实心还是空心。
+        ///
+        /// 收藏列表只有前端有一份，所以它跟着 `live_activity_sync` 一起推上来。
+        var fav: Bool
+        /// 锁屏卡是否放大封面（点封面在「大封面」和「普通卡」之间切换）。
+        ///
+        /// **不跟前端走**：这个值由灵动岛上的点击改，真值在 Rust 侧，
+        /// 每次 sync 都由那边覆盖回来，前端 payload 里带的值不作数。
+        var big: Bool
         /// 当前正在唱的那一句歌词（没有歌词时是空串）。
         ///
         /// 为什么不做成逐字染色：扩展进程里拿不到「当前行已经唱了多久」的精确起点

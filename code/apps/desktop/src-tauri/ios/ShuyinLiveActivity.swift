@@ -33,6 +33,11 @@ enum ShuyinLive {
         /// 当前那句歌词。**可选**是有意的：旧前端/Rust 没带这个字段时，
         /// 只是锁屏少一行词，不该让整条 activity 解码失败（那会连封面歌名都没了）。
         let line: String?
+        /// 已收藏？**可选**：旧 Rust 不带这两个字段时按 false 处理，
+        /// 别让整条 activity 解码失败（那就连封面歌名都没了）。
+        let fav: Bool?
+        /// 放大封面形态（Rust 侧按点击记真值，前端 payload 里通常是缺的）
+        let big: Bool?
         let position: Double
         let duration: Double
         let anchor: Double
@@ -44,6 +49,8 @@ enum ShuyinLive {
                 album: album,
                 art: art,
                 playing: playing,
+                fav: fav ?? false,
+                big: big ?? false,
                 line: line ?? "",
                 position: position,
                 duration: duration,

@@ -439,12 +439,14 @@ class Bridge(private val web: WebView) {
          */
         "status_lyric_toggle" -> StatusLyrics.toggleState(Sy.app)
         "status_lyric_state" -> StatusLyrics.stateJson()
-        /* 调宽度 / 水平位置 / 配色：只传要改的那个字段，没传的保持原样 */
+        /* 调宽度 / 水平位置 / 上下位置 / 配色：只传要改的那个字段，没传的保持原样 */
         "status_lyric_set" -> {
             val w = a.optDouble("width", -1.0)
             if (w > 0) StatusLyrics.setWidth(w.toFloat())
             /* pos 允许 0（贴左），所以判据是「有没有这个键」而不是「大于 0」 */
             if (a.has("pos")) StatusLyrics.setPos(a.optDouble("pos", 0.5).toFloat())
+            /* top 同理：0 就是「顶到头」，不能按「大于 0」判 */
+            if (a.has("top")) StatusLyrics.setTop(a.optDouble("top", 0.0).toFloat())
             val c = a.optInt("color", -1)
             if (c >= 0) StatusLyrics.setColor(c)
             null
