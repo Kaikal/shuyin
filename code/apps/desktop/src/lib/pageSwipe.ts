@@ -34,6 +34,7 @@
  */
 import { useEffect, useRef } from 'react'
 import { isGestureTaken } from './gestureLock'
+import { EDGE_BACK_ZONE } from './edgeBack'
 
 /** 判定方向前允许的抖动 */
 const SLOP = 6
@@ -355,6 +356,14 @@ export function usePageSwipe(opts: {
        */
       if (settling) finishSettle()
       const p = e.touches[0]
+      /*
+       * 左边缘那一小条让给「边缘右滑返回」（lib/edgeBack）。
+       *
+       * pageSwipe 是从**任意位置**起手切页的，边缘也算。不排除的话，同一次滑动
+       * 会既切页面又触发返回，用户看到的是「划一下退两层」。
+       * 22px 之内本来也几乎划不出一次切页（Safari / 系统返回手势都在这条带上）。
+       */
+      if (p.clientX <= EDGE_BACK_ZONE) return
       x0 = p.clientX
       y0 = p.clientY
       t0 = performance.now()

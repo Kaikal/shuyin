@@ -959,6 +959,19 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
           <section className="home-sec">
             <div className="home-sec-head">
               <h2>我的歌单</h2>
+              {/*
+               * 手机：主操作挪到「我的歌单」这一行（页头那份在手机上隐藏，见
+               * handoff.css）。用户 2026-11-23 的 iPhone 反馈：「上面的按钮
+               * 还是占了很大空间，而且挤在一起」——两颗 44 高的按钮撑满整行，
+               * 等于页头白占两行，而它们服务的内容（歌单）在下面半屏之外。
+               * 贴着标题放，既省掉那两行，也把「新建歌单」摆回了它该在的位置。
+               */}
+              <button className="home-sec-act primary" onClick={openNew}>
+                <IconPlus width={12} height={12} /> 新建
+              </button>
+              <button className="home-sec-act" onClick={() => void doImport()} disabled={importing}>
+                <IconUpload width={12} height={12} /> {importing ? '导入中' : '导入'}
+              </button>
               <span className="modal-sp" />
               {/*
                * 整理入口。
@@ -1060,11 +1073,12 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
             {pl.lists.length === 0 && platShown.length === 0 && (
               <div className="home-empty">
                 <div className="t">还没有歌单</div>
-                <div className="s">新建一个，把喜欢的歌归到一起</div>
-                <div className="home-empty-acts">
-                  <button className="primary-btn" onClick={openNew}><IconPlus width={13} height={13} /> 新建歌单</button>
-                  <button className="ghost-btn" onClick={() => void doImport()}><IconUpload width={13} height={13} /> 导入歌单</button>
-                </div>
+                {/*
+                 * 这里**不再放按钮**（2026-11-23 iPhone 反馈「按钮占很大空间」）：
+                 * 顶上那排就是「新建歌单 / 导入歌单」，屏幕里隔着 300px 再放一遍
+                 * 一模一样的两颗，纯属把空态撑得更高。指向上面那一排即可。
+                 */}
+                <div className="s">点上面的「新建歌单」，把喜欢的歌归到一起</div>
               </div>
             )}
             <>

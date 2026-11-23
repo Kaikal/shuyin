@@ -1435,13 +1435,46 @@ fn open_file_inbox(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_cache_dir().ok().map(|d| d.join("inbox"))
 }
 
+/// iOS：在「安全作用域」里读一个 `file://` 文件。
+///
+/// 外部 App /「文件」App 递过来的 URL 指向我们自己沙箱之外，没拿到
+/// security-scoped 授权时 `std::fs::read` 是 EPERM。UIKit 的规矩是
+/// `startAccessingSecurityScopedResource` → 读 → `stop...` 成对调用。
+///
+/// 为什么不用 `app.fs().read()`：那条路先过 fs 插件的 scope 校验，
+/// 沙箱外路径一律 forbidden（而且这里写的是 `let Ok(..) else return`，
+/// 失败是静默的）。放开 scope 又要写 `/**`，等于把整个文件系统开给前端。
+#[cfg(target_os = "ios")]
+fn read_scoped(url: &tauri::Url) -> Option<Vec<u8>> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    unsafe {
+        let c = std::ffi::CString::new(url.as_str()).ok()?;
+        let s: Retained<AnyObject> = objc2::msg_send![
+            objc2::class!(NSString),
+            stringWithUTF8String: c.as_ptr()
+        ];
+        let u: Retained<AnyObject> = objc2::msg_send![
+            objc2::class!(NSURL),
+            URLWithString: &*s
+        ];
+        /* BOOL 用 i8 收：objc 的 BOOL 在这个 ABI 上是 signed char，
+           objc2 对 `bool` 的 Encode 实现各版本不一致，i8 最稳 */
+        let started: i8 = objc2::msg_send![&*u, startAccessingSecurityScopedResource];
+        let out = url.to_file_path().ok().and_then(|p| std::fs::read(p).ok());
+        if started != 0 {
+            let _: () = objc2::msg_send![&*u, stopAccessingSecurityScopedResource];
+        }
+        out
+    }
+}
+
 /// 把「用疏音打开」送进来的文件摆到 inbox 上。
 ///
 /// 只落盘、不推送：Apple 平台的冷启动打开早于 WebView 就绪，推事件必丢；
 /// 前端启动 / 回到前台时用 `take_open_file` 取一次，天然不漏。
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
-    let Ok(src) = url.to_file_path() else { return };
+fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {    let Ok(src) = url.to_file_path() else { return };
     let Some(inbox) = open_file_inbox(app) else { return };
     let _ = std::fs::create_dir_all(&inbox);
     let raw = src
@@ -1451,11 +1484,23 @@ fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
         .to_string();
     let dest = inbox.join(safe_file_name(&raw));
     /*
-     * 必须经 fs 插件读，不能用 std::fs::copy：
-     * 「文件」App / iCloud Drive 送来的文件在沙箱外，iOS 只有先
-     * `startAccessingSecurityScopedResource` 才读得到，直接 copy 是 EPERM。
-     * 插件对 `file://` 自动做这一步（macOS 上等价于转路径再读）。
+     * 读源文件这一步在 iOS 上**不能**走 fs 插件。
+     *
+     * `app.fs().read()` 会先做 scope 校验：外部 App /「文件」App 送来的路径
+     * （`/private/var/mobile/...`）不在允许范围里，直接返回 forbidden，
+     * 而这里写的是 `let Ok(..) else { return }`——于是静默什么都不发生，
+     * 用户看到的就是「用疏音打开还是不行」（2026-11-22 iPhone 实测）。
+     * 给 fs 插件放开 `/**` 是另一种写法，但那等于把整个文件系统开给前端。
+     *
+     * 改用原生那一套：`startAccessingSecurityScopedResource` 拿到临时授权，
+     * 直接用 std::fs 读，读完立刻 stop。这才是沙箱外文件的正规姿势。
      */
+    #[cfg(target_os = "ios")]
+    let bytes = match read_scoped(url) {
+        Some(b) => b,
+        None => return,
+    };
+    #[cfg(not(target_os = "ios"))]
     let Ok(bytes) = app.fs().read(FilePath::Url(url.clone())) else { return };
     if bytes.len() > 32 * 1024 * 1024 {
         return;

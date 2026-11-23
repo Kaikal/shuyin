@@ -54,6 +54,7 @@ import { ToastHost } from './components/ToastHost'
 import { ConfirmHost } from './components/ConfirmHost'
 import { UpdateDialog } from './components/UpdateDialog'
 import { autoCheckUpdate, openDownload, skipVersion, type UpdateInfo } from './lib/update'
+import { useEdgeBack } from './lib/edgeBack'
 
 /**
  * 一个在线歌单的定位信息（平台 + id + 名字）。
@@ -677,12 +678,29 @@ export function App() {
   useEffect(() => {
     /* iOS 没有系统返回键，手势侧滑默认是「导航返回」，WKWebView 里没有
        history 可退时它什么都不做——弹层（播放页/抽屉）关不掉。
-       先把 handler 注册上（安卓壳之外 setBackHandler 只是存了个引用，
-       没有任何副作用），等 iOS 壳接「边缘侧滑 → back」事件时直接可用。 */
+       handler 注册上之后，安卓由原生返回键调它（`__syBack`），
+       iOS 由下面 useEdgeBack 的左缘右滑调它。 */
     if (!(isAndroid || isIOS)) return
     setBackHandler(() => backRef.current())
     return () => setBackHandler(null)
   }, [])
+
+  /*
+   * iOS：左边缘往右滑 = 返回上一层。
+   *
+   * 安卓不用（系统自带边缘返回），所以只在 iOS 打开——两边同时装会互相抢手势。
+   * 层叠顺序直接复用上面的 backRef，和安卓返回键是同一份真值。
+   */
+  const canBackRef = useRef<() => boolean>(() => false)
+  canBackRef.current = () => !!(
+    detail || queueOpen || nowOpen || plImport || onlinePl || localPl ||
+    homeFav || homeHist || homeLib || page !== 'home'
+  )
+  useEdgeBack({
+    enabled: isIOS,
+    canBack: () => canBackRef.current(),
+    onBack: () => backRef.current(),
+  })
 
   /*
    * 「其他应用打开」送进来的文件（安卓 / iOS）。

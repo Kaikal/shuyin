@@ -44,7 +44,7 @@ import { useFoliaFx, useLyricsSolo, useSpectrumOn, useSwipeHint, useVinylView } 
 import { toggleFullscreen, useFullscreen } from '../lib/fullscreen'
 import {
   IconAlignCenter, IconAlignLeft, IconAlignRight,
-  IconCheck, IconChevronDown, IconComment, IconDesktopLyric, IconDisc, IconDownload, IconFolder, IconFrame, IconFullscreen,
+  IconCheck, IconChevronDown, IconChevronLeft, IconComment, IconDesktopLyric, IconDisc, IconDownload, IconFolder, IconFrame, IconFullscreen,
   IconFullscreenExit, IconHeart, IconHeartFilled, IconInfo, IconLyric, IconMonitor, IconMore, IconNext, IconPause, IconPlay,
   IconPrev, IconQueue, IconQueueLines, IconRefresh, IconRepeat, IconRepeatAll, IconShare, IconShuffle, IconSliders, IconSparkle,
   IconMusicNote, IconSpeaker, IconVolume, IconVolumeMute, IconWave,
@@ -783,6 +783,20 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
     setSolo(true)
   }
 
+  /*
+   * ⚠️ 这套手势**不能挂在 React 的 onTouchXxx 上**（2026-11-23 iPhone 实锤）。
+   *
+   * React 17 起把 touchstart / touchmove / wheel 注册成 **passive** 监听器，
+   * 里面的 `preventDefault()` 一律无效（只在控制台留一句警告）。于是：
+   *   · 手指在歌词页横划 → 浏览器把它判成「滚动内容」→ 系统接管 → WebView
+   *     补一个 `touchcancel`，`touchend` 永远不来，`setPager('art')` 根本没机会跑；
+   *   · 用户看到的就是「进了歌词页就出不来」。安卓上因为整页不可滚，勉强能用，
+   *     所以这个坑只在 iPhone 上暴露。
+   *
+   * 现在改成 window 捕获阶段、`passive: false` 的监听（和 lib/pageSwipe 同一套路数），
+   * 一旦判定为横向就每帧 preventDefault，浏览器不会再把手势抢去滚页面。
+   * 见下面的 useEffect（`mpHandlers` 存的是最新一版闭包，避免 effect 重挂）。
+   */
   const mpGesture = mobile
     ? {
         onTouchStart: (e: React.TouchEvent) => {
@@ -821,6 +835,9 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
             d.axis = Math.abs(dx) > Math.abs(dy) * ratio ? 'x' : 'y'
           }
           if (d.axis === 'x') {
+            /* 锁定横向之后每帧都要拦：一帧不拦，iOS 就会把它判成滚动页并补
+               touchcancel，touchend 不再来，这一次翻页等于白做 */
+            if (e.cancelable) e.preventDefault()
             const w = mpW()
             if (pager === 'lyric') {
               /* 歌词页是最右一页：往右 1:1 跟手回封面，往左给 0.3 阻尼
@@ -934,8 +951,58 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
           onArtTap()
           tapGuard.current = Date.now() + 400
         },
+        /*
+         * 手势被系统抢走（来电、通知下拉、iOS 把拖动判成滚动）。
+         *
+         * 以前没有这个分支：轨道会僵在拖到一半的位置——封面停在半路、歌词页
+         * 露出半屏，之后怎么滑都不动（`mpDrag` 还留着旧起点）。用户的一句
+         * 「歌词页返回不了」里也含这个成分。这里按主轴把轨道归位，代价接近零。
+         */
+        onTouchCancel: () => {
+          const d = mpDrag.current
+          mpDrag.current = null
+          if (!d) return
+          if (d.axis === 'x') mpPlace(pager === 'lyric' ? -mpW() : 0, 200)
+          else if (d.axis === 'y') mpLift(0, 200)
+        },
       }
-    : {}
+    : null
+
+  /*
+   * 把上面这套手势接到 window 的捕获阶段（`passive: false`）。
+   *
+   * 用 ref 转一手：`mpHandlers` 每次渲染都是新闭包（里面读 pager / t / 队列），
+   * 而监听器只该注册一次——否则每次换歌都要摘挂四个 window 监听。
+   */
+  const mpRef = useRef(mpGesture)
+  mpRef.current = mpGesture
+  useEffect(() => {
+    if (!mobile || !open) return
+    /*
+     * 只接播放页里的触摸：window 捕获阶段能看到全 App 的事件，
+     * 不判这一下的话，在歌单里横划也会去推播放页的轨道。
+     */
+    const inside = (e: TouchEvent) => {
+      const el = e.target as Element | null
+      return !!el && typeof el.closest === 'function' && !!el.closest('.imm-mpager')
+    }
+    const asReact = (e: TouchEvent) => e as unknown as React.TouchEvent
+    const start = (e: TouchEvent) => { if (inside(e)) mpRef.current?.onTouchStart(asReact(e)) }
+    const move = (e: TouchEvent) => { if (inside(e)) mpRef.current?.onTouchMove(asReact(e)) }
+    const end = (e: TouchEvent) => { if (inside(e)) mpRef.current?.onTouchEnd(asReact(e)) }
+    /* cancel 不看 target：被系统取消时事件可能落在别的节点上，也可能没有 target */
+    const cancel = () => mpRef.current?.onTouchCancel?.()
+    window.addEventListener('touchstart', start, { capture: true, passive: true })
+    window.addEventListener('touchmove', move, { capture: true, passive: false })
+    window.addEventListener('touchend', end, { capture: true, passive: true })
+    window.addEventListener('touchcancel', cancel, { capture: true, passive: true })
+    return () => {
+      window.removeEventListener('touchstart', start, true)
+      window.removeEventListener('touchmove', move, true)
+      window.removeEventListener('touchend', end, true)
+      window.removeEventListener('touchcancel', cancel, true)
+    }
+  }, [mobile, open])
 
   /* 桌面那套 grid 还挂着 `{...artGesture}`：手机上已由 mpGesture 接管，
      这里留个空对象，桌面本来就不需要（点封面走 onClick）。 */
@@ -1624,13 +1691,16 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
         )}
 
         {/* 手机：整页横滑（封面 + 歌名 + 歌词 ⇄ 歌词页），底部控制固定。
-            桌面仍是下面那套两列 grid——两边的排版需求差太远，硬套一套会互相拖累。 */}
+            桌面仍是下面那套两列 grid——两边的排版需求差太远，硬套一套会互相拖累。
+
+            手势**不挂在这里**：React 的 touch 监听是 passive 的，拦不下 iOS 的
+            滚动手势（见 mpGesture 上面那段注释）。监听在 window 上，按
+            `.imm-mpager` 过滤。 */}
         {t && mobile && (
           <div
             className="imm-mpager"
             data-page={pager}
             data-slide={slide ?? undefined}
-            {...mpGesture}
           >
             {/* 频谱横条·顶部：占在封面页上方，翻页时不动 */}
             {specBar && mSpecPos === 'top' && (
@@ -1812,6 +1882,20 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
               {/* ---- 歌词页 ---- */}
               <section className="imm-mp" data-p="lyric">
                 <div className="imm-mp-tabs">
+                  {/* 回专辑页。
+                      用户：「进入歌词页后就返回不到专辑页」。横滑本来就有，但
+                      iOS 上一直被浏览器当滚动收走（见 mpGesture 那段注释），
+                      而且「横滑能回去」这件事本身没人知道——明面上的返回键
+                      比教会一种手势便宜得多。 */}
+                  <button
+                    className="imm-mp-back"
+                    onClick={() => setPager('art')}
+                    aria-label="回到专辑页"
+                    title="回到专辑页"
+                  >
+                    <IconChevronLeft width={18} height={18} />
+                    <span>专辑</span>
+                  </button>
                   <button
                     className={'imm-mp-tab' + (panel === 'lyric' ? ' on' : '')}
                     onClick={() => setPanel('lyric')}

@@ -1352,9 +1352,10 @@ html[data-shell='phone'] .home-head .lib-actions {
   display: flex;
   grid-area: ops;
   flex-wrap: nowrap;
-  gap: 8px;
+  gap: 10px;
   margin-top: 0;
-  justify-content: stretch;
+  /* 靠左排：两颗按钮按内容宽度（见下面那段），撑满整行会显得又被它们占了一屏 */
+  justify-content: flex-start;
 }
 /* 「?」是导入说明，手机上没有鼠标悬停可看，收起来；说明在导入失败时用提示讲 */
 html[data-shell='phone'] .home-head .lib-actions .help-dot { display: none; }
@@ -1377,18 +1378,13 @@ html[data-shell='phone'] .home-head .home-acct { max-width: none; }
 html[data-shell='phone'] .home-head .home-acct .acct-label { display: none; }
 html[data-shell='phone'] .home-head .home-refresh .home-refresh-lb { display: none; }
 
-/* 主操作：新建 / 导入 平分一行 */
-html[data-shell='phone'] .home-head .lib-actions > .primary-btn,
-html[data-shell='phone'] .home-head .lib-actions > .ghost-btn {
-  flex: 1 1 0;
-  min-width: 0;
-  height: 44px;
-  padding: 0 12px;
-  border-radius: 999px;
-  justify-content: center;
-  font-size: 13.5px;
-  white-space: nowrap;
-}
+/* 主操作：新建 / 导入。
+   2026-11-23 iPhone 反馈「上面那排按钮占了很大空间，而且挤在一起」——
+   之前是各占一半、44 高，两颗撑满整行，等于页头白占掉两行。
+   现在**手机上整排收起来**，两颗按钮挪到「我的歌单」标题行（见 HomePage
+   的 home-sec-act）：贴着它们管的内容，页头只剩状态 + 两颗圆钮。
+   这里保留桌面 / 平板的样式不动（桌面页头有两行空间，按钮放右上角最顺）。 */
+html[data-shell='phone'] .home-head .lib-actions { display: none; }
 
 /*
  * 平台账号：一张卡片四行。原来是四颗独立小胶囊 flex-wrap，两列一散，
@@ -1576,6 +1572,36 @@ html[data-shell='phone'] .home-cover {
 html[data-shell='phone'] .home-card-name { font-size: 13.5px; color: var(--hd-text-1); }
 html[data-shell='phone'] .home-card-meta { font-size: 11.5px; color: var(--hd-text-3); }
 html[data-shell='phone'] .home-sec-head h2 { font-size: 15px; color: var(--hd-text-1); }
+/*
+ * 「我的歌单」这一行右边的主操作（新建 / 导入）。
+ *
+ * 桌面不显示：那边页头本身就有这两颗，摆两份是噪音。
+ * 手机上它们是**唯一**入口（页头那排收起来了，见上面 .home-head .lib-actions）。
+ */
+.home-sec-act { display: none; }
+html[data-shell='phone'] .home-sec-head { gap: 8px; }
+html[data-shell='phone'] .home-sec-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--hd-surface-3);
+  color: var(--hd-text-2);
+  font-size: 11.5px;
+  white-space: nowrap;
+  /* 这一行是 baseline 对齐的，按钮得自己居中，否则会被文字基线顶上去 */
+  align-self: center;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-shell='phone'] .home-sec-act.primary {
+  background: var(--sy-accent-a20);
+  color: var(--sy-accent-soft);
+}
+html[data-shell='phone'] .home-sec-act:disabled { opacity: 0.5; }
 /* 分组（本地 / 平台名）：手机上一屏能同时看到两个分组，标题不能太大，
    否则「我的歌单」下面的层级会盖过卡片本身 */
 html[data-shell='phone'] .home-group + .home-group { margin-top: 16px; }
@@ -4014,6 +4040,40 @@ html[data-shell='phone'] .imm-mp-tab.on {
   background: var(--hd-surface-3);
   color: var(--hd-text-1);
 }
+/*
+ * 歌词页左上角的「‹ 专辑」。
+ *
+ * 用户 2026-11-23：「进入歌词页后就返回不到专辑页」。横滑一直写着，
+ * 但 iOS 把它当滚动收走了（见 ImmersivePlayer 里 mpGesture 上面那段），
+ * 而且「横滑能回去」不是能看见的东西——给一颗明面上的返回键。
+ *
+ * 比 tab 矮一点、只描边不填色：它是个「离开这一页」的动作，不是这一页的
+ * 一个分类，视觉上不该和「歌词 / 评论」这两颗抢。右边留 4 的一根竖线做分组。
+ */
+html[data-shell='phone'] .imm-mp-back {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 30px;
+  padding: 0 10px 0 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--hd-text-2);
+  font-size: 12.5px;
+  -webkit-tap-highlight-color: transparent;
+  margin-right: 2px;
+}
+html[data-shell='phone'] .imm-mp-back::after {
+  content: '';
+  width: 1px;
+  height: 14px;
+  margin-left: 8px;
+  background: var(--hd-line);
+}
+html[data-shell='phone'] .imm-mp-back:active { color: var(--hd-text-1); }
+html[data-shell='phone'] .imm-mp-back svg { flex: none; }
 /* 歌词对齐三档（居左 / 居中 / 居右）：贴在 tab 行右端。
    手机上以前压根没有这个入口，还硬写成左对齐——用户说的「不能调整」就是这个。 */
 html[data-shell='phone'] .imm-mp-align {
