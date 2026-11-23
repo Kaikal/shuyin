@@ -65,6 +65,10 @@ object StatusLyrics {
     private const val K_WIDTH = "width"
     private const val K_COLOR = "color"
     private const val K_POS = "pos"
+    /** 背景底板开没开（关掉就是纯文字，像酷狗的样式） */
+    private const val K_BG = "bg"
+    /** 底板配色（索引对齐 [BG_PALETTE]） */
+    private const val K_BG_COLOR = "bg_color"
 
     /**
      * 上下位置：窗口**上沿离屏幕顶端**多少 dp。
@@ -116,6 +120,39 @@ object StatusLyrics {
 
     private var ratio = DEFAULT_RATIO
     private var colorIdx = 0
+
+    /**
+     * 底板配色。三档够用：深色是默认（压在浅色壁纸上也看得清），
+     * 纯黑适合纯色桌面，浅色给深色壁纸用。关掉底板（`bgOn=false`）时只有文字。
+     */
+    private val BG_PALETTE = intArrayOf(
+        Color.argb(200, 8, 10, 16),
+        Color.argb(235, 0, 0, 0),
+        Color.argb(205, 245, 246, 250),
+    )
+
+    private var bgOn = true
+    private var bgIdx = 0
+
+    /** 当前底板色（0 = 不画底板，见 LyricBoard 的绘制分支） */
+    private fun plate(): Int =
+        if (bgOn) BG_PALETTE[bgIdx.coerceIn(0, BG_PALETTE.size - 1)] else 0
+
+    /*
+     * 一次拖动会连发几十个 set：每个都当场 `updateViewLayout` 会让窗口在
+     * measure/layout 之间反复跳，肉眼就是「闪」。这里按帧合并，一帧只应用最后那个值。
+     */
+    private var widthPending = false
+    private var topPending = false
+
+    /**
+     * 窗口坐标与屏幕坐标的固有偏差（px）：`locY = lp.y + topBias`。
+     *
+     * 各家 ROM 的 overlay 原点含不含状态栏不一致，第一次实测出来之后就不用再测了 ——
+     * 拖动时一次 `updateViewLayout` 到位，不再「先摆一次再补一次」（那两次更新本身
+     * 也是闪的一个来源）。建窗时清空，重新校准。
+     */
+    private var topBias: Int? = null
 
     /** 窗口上沿离屏幕顶端的距离（dp）；[TOP_AUTO] = 还没设过，用状态栏高度 */
     private var topDp = TOP_AUTO
@@ -206,6 +243,10 @@ object StatusLyrics {
                 posX = prefs.getFloat(K_POS, 0.5f).coerceIn(0f, 1f)
                 val storedTop = prefs.getFloat(K_TOP, TOP_AUTO)
                 topDp = if (storedTop < 0f) TOP_AUTO else storedTop.coerceIn(0f, TOP_MAX_DP)
+                bgOn = try { prefs.getBoolean(K_BG, true) } catch (_: Exception) { true }
+                bgIdx = prefs.getInt(K_BG_COLOR, 0).coerceIn(0, BG_PALETTE.size - 1)
+                /* 新窗口：坐标偏差要重新实测一次 */
+                topBias = null
 
                 val dm = ctx.resources.displayMetrics
                 val widthPx = (dm.widthPixels * ratio).toInt().coerceAtLeast(1)
@@ -221,8 +262,9 @@ object StatusLyrics {
                     reserveClose = false
                     /* 状态栏字幕要居中，不是桌面歌词那种上左下右 */
                     alignCenter = true
-                    /* 比桌面歌词的底板实一点：顶上这一条经常压在浅色壁纸/白底文档上 */
-                    plateColor = Color.argb(200, 8, 10, 16)
+                    /* 比桌面歌词的底板实一点：顶上这一条经常压在浅色壁纸/白底文档上。
+                       用户关掉背景时这里就是 0，只画文字（见 LyricBoard 的 plateColor 分支） */
+                    plateColor = plate()
                     hl = Color.parseColor(PALETTE[colorIdx])
                     fallback = pendingTitle
                     setLines(pendingCur, "", pendingProg, false)
@@ -279,7 +321,7 @@ object StatusLyrics {
                 lp = params
                 shown = true
                 /* 建窗之后按「实际贴屏顶的像素」校正一次 y（各 ROM 坐标系不一样） */
-                applyTop()
+                applyTopNow()
                 notifyFrontend(true)
             } catch (_: Exception) {
                 /* 个别 ROM 在权限被回收后 addView 会抛：吞掉，不影响播放 */
@@ -321,26 +363,31 @@ object StatusLyrics {
     fun setWidth(r: Float) {
         ratio = r.coerceIn(MIN_RATIO, MAX_RATIO)
         put(K_WIDTH, ratio)
-        main.post {
-            val p = lp ?: return@post
-            val c = root ?: return@post
-            val s = wm ?: return@post
-            val dm = c.resources.displayMetrics
-            val w = (dm.widthPixels * ratio).toInt().coerceAtLeast(1)
-            p.width = w
-            /* 宽度一变，剩余空间跟着变——位置按同一个 posX 重算，条子不会跑偏 */
-            p.x = xFor(dm.widthPixels, w)
-            /*
-             * maxWidth 是个普通字段，改了不会自己触发测量——
-             * 必须显式 requestLayout，否则窗变窄了字还按旧预算排，右边被硬裁掉。
-             */
-            board?.let { b ->
-                b.maxWidth = w
-                b.requestLayout()
-                b.invalidate()
-            }
-            try { s.updateViewLayout(c, p) } catch (_: Exception) {}
+        if (widthPending) return
+        widthPending = true
+        main.post { widthPending = false; applyWidth() }
+    }
+
+    /** 把窗口宽度/位置按当前 [ratio] 落地（一帧最多一次，见 [widthPending]） */
+    private fun applyWidth() {
+        val p = lp ?: return
+        val c = root ?: return
+        val s = wm ?: return
+        val dm = c.resources.displayMetrics
+        val w = (dm.widthPixels * ratio).toInt().coerceAtLeast(1)
+        p.width = w
+        /* 宽度一变，剩余空间跟着变——位置按同一个 posX 重算，条子不会跑偏 */
+        p.x = xFor(dm.widthPixels, w)
+        /*
+         * maxWidth 是个普通字段，改了不会自己触发测量——
+         * 必须显式 requestLayout，否则窗变窄了字还按旧预算排，右边被硬裁掉。
+         */
+        board?.let { b ->
+            b.maxWidth = w
+            b.requestLayout()
+            b.invalidate()
         }
+        try { s.updateViewLayout(c, p) } catch (_: Exception) {}
     }
 
     /**
@@ -377,38 +424,55 @@ object StatusLyrics {
         topDp = v.coerceIn(0f, TOP_MAX_DP)
         appCtx?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()
             ?.putFloat(K_TOP, topDp)?.apply()
-        applyTop()
+        if (topPending) return
+        topPending = true
+        main.post { topPending = false; applyTopNow() }
     }
 
     /**
      * 把窗口挪到「上沿离屏顶 [effectiveTopDp]」的位置。
      *
-     * 分两步：先按 `y = 目标像素` 摆一次，再用 `getLocationOnScreen` **实测**
-     * 它到底落在哪，差的像素补回 `y`。
-     *
-     * 为什么不能直接算：`TYPE_APPLICATION_OVERLAY` 的原点含不含状态栏，
-     * 各 ROM / 各版本不一致（有的从屏幕最上面算，有的从状态栏下沿算），
-     * 差的就是一个状态栏高度——而那正好是用户抱怨的「太靠下」。
-     * 实测一次就与坐标系无关了：平移量是线性的，补一次即到位。
+     * 第一次（[topBias] 为空）摆完实测一次，把坐标系偏差记下来；之后每帧只用
+     * **一次** `updateViewLayout` 到位。以前的写法是每次都「先摆一次、再实测补一次」，
+     * 拖动滑块时窗口每帧跳两下 —— 用户看到的就是「滑块一拖就闪」。
      */
-    private fun applyTop() {
-        main.post {
-            val p = lp ?: return@post
-            val c = root ?: return@post
-            val s = wm ?: return@post
-            val target = dp(effectiveTopDp())
-            p.y = target
-            try { s.updateViewLayout(c, p) } catch (_: Exception) { return@post }
-            c.post {
-                val loc = IntArray(2)
-                try { c.getLocationOnScreen(loc) } catch (_: Exception) { return@post }
-                val d = target - loc[1]
-                if (d != 0) {
-                    p.y += d
-                    try { s.updateViewLayout(c, p) } catch (_: Exception) {}
-                }
+    private fun applyTopNow() {
+        val p = lp ?: return
+        val c = root ?: return
+        val s = wm ?: return
+        val target = dp(effectiveTopDp())
+        val bias = topBias
+        p.y = (target - (bias ?: 0)).coerceAtLeast(0)
+        try { s.updateViewLayout(c, p) } catch (_: Exception) { return }
+        if (bias != null) return
+        c.post {
+            val loc = IntArray(2)
+            try { c.getLocationOnScreen(loc) } catch (_: Exception) { return@post }
+            val d = target - loc[1]
+            if (d != 0) {
+                p.y += d
+                try { s.updateViewLayout(c, p) } catch (_: Exception) { return@post }
             }
+            /* locY = lp.y + bias → bias = target - lp.y（这一次已经把 target 摆准了） */
+            topBias = target - p.y
         }
+    }
+
+    /** 背景底板开关：关掉就是只有文字（像酷狗），当场重绘并落盘 */
+    fun setBg(on: Boolean) {
+        bgOn = on
+        appCtx?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean(K_BG, on)?.apply()
+        main.post { board?.let { it.plateColor = plate(); it.invalidate() } }
+    }
+
+    /** 底板配色（索引对齐 [BG_PALETTE]） */
+    fun setBgColor(i: Int) {
+        bgIdx = i.coerceIn(0, BG_PALETTE.size - 1)
+        appCtx?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()
+            ?.putInt(K_BG_COLOR, bgIdx)?.apply()
+        if (!bgOn) return
+        main.post { board?.let { it.plateColor = plate(); it.invalidate() } }
     }
 
     /** 开关 + 宽度 + 水平位置 + 上下位置 + 配色，供前端显示 */
@@ -419,28 +483,29 @@ object StatusLyrics {
         .put("top", effectiveTopDp().toDouble())
         .put("topMax", TOP_MAX_DP.toDouble())
         .put("color", colorIdx)
+        .put("bg", bgOn)
+        .put("bgColor", bgIdx)
+        /* 缺「显示在其他应用上层」时设置页把这一项念出来（自己不跳授权页） */
+        .put("saw", try { Settings.canDrawOverlays(Sy.app) } catch (_: Throwable) { false })
 
     private fun notifyFrontend(on: Boolean) {
         PlaybackService.emit?.invoke("status://state", "{\"on\":$on}")
     }
 
+    /**
+     * 缺权限时只**说一句**，不替用户跳系统页。
+     *
+     * 2026-11-23 用户要求：「缺啥权限你不要帮我开，告诉我缺哪个我自己开」。
+     * 以前这里会 `startActivity` 甩到授权页，用户正在设置里点开关却被弹走。
+     * 入口留在设置页那一行「缺少权限：…」的按钮上，由他主动点。
+     */
     private fun requestPermission(ctx: Context) {
         main.post {
             Toast.makeText(
                 ctx,
-                "先在系统设置里允许「显示在其他应用上层」，再打开状态栏歌词",
+                "缺少「显示在其他应用上层」权限",
                 Toast.LENGTH_LONG,
             ).show()
-            try {
-                val i = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:${ctx.packageName}"),
-                )
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                ctx.startActivity(i)
-            } catch (_: Exception) {
-                /* 个别 ROM 没有这个页面 */
-            }
         }
     }
 }

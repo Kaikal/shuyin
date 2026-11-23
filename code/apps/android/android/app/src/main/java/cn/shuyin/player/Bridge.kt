@@ -449,6 +449,10 @@ class Bridge(private val web: WebView) {
             if (a.has("top")) StatusLyrics.setTop(a.optDouble("top", 0.0).toFloat())
             val c = a.optInt("color", -1)
             if (c >= 0) StatusLyrics.setColor(c)
+            /* 背景底板：关掉就是纯文字；颜色三档（深黑 / 纯黑 / 浅白） */
+            if (a.has("bg")) StatusLyrics.setBg(a.optBoolean("bg", true))
+            val bc = a.optInt("bgColor", -1)
+            if (bc >= 0) StatusLyrics.setBgColor(bc)
             null
         }
 
@@ -458,21 +462,20 @@ class Bridge(private val web: WebView) {
         // 开关态 + 是不是小米 + 小米「锁屏显示」放不放行 + 上次拉起有没有被系统拦
         "lock_state" -> LockScreen.stateJson(Sy.app)
         "lock_toggle" -> {
-            val on = !LockScreen.enabled(Sy.app)
             /*
-             * 悬浮窗（SAW）没给就**不许打开**（用户 2026-11-21 拍板）。
+             * 「显示在其他应用上层」没给就**不许打开**（用户 2026-11-21 拍板，
+             * 2026-11-23 重申：缺权限时开关要显示关，别显示一个假的「已开」）。
              *
-             * 跨应用熄屏拉起靠 SAW 豁免 ROM 的「后台弹出界面」——华为平板实测
-             * 没给时 startActivity 显示成功、锁屏页永远不出来。开一个必然
-             * 不工作的功能还不如把开关按住，顺便把用户带到授权页。
+             * 这里**不自动跳授权页**：用户要自己进系统设置开（原话「你不要帮我开，
+             * 告诉我缺哪个我自己开」）。设置页会把 `need=overlay` 直接写成一行文字。
              */
-            if (on && !android.provider.Settings.canDrawOverlays(Sy.app)) {
-                LockScreen.requestOverlayPerm(Sy.app)
-                LockScreen.stateJson(Sy.app).put("needPermission", true)
+            val wantOn = !LockScreen.enabled(Sy.app)
+            if (wantOn && !LockScreen.canCrossApp(Sy.app)) {
+                LockScreen.stateJson(Sy.app).put("needPermission", true).put("need", "overlay")
             } else {
-                LockScreen.setEnabled(Sy.app, on)
+                LockScreen.setEnabled(Sy.app, wantOn)
                 /* 关掉的那一刻用户不该还留在这一屏上（他刚说了不要） */
-                if (!on) MainActivity.inst?.hideLockPanel(false)
+                if (!wantOn) MainActivity.inst?.hideLockPanel(false)
                 LockScreen.stateJson(Sy.app)
             }
         }
@@ -494,6 +497,9 @@ class Bridge(private val web: WebView) {
             put("around", org.json.JSONArray(NowPlaying.around))
             put("timeline", NowPlaying.hasTimeline())
             put("enabled", LockScreen.enabled(Sy.app))
+            /* 缺权限时这里是 false —— 「锁屏页不出来」第一时间看这一项 */
+            put("saw", LockScreen.canCrossApp(Sy.app))
+            put("prefOn", LockScreen.prefOn(Sy.app))
             put("fg", MainActivity.foregroundNow())
         }
 

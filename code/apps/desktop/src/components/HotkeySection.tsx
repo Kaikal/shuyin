@@ -104,7 +104,6 @@ export function HotkeySection() {
       <div className="set-row">
         <span className="set-label">
           启用全局快捷键
-          <span className="set-sub">关掉后所有组合键与媒体键都不再响应</span>
         </span>
         <button
           className="toggle" role="switch" aria-checked={state.on}
@@ -117,7 +116,6 @@ export function HotkeySection() {
       <div className="set-row">
         <span className="set-label">
           接管媒体键（耳机控制）
-          <span className="set-sub">播放/暂停、上一首、下一首；线控耳机、蓝牙耳机、键盘媒体键都算</span>
         </span>
         <button
           className="toggle" role="switch" aria-checked={state.media} disabled={!state.on}

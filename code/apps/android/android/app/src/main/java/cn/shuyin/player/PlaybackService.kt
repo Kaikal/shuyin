@@ -954,8 +954,14 @@ class PlaybackService : Service() {
             LockScreen.trace("SCREEN_OFF in service playing=${NowPlaying.playing}")
             if (!LockScreen.enabled(this@PlaybackService)) { LockScreen.trace("  skip: disabled"); return }
             if (!NowPlaying.playing) { LockScreen.trace("  skip: not playing"); return }
-            /* 前台那半交给窗口自己处理，别两边一起拉 */
-            if (MainActivity.foregroundNow()) { LockScreen.trace("  skip: foreground"); return }
+            /*
+             * 前台那半交给窗口自己处理，别两边一起拉。
+             *
+             * 用**严格**判定（resumed），不带 1.2 秒宽限：用户刚切到微信就熄屏时，
+             * 宽限会把「已经不可见的窗口」算成前台 → 这一趟被 skip，而窗口那边
+             * 也铺不出（它在后台）→ 锁屏页彻底不出现。
+             */
+            if (MainActivity.visibleNow()) { LockScreen.trace("  skip: foreground"); return }
             /*
              * **窗口那边已经铺好了面板，这一趟是重复广播。**
              *
@@ -993,31 +999,41 @@ class PlaybackService : Service() {
             if (ok) {
                 /*
                  * 1.2 秒后对一次账：没收到回执（`markAck`）也没看到活动活着，
-                 * 说明 startActivity 被 ROM 的「后台弹出界面」appop 静默拦了——
-                 * 记一笔给设置页，再用系统闹钟代发一颗 PendingIntent 兜底
+                 * 说明这一趟被 ROM 静默拦了。先**直接再试一次**——BAL 拦截有
+                 * 「首帧被丢、紧接着放行」的窗口（华为实测常见），再不行才记一笔
+                 * 给设置页，并用系统闹钟代发一颗 PendingIntent
                  * （系统替我们发，不算应用自己在后台拉 Activity；
                  *  锁屏期间可能被压到解锁之后才送，那颗会因 TTL 被丢弃）。
                  */
                 val sentAt = System.currentTimeMillis()
                 main.postDelayed({
                     if (LockActivity.alive || LockScreen.ackedSince(sentAt)) return@postDelayed
-                    LockScreen.markBgBlocked(this@PlaybackService)
-                    LockScreen.trace("  cross-app: 未收到回执 → 闹钟代发兜底")
+                    LockScreen.trace("  cross-app: 未收到回执 → 立刻重试一次")
                     try {
-                        val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-                        val pi = LockActivity.alarmPending(this@PlaybackService)
-                        val trig = android.os.SystemClock.elapsedRealtime() + 700
-                        val canExact = Build.VERSION.SDK_INT >= 31 && am.canScheduleExactAlarms()
-                        if (canExact) {
-                            am.setExactAndAllowWhileIdle(
-                                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trig, pi,
-                            )
-                        } else {
-                            am.setAndAllowWhileIdle(
-                                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trig, pi,
-                            )
-                        }
-                    } catch (_: Throwable) { /* 兜底失败就算了：锁屏上没有这一页而已 */ }
+                        val again = LockActivity.launchIntent(this@PlaybackService)
+                        LockScreen.addMiuiFlags(again)
+                        startActivity(again)
+                    } catch (_: Throwable) { /* 这次抛了就交给下面的闹钟 */ }
+                    main.postDelayed({
+                        if (LockActivity.alive || LockScreen.ackedSince(sentAt)) return@postDelayed
+                        LockScreen.markBgBlocked(this@PlaybackService)
+                        LockScreen.trace("  cross-app: 重试也拦住了 → 闹钟代发兜底")
+                        try {
+                            val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                            val pi = LockActivity.alarmPending(this@PlaybackService)
+                            val trig = android.os.SystemClock.elapsedRealtime() + 700
+                            val canExact = Build.VERSION.SDK_INT >= 31 && am.canScheduleExactAlarms()
+                            if (canExact) {
+                                am.setExactAndAllowWhileIdle(
+                                    android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trig, pi,
+                                )
+                            } else {
+                                am.setAndAllowWhileIdle(
+                                    android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trig, pi,
+                                )
+                            }
+                        } catch (_: Throwable) { /* 兜底失败就算了：锁屏上没有这一页而已 */ }
+                    }, 700)
                 }, 1200)
             }
         }

@@ -60,12 +60,32 @@ object LockScreen {
     @Volatile
     private var miuiBypass = false
 
-    /** 锁屏时要不要弹这一页（默认开：用户装了就想要这个能力） */
-    fun enabled(ctx: Context): Boolean = try {
+    /** 用户**上次选**的开关（不管权限给没给）。默认开：装了就想要这个能力。 */
+    fun prefOn(ctx: Context): Boolean = try {
         prefs(ctx).getBoolean(K_ON, true)
     } catch (_: Exception) {
         true
     }
+
+    /**
+     * 「显示在其他应用上层」给没给。
+     *
+     * 跨应用熄屏拉起是**从后台 startActivity**：ROM 拿这条 appop 当闸门，
+     * 没给时 `startActivity` 照样返回成功、窗口永远不出现（华为平板实测）。
+     */
+    fun canCrossApp(ctx: Context): Boolean = try {
+        Settings.canDrawOverlays(ctx)
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * 功能**实际**可用吗 —— 开关显示、铺页、服务拉起全都走这一个判据。
+     *
+     * 不能只看 prefs：用户升系统 / 重装 / 手动收权限之后，prefs 里还留着
+     * `on=true`，界面就会显示「开」而功能是死的（用户 2026-11-23 报的就是这个）。
+     */
+    fun enabled(ctx: Context): Boolean = prefOn(ctx) && canCrossApp(ctx)
 
     fun setEnabled(ctx: Context, on: Boolean) {
         try { prefs(ctx).edit().putBoolean(K_ON, on).apply() } catch (_: Exception) { /* 存不下就按默认走 */ }
@@ -160,6 +180,20 @@ object LockScreen {
     }
 
     /**
+     * 真的拉起来过一次：把「被拦截」的旧账清掉。
+     *
+     * 不清的话设置页会一直挂着「缺少权限：后台活动」——用户明明已经开好了权限，
+     * 界面却还在说缺，比不提示更糟（2026-11-23 用户当场质疑「到底缺不缺」）。
+     */
+    fun clearBgBlocked(ctx: Context) {
+        try {
+            if (prefs(ctx).getBoolean(K_BG_BLOCKED, false)) {
+                prefs(ctx).edit().putBoolean(K_BG_BLOCKED, false).apply()
+            }
+        } catch (_: Exception) { /* 存不下就保持原样 */ }
+    }
+
+    /**
      * 给设置页的状态。
      *
      * 三段各自 try/catch：这是**读状态**，任何一段出问题都不该让整条命令失败
@@ -167,7 +201,10 @@ object LockScreen {
      */
     fun stateJson(ctx: Context): org.json.JSONObject {
         val o = org.json.JSONObject()
-        try { o.put("on", enabled(ctx)) } catch (_: Throwable) {}
+        val saw = canCrossApp(ctx)
+        /* `on` 只报「真的能用」，缺权限一律报 false —— 设置页据此显示关 */
+        try { o.put("on", prefOn(ctx) && saw) } catch (_: Throwable) {}
+        try { o.put("prefOn", prefOn(ctx)) } catch (_: Throwable) {}
         try { o.put("miui", isMiui()) } catch (_: Throwable) {}
         try {
             o.put(
@@ -199,7 +236,13 @@ object LockScreen {
          * 把开关锁住 + 给「去开启」的引导，不再让用户开一个
          * 必然不工作的功能。
          */
-        try { o.put("saw", Settings.canDrawOverlays(ctx)) } catch (_: Throwable) {}
+        try { o.put("saw", saw) } catch (_: Throwable) {}
+        /*
+         * 缺哪一项（给设置页直接念出来，用户自己去系统里开）。
+         * 目前**能读到的**硬前置只有悬浮窗；「后台活动」那类华为开关读不到，
+         * 只能靠 [K_BG_BLOCKED] 事后判断，见下面的 bgBlocked。
+         */
+        try { o.put("need", if (saw) "" else "overlay") } catch (_: Throwable) {}
         return o
     }
 

@@ -111,6 +111,8 @@ class LockActivity : Activity() {
         super.onCreate(savedInstanceState)
         alive = true
         LockScreen.markAck()
+        /* 真的起来了：把「上次被系统拦」的旧账清掉，设置页不该继续报缺权限 */
+        LockScreen.clearBgBlocked(this)
         trace("onCreate kg=${keyguardShowing()} interactive=${isInteractive()} playing=${NowPlaying.playing}")
 
         /*
@@ -134,20 +136,27 @@ class LockActivity : Activity() {
         }
 
         /*
-         * 迟到的启动（多半是那颗被锁屏压后的闹钟）：屏幕亮着、锁也解了——
-         * 这一趟作废。不能这时候铺：用户正看着别的应用。
+         * 迟到的启动（多半是那颗被锁屏压后的闹钟）：屏幕亮着、锁也解了 —— 作废。
+         *
+         * **这两条只对带 `EXTRA_LOCK_AT` 的闹钟兜底生效。** 服务直接 startActivity
+         * 那一趟不带时间戳：它只在 SCREEN_OFF 之后发生，而熄屏瞬间华为会有一小段
+         * `isInteractive()==true` / `isKeyguardLocked()==false`（电源状态还没落定）。
+         * 以前不分来路地判「已解锁」，普通启动也会被这一小段误杀 → 明明到了
+         * onCreate 却立刻 finish，表现就是「锁屏页根本不出现」（用户 2026-11-23 报的）。
          */
-        if (isInteractive() && !keyguardShowing()) {
-            trace("onCreate: 已解锁在前台 → 放弃")
-            finish()
-            return
-        }
-        /* 闹钟被压后太久（超 TTL）：同样作废 */
         val at = intent?.getLongExtra(MainActivity.EXTRA_LOCK_AT, 0L) ?: 0L
-        if (at > 0 && SystemClock.elapsedRealtime() - at > LOCK_NOW_TTL_MS) {
-            trace("onCreate: extra 迟到 ${SystemClock.elapsedRealtime() - at}ms → 放弃")
-            finish()
-            return
+        if (at > 0) {
+            val age = SystemClock.elapsedRealtime() - at
+            if (age > LOCK_NOW_TTL_MS) {
+                trace("onCreate: extra 迟到 ${age}ms → 放弃")
+                finish()
+                return
+            }
+            if (isInteractive() && !keyguardShowing()) {
+                trace("onCreate: 迟到的闹钟遇上已解锁 → 放弃")
+                finish()
+                return
+            }
         }
 
         val root = FrameLayout(this)
@@ -195,8 +204,9 @@ class LockActivity : Activity() {
         setIntent(intent)
         LockScreen.markAck()
         trace("onNewIntent")
-        /* 迟到的闹钟 + 已经解锁：别把正在用的界面盖掉 */
-        if (isInteractive() && !keyguardShowing()) {
+        /* 迟到的闹钟 + 已经解锁：别把正在用的界面盖掉（普通启动不带时间戳，同 onCreate 的道理） */
+        val at = intent?.getLongExtra(MainActivity.EXTRA_LOCK_AT, 0L) ?: 0L
+        if (at > 0 && isInteractive() && !keyguardShowing()) {
             trace("onNewIntent: 已解锁 → 放弃")
             close()
         }

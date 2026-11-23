@@ -224,10 +224,6 @@ export function SourcesSection() {
             width={340}
             text={'音源存在应用数据目录的 sources.json 清单里，只认下面三个导入入口。\n直接往文件夹里放 .js、或改动里面的文件都不会生效——防止脚本被悄悄换掉。\n同名重新导入 = 更新这一条；列表里删除 = 从清单移除。'}
           />
-          <span className="set-sub">
-            洛雪音乐格式，只负责把「搜到的歌」换成能播的直链。脚本会主动联网，
-            请只导入你信任的来源。
-          </span>
         </span>
         <div className="src-dir-actions">
           <button className="primary-btn" onClick={() => void importFiles()}>
@@ -248,14 +244,10 @@ export function SourcesSection() {
        * 它和「全部停用」一样是维护动作，放一行更顺。
        */}
       <div className="set-row">
-        <span className="set-label">
-          维护
-          <span className="set-sub">
-            {sources.length > 1
-              ? '脚本改动后点重新加载生效；音源出问题时先全关，再逐个打开定位'
-              : '改过脚本后点重新加载生效'}
+          <span className="set-label">
+            维护
+            <span className="set-sub">改脚本后点「重新加载」生效</span>
           </span>
-        </span>
         <span className="set-ctl src-maint">
           <button className="ghost-btn" disabled={!dataDir || loading} onClick={() => void reloadAll()}>
             <IconRefresh width={13} height={13} /> 重新加载
@@ -406,13 +398,7 @@ export function QualitySection() {
     <section className="set-group" data-pane="play" data-sec="quality">
       <h3>音质</h3>
       <div className="set-row">
-        <span className="set-label">
-          优先音质
-          <span className="set-sub">
-            取不到会自动降档、再不行换平台找同一首歌；实际生效的档位在播放条上写着。
-            可选项来自当前装载的音源声明
-          </span>
-        </span>
+          <span className="set-label">优先音质</span>
         <ChipMenu
           label="音质"
           value={qualitys.includes(quality) ? qualityLabel(quality) : quality}
@@ -450,13 +436,7 @@ export function SourcesDirSection() {
     <section className="set-group" data-pane="storage" data-sec="sources-dir">
       <h3>音源文件</h3>
       <div className="set-row">
-        <span className="set-label">
-          音源数据目录
-          <span className="set-sub">
-            导入的脚本以清单形式存在这里。别手动往里丢 .js——只认音源页那三个导入入口，
-            直接改文件不会生效（防止脚本被悄悄换掉）
-          </span>
-        </span>
+          <span className="set-label">音源数据目录</span>
         <span className="set-ctl">
           <button className="ghost-btn" disabled={!dir} onClick={() => void bridge.revealInFolder(dir)}>
             {bridge.isAndroid ? '复制路径' : '打开'}

@@ -212,9 +212,21 @@ class MainActivity : Activity() {
             screenOffAt = android.os.SystemClock.uptimeMillis()
         }
 
-        /** 最近 5 秒内窗口已经处理过熄屏（面板已铺好），服务端别再拉任务 */
+        /**
+         * 屏幕又亮了：上一轮熄屏的账作废。
+         *
+         * 以前只靠 5 秒 TTL 自然过期，于是「应用内熄屏看到面板 → 解锁 → 马上切到
+         * 微信 → 立刻熄屏」这一串（间隔常常不到 5 秒）会被当成同一轮，服务端直接
+         * skip —— 用户看到的就是「应用里能弹，换个应用就不弹」。按「亮屏即清账」
+         * 分轮次，TTL 只用来吃掉同一次熄屏的两趟广播。
+         */
+        fun clearScreenOffHandled() {
+            screenOffAt = 0L
+        }
+
+        /** 同一次熄屏的两趟广播之间：窗口已经处理过（面板已铺好），服务端别再拉任务 */
         fun screenOffHandled(): Boolean =
-            screenOffAt > 0 && android.os.SystemClock.uptimeMillis() - screenOffAt < 5000
+            screenOffAt > 0 && android.os.SystemClock.uptimeMillis() - screenOffAt < 2000
 
         /**
          * 冷启动时「其他应用打开」送进来的文件。
@@ -1034,6 +1046,8 @@ class MainActivity : Activity() {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> onScreenOff()
                 Intent.ACTION_SCREEN_ON -> {
+                    /* 新的一轮：上一次熄屏「窗口已处理」的账必须清掉（见 clearScreenOffHandled） */
+                    clearScreenOffHandled()
                     /* 熄屏时 tick 降到 800ms，亮屏第一眼可能差半拍：先补一帧 */
                     PlaybackService.instance?.pushNow()
                     lockPanel?.takeIf { it.shown }?.let {
@@ -1075,7 +1089,16 @@ class MainActivity : Activity() {
             markScreenOffHandled()
             return
         }
-        if (!foregroundNow()) return
+        /*
+         * **只认「此刻窗口真的在前台」。**
+         *
+         * 这里以前用 `foregroundNow()`（带 1.2 秒 onPause 宽限）：用户刚切到微信
+         * 就按电源键时，窗口明明已经不可见却被判成可见 → 这里铺了面板（在后台，
+         * 看不见）并 markScreenOffHandled → 服务端以为「窗口处理过了」直接 skip。
+         * 结果就是「在疏音里熄屏有、在别的应用里熄屏没有」。
+         * 窗口不在前台就一个像素都不铺，把这一趟完整让给服务（LockActivity）。
+         */
+        if (!visibleNow()) return
         showLockPanel(preview = false)
         if (lockPanel?.shown == true) markScreenOffHandled()
     }

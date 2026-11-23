@@ -280,6 +280,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const loadingRef = useRef(false)
   /** 这次加载预期的时长：用来判断「Rust 报的时长已经是新曲目了」 */
   const loadExpect = useRef(0)
+  /**
+   * 这一轮加载的是队列里的第几首。
+   *
+   * 切歌时**上一首还在出声**：`player://state` 里 `playing` 仍是 true、时长也还是
+   * 上一首的，于是 250ms 那一帧一到就把转圈收掉 —— 用户看到的是「点了下一首，
+   * 封面换了，但播放键一直是暂停图标、不知道在取链」。结束判定必须要求
+   * 「这一帧报的就是我在等的那一首」。
+   */
+  const loadIndex = useRef<number | null>(null)
   const startLoading = useCallback((immediate = false) => {
     loadingRef.current = true
     window.clearTimeout(loadingTimer.current)
@@ -320,6 +329,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [])
   const stopLoading = useCallback(() => {
     loadingRef.current = false
+    loadIndex.current = null
     window.clearTimeout(loadingTimer.current)
     window.clearTimeout(loadingGuard.current)
     setLoading(false)
@@ -600,6 +610,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      * 否则 900ms 那个「按住上一首」的定时器分不清自己是不是已经被顶掉了。
      */
     const seq = ++onlineSeq.current
+    loadIndex.current = index
     startLoading(online)
     /*
      * **换歌立刻把进度条拉回起点。**
@@ -1208,8 +1219,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
          */
         if (loadingRef.current) {
           const expect = loadExpect.current
-          const durOk = p.duration > 0 && (expect <= 1 || Math.abs(p.duration - expect) < 2)
-          if (p.playing || durOk || p.error) stopLoading()
+          /*
+           * 这一帧报的是不是我在等的那首。老原生不发 `index`（undefined）时按
+           * 「是」处理——宁可退回旧行为，也不能让转圈永远停不下来。
+           */
+          const idx = (p as { index?: number }).index
+          const sameTrack = loadIndex.current == null || typeof idx !== 'number' || idx === loadIndex.current
+          const durOk = sameTrack && p.duration > 0 && (expect <= 1 || Math.abs(p.duration - expect) < 2)
+          if ((p.playing && sameTrack) || durOk || p.error) stopLoading()
         }
         /*
          * 「取链中」不能比声音活得久。

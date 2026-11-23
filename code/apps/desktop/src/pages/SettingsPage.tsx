@@ -41,6 +41,7 @@ import { HelpTip } from '../components/HelpTip'
 import { useDownloads } from '../lib/DownloadsProvider'
 import { audioCacheSize, clearAudioCache } from '../lib/audioCache'
 import { usePlayer } from '../lib/PlayerProvider'
+import { toast } from '../lib/toast'
 import { SleepSheet } from '../components/SleepSheet'
 
 /**
@@ -104,7 +105,10 @@ const PROJECT_LINKS: Array<{
  * （`bgBlocked`）。
  */
 interface LockState {
+  /** **有效**开关：缺权限时原生一律报 false（界面不能显示一个假的「已开」） */
   on: boolean
+  /** 用户上次自己选的（不管权限），只在诊断时用 */
+  prefOn?: boolean
   /** 小米：MIUI 自己的「显示在锁屏上」（10020） */
   miui?: boolean
   allowed?: 'allow' | 'deny' | 'unknown'
@@ -116,6 +120,8 @@ interface LockState {
   saw?: boolean
   /** 这次 toggle 因为缺悬浮窗权限被原生按下了（原生已带 Toast + 跳授权页） */
   needPermission?: boolean
+  /** 缺哪一项权限：目前只有 `overlay`（显示在其他应用上层）能读到 */
+  need?: 'overlay' | ''
 }
 
 export interface SettingsPageProps {
@@ -199,6 +205,11 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
     try {
       const r = await bridge.invoke<LockState>('lock_toggle')
       setLockState(r)
+      /*
+       * 缺权限时不自动跳系统页（用户 2026-11-23：别帮我开，告诉我缺哪个）。
+       * 只在下面常驻一行「缺少权限：…」，他自己去系统设置里点。
+       */
+      if (r?.needPermission) toast('缺少「显示在其他应用上层」权限，开关保持关闭')
     } catch { /* 命令不存在：保持不变 */ }
   }
   const openLockPerm = async () => {
@@ -526,13 +537,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         <section className="set-group" data-pane="shell" data-sec="lock">
           <h3>锁屏</h3>
           <div className="set-row">
-            <span className="set-label">
-              锁屏播放页
-              <span className="set-sub">
-                熄屏后按亮屏幕显示整屏播放页；在任意应用中熄屏均有效，解锁后回到原应用。
-                不会自行点亮屏幕
-              </span>
-            </span>
+            <span className="set-label">锁屏播放页</span>
             <button
               className="toggle" role="switch" aria-checked={lockOn}
               onClick={() => void toggleLockPage()}
@@ -540,67 +545,37 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
               <span className="sr-only">锁屏播放页</span>
             </button>
           </div>
-          {/* 华为后弹窗被拦时设置页给出引导（见 LockScreen 的 bg_blocked） */}
-          {lockOn && lockState?.bgBlocked && (
+          {/*
+           * 缺哪一项权限就直说哪一项（用户 2026-11-23：别帮我开，告诉我缺哪个我自己开）。
+           * 开关本身已经是关的（原生 `on` 里含权限），这里只负责把名字念出来。
+           */}
+          {lockState?.saw === false && (
             <div className="set-row">
-              <span className="set-label">
-                后台弹出被系统拦截
-                <span className="set-sub">
-                  请在 系统设置 → 应用 → 疏音 → 应用启动管理 中改为「手动管理」，
-                  并允许「后台活动」
-                </span>
+              <span className="set-label">缺少权限：显示在其他应用上层</span>
+              <span className="set-ctl">
+                <button className="ghost-btn" onClick={() => void openOverlayPerm()}>去设置</button>
               </span>
             </div>
           )}
-          {/*
-           * 悬浮窗没给：开关保持关 + 给授权入口（原生 lock_toggle 也会按住，
-           * 这里是先把状态摆出来，用户不用点了才知道）。
-           * 2026-11-21 平板实测：没有 SAW 时跨应用熄屏拉起被 ROM 静默拦掉，
-           * 开关开着等于开了一个不工作的功能（用户拍板：没权限就不该能打开）。
-           */}
-          {lockState && lockState.saw === false && (
+          {/* 华为/荣耀把后台启动也掐了：事后由服务回写 bg_blocked。
+              电池白名单没给时下面那行「允许后台活动」已经说过了，不重复摆两行 */}
+          {lockOn && lockState?.bgBlocked && batteryOk === true && (
             <div className="set-row">
-              <span className="set-label">
-                需要悬浮窗权限
-                <span className="set-sub">
-                  「在其他应用上层」没开启时，别的应用里熄屏拉不出锁屏页
-                  （系统会静默拦截）。点「去开启」允许后回来再打开上面的开关
-                </span>
-              </span>
-              <span className="set-ctl">
-                <button className="ghost-btn" onClick={() => void openOverlayPerm()}>去开启</button>
-              </span>
+              <span className="set-label">缺少权限：后台弹出界面</span>
             </div>
           )}
           {/* 小米自己那道「显示在锁屏上」（10020）：原生绕不过去时才需要用户动手 */}
           {lockOn && lockState?.miui && !lockState.bypass && lockState.allowed !== 'allow' && (
             <div className="set-row">
-              <span className="set-label">
-                需要开启「显示在锁屏上」
-                <span className="set-sub">
-                  MIUI 限制第三方应用显示在锁屏上。点「去开启」→「其他权限」→
-                  打开「显示在锁屏上」
-                </span>
-              </span>
+              <span className="set-label">缺少权限：显示在锁屏上</span>
               <span className="set-ctl">
-                <button className="ghost-btn" onClick={() => void openLockPerm()}>去开启</button>
+                <button className="ghost-btn" onClick={() => void openLockPerm()}>去设置</button>
               </span>
             </div>
           )}
-          {/*
-           * 「在线的歌播一段时间就停、本地缓存的半小时都没事」的根因就在这一行：
-           * Doze 一进入就掐后台网络，而缓存歌根本不需要网。加进白名单才是根治。
-           */}
           {batteryOk !== null && (
             <div className="set-row">
-              <span className="set-label">
-                允许后台活动（不被系统休眠）
-                <span className="set-sub">
-                  {batteryOk
-                    ? '已允许：熄屏后系统不会再掐掉后台网络，在线歌曲能一直连着播'
-                    : '没允许。熄屏一段时间后系统会掐掉后台网络，在线的歌就会停——本地缓存的歌不受影响，两种歌的差别正在这里。点右边「去允许」；华为/荣耀多半只会跳到「应用信息」，那就自己去 设置 → 电池 → 应用启动管理，把疏音改成「手动管理」并勾上「允许后台活动」'}
-                </span>
-              </span>
+              <span className="set-label">允许后台活动</span>
               <span className="set-ctl">
                 {batteryOk
                   ? <button className="ghost-btn" disabled>已允许</button>
@@ -608,13 +583,6 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
               </span>
             </div>
           )}
-          {/*
-           * 「解锁后回到锁屏前的应用」那一行已撤（连同使用情况访问权限）。
-           *
-           * 它只在「在别的应用里熄屏也铺整屏歌词页」的前提下才有意义 —— 那个前提
-           * 本身要先把我们的窗口顶到前台，任务栈被重排，解锁就必然落桌面。
-           * 现在跨应用熄屏不再铺页（见上面那行的说明），这一行自然也不需要了。
-           */}
         </section>
       )}
 
@@ -636,12 +604,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       <section className="set-group" data-pane="play" data-sec="spectrum">
         <h3>频谱</h3>
         <div className="set-row">
-          <span className="set-label">
-            可视化样式
-            <span className="set-sub">
-              {bridge.isAndroid ? '播放页里那圈 / 那条的形状，播放页「更多」里也能随手改' : '主界面与播放页都生效；播放页右上角也能随手切'}
-            </span>
-          </span>
+          <span className="set-label">可视化样式</span>
         </div>
         <div className="spec-grid" role="radiogroup" aria-label="频谱样式">
           {SPECTRUM_STYLES.map(st => (
@@ -658,12 +621,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         </div>
 
         <div className="set-row">
-          <span className="set-label">
-            展示位置
-            <span className="set-sub">
-              {bridge.isAndroid ? '在播放页里摆在哪儿' : '贴着窗口的四条边显示'}
-            </span>
-          </span>
+          <span className="set-label">展示位置</span>
         </div>
         {bridge.isAndroid ? (
           <div className="pos-grid" role="radiogroup" aria-label="频谱展示位置">
@@ -704,10 +662,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       <section className="set-group" data-pane="play" data-sec="fx">
         <h3>音效</h3>
         <div className="set-row">
-          <span className="set-label">
-            均衡预设
-            <span className="set-sub">点一下套用；想改就点「自定义」</span>
-          </span>
+          <span className="set-label">均衡预设</span>
           <span className="set-ctl">
             <button className="link-btn" onClick={resetFx}>恢复原声</button>
           </span>
@@ -775,10 +730,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
          * 所以换预设不会把 3D 旋转关掉。
          */}
         <div className="set-row">
-          <span className="set-label">
-            空间音效
-            <span className="set-sub">耳机下最明显</span>
-          </span>
+          <span className="set-label">空间音效</span>
           {fx.space !== 'off' && <span className="set-ctl num">{spaceName(fx.space)}</span>}
         </div>
         <div className="fx-spaces" role="radiogroup" aria-label="空间音效">
@@ -800,13 +752,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       <section className="set-group" data-pane="shell" data-sec="desk">
         <h3>音乐桌面</h3>
         <div className="set-row">
-          <span className="set-label">
-            铺满屏幕的音乐屏
-            <span className="set-sub">
-              专辑封面 + 大字歌词逐句染色 + 底部频谱，嵌在桌面图标后面当壁纸
-              （图标照常在、Win + D 也收不走）
-            </span>
-          </span>
+          <span className="set-label">铺满屏幕的音乐屏</span>
           <span className="set-ctl">
             <button className="ghost-btn" onClick={() => void toggleDesk()}>
               {deskOn ? '收起' : '打开'}
@@ -820,10 +766,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       <section className="set-group" data-pane="shell" data-sec="dl">
         <h3>桌面歌词</h3>
         <div className="set-row">
-          <span className="set-label">
-            逐字高亮颜色
-            <span className="set-sub">随播放进度「唱」过去</span>
-          </span>
+          <span className="set-label">逐字高亮颜色</span>
         </div>
         <div className="lc-preview" aria-hidden="true">
           <div className="lc-prev-a">
@@ -848,14 +791,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           ))}
         </div>
         <div className="set-row">
-          <span className="set-label">
-            字号与宽度
-            <span className="set-sub">
-              字号是基准值：短句会自动放大、长句自动缩到放得下，剩下的宽度摊到字缝里铺满整条。
-              也能在桌面歌词上按住右边缘拖动改宽、滚轮调字号（Shift+滚轮改宽）。
-              不悬停时背景全透明，锁定后连悬停也不显示底板
-            </span>
-          </span>
+          <span className="set-label">字号与宽度</span>
         </div>
         <div className="dl-size">
           <div className="dl-size-sum">
@@ -866,13 +802,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           </div>
         </div>
         <div className="set-row">
-          <span className="set-label">
-            排版
-            <span className="set-sub">
-              上排当前句左对齐（KTV 从左往右染色），下排下一句右对齐。
-              按住歌词拖动位置，双击回主窗口
-            </span>
-          </span>
+          <span className="set-label">排版</span>
         </div>
       </section>
       </>)}
@@ -978,8 +908,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
             <span className="set-label">
               音乐目录里的缓存副本
               <span className="set-sub">
-                旧版本把 {orphans[0]} 个缓存错误地存成了「下载」，约 {Math.round((orphans[1] / 1048576) * 10) / 10} MB。
-                删掉它们不影响你真正下载的歌（那些文件名是「歌手 - 歌名」）
+                {orphans[0]} 个 / {Math.round((orphans[1] / 1048576) * 10) / 10} MB
               </span>
             </span>
             <span className="set-ctl">
@@ -1002,14 +931,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       <section className="set-group" data-pane="shell" data-sec="view">
         <h3>播放页</h3>
         <div className="set-row">
-          <span className="set-label">
-            封面样式
-            <span className="set-sub">
-              {bridge.isAndroid
-                ? '黑胶唱片会慢慢转；开频谱外圈时自动用唱片，把频谱画在黑圈上'
-                : '黑胶唱片会慢慢转，方形封面更安静；播放页右上角也能随手切'}
-            </span>
-          </span>
+          <span className="set-label">封面样式</span>
           <div className="segmented" role="radiogroup" aria-label="播放页封面样式">
             {([['vinyl', '黑胶唱片'], ['cover', '方形封面']] as Array<['vinyl' | 'cover', string]>).map(([id, label]) => (
               <button
@@ -1020,13 +942,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           </div>
         </div>
         <div className="set-row">
-          <span className="set-label">
-            歌词动效
-            <span className="set-sub">
-              歌词逐字弹出、错落排版、唱到哪亮到哪（参考 Folia 的流光主题）。
-              开启后播放页右侧歌词栏和全屏歌词都用它；关闭则退回可滚动的普通歌词。播放页按 F 也能切
-            </span>
-          </span>
+          <span className="set-label">歌词动效</span>
           <button
             className="toggle" role="switch" aria-checked={foliaFx}
             onClick={() => {
@@ -1039,13 +955,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           </button>
         </div>
         <div className="set-row">
-          <span className="set-label">
-            沉浸式歌词
-            <span className="set-sub">
-              播放页只留歌词：居中、逐字上色、上下淡出。
-              进入后按 L 或点右上角按钮可切回「封面 + 歌词」
-            </span>
-          </span>
+          <span className="set-label">沉浸式歌词</span>
           <button className="toggle" role="switch" aria-checked={lyricsSolo} onClick={() => setLyricsSolo(!lyricsSolo)}>
             <span className="sr-only">沉浸式歌词</span>
           </button>
@@ -1081,13 +991,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
             </span>
           </div>
           <div className="set-row">
-            <span className="set-label">
-              音量保护
-              <span className="set-sub">
-                起播淡入、暂停淡出，被来电或别家应用压低后缓慢回升；常开峰值限幅，
-                避免换到一首录得偏响的歌时音量一下子变大
-              </span>
-            </span>
+          <span className="set-label">音量保护</span>
             <button
               className="toggle" role="switch" aria-checked={p.audioGuard}
               onClick={() => p.setAudioGuard(!p.audioGuard)}
@@ -1101,19 +1005,13 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       <section className="set-group" data-pane="play" data-sec="boot">
         <h3>启动</h3>
         <div className="set-row">
-          <span className="set-label">
-            启动时接着上次播放
-            <span className="set-sub">关闭时只恢复到上次的进度并暂停，不会突然出声</span>
-          </span>
+          <span className="set-label">启动时接着上次播放</span>
           <button className="toggle" role="switch" aria-checked={autoResume} onClick={toggleAutoResume}>
             <span className="sr-only">启动时接着上次播放</span>
           </button>
         </div>
         <div className="set-row">
-          <span className="set-label">
-            自动恢复的内容
-            <span className="set-sub">播放队列、播放进度、循环模式、停留页面、搜索词、窗口位置与大小</span>
-          </span>
+          <span className="set-label">自动恢复的内容</span>
         </div>
       </section>
 
@@ -1336,11 +1234,7 @@ function DeskLockRow() {
     <div className="set-row">
       <span className="set-label">
         音乐锁屏
-        <span className="set-sub">
-          全屏大字时钟 + 当前歌词，像手机锁屏。快捷键 Ctrl + Alt + K、托盘右键菜单，
-          或点右边「进入」；Esc / 右上角 × 退出。它和音乐桌面互不影响：
-          进锁屏不会打开桌面，退锁屏也不会收起桌面
-        </span>
+        <span className="set-sub">Ctrl + Alt + K</span>
       </span>
       <span className="set-ctl">
         <button className="ghost-btn" onClick={() => void musicDesk.enterLock()}>进入</button>
