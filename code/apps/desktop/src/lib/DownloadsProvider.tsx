@@ -18,6 +18,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LocalTrack } from '@shuyin/core'
 import { bridge } from './bridge'
+import { isIOS } from './shellMode'
 import { onNative } from './native/android'
 import { settings } from './settings'
 import { resolvePlayUrl, forgetResolved } from './online'
@@ -97,12 +98,15 @@ const mb = (n: number) => (n / 1048576).toFixed(1)
 /**
  * 拼「目录 + 文件名」。
  *
- * Windows 是反斜杠，安卓的公共存储路径是正斜杠——一律用 `\\` 拼的话，
- * 安卓下载页会显示成 `/storage/emulated/0/Music/疏音\晴天.mp3`，一眼看着就是坏的。
- * 安卓原生侧只取文件名（真正写哪儿由 MediaStore / SAF 决定），所以这里只影响展示。
+ * Windows 是反斜杠，安卓 / iOS 的路径是正斜杠——一律用 `\\` 拼的话，
+ * 安卓下载页会显示成 `/storage/emulated/0/Music/疏音\晴天.mp3`，一眼看着就是坏的；
+ * iOS 更糟：反斜杠是合法文件名字符，文件真会叫成一整串，下载完在「文件」里找不到。
+ * 所以分隔符**跟着目录本身走**，不按平台硬判（车机/外接存储上路径形态也可能不同）。
  */
-const joinPath = (dir: string, name: string) =>
-  `${dir.replace(/[\\/]+$/, '')}${bridge.isAndroid ? '/' : '\\'}${name}`
+const joinPath = (dir: string, name: string) => {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+  return `${dir.replace(/[\\/]+$/, '')}${sep}${name}`
+}
 
 /**
  * 失败原因 → 一句人话。
@@ -115,7 +119,11 @@ export function dlFailText(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e ?? '')
   if (import.meta.env.DEV) console.warn('[download]', raw)
   if (/会员|版权|VIP/i.test(raw)) return '这首歌要会员才能下'
-  if (/下载目录|目录/.test(raw)) return '找不到下载目录，去设置里选一个'
+  /* iOS 没有「去设置里选一个」这条路：目录是 App 自己的 Documents，
+     取不到只能是原生那条命令失败了，让用户重试比指个空路更诚实 */
+  if (/下载目录|目录/.test(raw)) {
+    return isIOS ? '下载目录还没就绪，重试一次' : '找不到下载目录，去设置里选一个'
+  }
   if (/空间|no space|磁盘已满/i.test(raw)) return '磁盘空间不够了，换个目录试试'
   if (/创建文件失败|写入失败|拒绝访问|permission/i.test(raw)) return '写不进这个文件夹，去设置换个下载目录'
   if (/中断|超时|timeout|timed out|不可达/i.test(raw)) return '网络断了，重试一次'
@@ -367,7 +375,11 @@ export function DownloadsProvider({ children }: { children: ReactNode }) {
     if (!task) return
     try {
       const dirNow = await resolveDir()
-      if (!dirNow) throw new Error('拿不到下载目录，去「设置 → 下载」选一个')
+      if (!dirNow) {
+        throw new Error(isIOS
+          ? '下载目录还没就绪，重试一次'
+          : '拿不到下载目录，去「设置 → 下载」选一个')
+      }
 
       if (task.kind === 'lyric') {
         const dest = joinPath(dirNow, `${fileNameOf(task)}.lrc`)

@@ -23,6 +23,32 @@ enum ShuyinLive {
     /// 只能等系统超时收走（表现是「灵动岛卡在上一首歌」）。
     static var activity: Activity<ShuyinActivityAttributes>?
 
+    /// 上一次 apply 的尾巴。
+    ///
+    /// `apply` 是 async 的（`Activity.update` 要等系统回执），而 Rust 每次 sync
+    /// 都开一个新的 `Task` —— 两条更新同时在路上时，**后发的可能先落地**，
+    /// 岛上就停在上一首/上一个状态（用户说的「状态和歌曲信息不匹配」）。
+    /// 这里把 apply 串成一条链，保证「谁后发谁最后生效」。
+    private static var chain: Task<Void, Never>?
+
+    /// 排队执行一次 apply。
+    static func enqueue(_ s: ShuyinActivityAttributes.ContentState) {
+        let prev = chain
+        chain = Task {
+            await prev?.value
+            await apply(s)
+        }
+    }
+
+    /// 排队收摊（否则「收」可能被前一条还没落地的「推」反超，岛又活过来）。
+    static func enqueueEnd() {
+        let prev = chain
+        chain = Task {
+            await prev?.value
+            await end()
+        }
+    }
+
     /// Rust 传过来的 JSON 载荷，字段名与 TS 侧一一对应。
     struct Payload: Decodable {
         let title: String
@@ -147,14 +173,14 @@ public func shuyinLiveSync(_ json: UnsafePointer<CChar>?) {
         NSLog("[shuyin] live activity payload decode failed")
         return
     }
-    Task { await ShuyinLive.apply(payload.state) }
+    Task { ShuyinLive.enqueue(payload.state) }
 }
 
 /// 收摊（退出播放页、清空队列、用户关掉开关）。
 @_cdecl("shuyin_live_end")
 public func shuyinLiveEnd() {
     guard #available(iOS 16.2, *) else { return }
-    Task { await ShuyinLive.end() }
+    Task { ShuyinLive.enqueueEnd() }
 }
 
 /// App 启动后调一次，接管上次残留的那条。

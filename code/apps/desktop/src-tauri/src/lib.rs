@@ -893,23 +893,56 @@ fn sources_default_dir(app: AppHandle) -> Result<String, String> {
 /// 下完歌在资源管理器里根本找不到，用户以为「没下下来」。AppData 是给应用自己
 /// 存配置/缓存的，不该放用户主动要的文件。
 fn default_download_dir(app: &AppHandle) -> PathBuf {
-    if let Ok(d) = app.path().download_dir() {
-        return d;
+    /*
+     * iOS：沙箱里根本没有「下载文件夹」这个概念。
+     *
+     * `app.path().download_dir()` 在 iOS 上直接 Err，退回 `home_dir()` 拿到的
+     * 又常常是 `/var/mobile`（不可写）——于是 `downloads_dir` 报错，界面上
+     * 「保存到」显示「（还没取到）」，每个任务都是「找不到下载目录，去设置里选一个」，
+     * 而 iOS 的设置页里根本没有可选的目录（用户 2026-11-23 的截图）。
+     *
+     * iOS 该落的是 App 自己的 Documents：Info.plist 里配了
+     * `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace` 之后，
+     * 「文件」App → 我的 iPhone → 疏音 里能直接看到、能拷出来、能隔空投送。
+     * 子目录用中文名，和安卓那边「音乐/疏音」的叫法对齐。
+     */
+    #[cfg(target_os = "ios")]
+    {
+        return match app.path().document_dir() {
+            Ok(d) => d.join("疏音"),
+            Err(_) => data_root(app).join("downloads"),
+        };
     }
-    // 极端情况下（组策略改过 Shell 文件夹）退回 用户目录\Downloads
-    if let Ok(home) = app.path().home_dir() {
-        return home.join("Downloads");
+    #[cfg(not(target_os = "ios"))]
+    {
+        if let Ok(d) = app.path().download_dir() {
+            return d;
+        }
+        // 极端情况下（组策略改过 Shell 文件夹）退回 用户目录\Downloads
+        if let Ok(home) = app.path().home_dir() {
+            return home.join("Downloads");
+        }
+        app.path()
+            .app_data_dir()
+            .map(|d| d.join("downloads"))
+            .unwrap_or_else(|_| PathBuf::from("."))
     }
-    app.path()
-        .app_data_dir()
-        .map(|d| d.join("downloads"))
-        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// 下载目录。传了 `dir` 就用它（顺手建好，用户选个空文件夹也能直接落盘），
 /// 没传就用系统「下载」文件夹。
 #[tauri::command]
 fn downloads_dir(app: AppHandle, dir: Option<String>) -> Result<String, String> {
+    /*
+     * iOS 上「自选目录」不存在（没有 SAF / 没有持久授权的文件对话框），
+     * 传什么都忽略——否则 localStorage 里一条历史值就能把下载指到沙箱外的
+     * 死路径上，表现是「每个任务都失败，设置里还显示着一个假路径」。
+     */
+    #[cfg(target_os = "ios")]
+    let dir: Option<String> = {
+        let _ = dir;
+        None
+    };
     let base = match dir.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()) {
         Some(d) => PathBuf::from(d),
         None => default_download_dir(&app),

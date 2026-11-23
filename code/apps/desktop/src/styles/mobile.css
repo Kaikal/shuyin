@@ -606,7 +606,6 @@ html[data-shell='phone'] .plp-acts .ghost-btn {
   font-size: 13px;
   white-space: nowrap;
 }
-
 /* ------------------------------------------------------------------ */
 /* 手机 · 歌单详情页头                                                  */
 /*                                                                     */
@@ -615,46 +614,95 @@ html[data-shell='phone'] .plp-acts .ghost-btn {
 /* 又因为 `align-items:flex-end` 沉到底下，左上留一大块空白（用户原话：   */
 /* 「导入歌单后那个布局还是有问题」）。                                   */
 /*                                                                     */
-/* 手机上改成两列 grid：封面 92 固定占左列三行，标题/来源/首数在右列，     */
-/* 操作按钮跨两列排在自己那几行——按钮终于有整行 350 可以用，两行就放得下。 */
-/* `.plp-info` 用 `display:contents` 把它三个子元素提到 grid 里，          */
-/* 这样不用改 JSX（桌面那套排布保持原样）。                                */
+/* 手机上改成两列 grid：封面固定占左列，标题/来源/首数在右列，            */
+/* 操作按钮跨两列排在下面。`.plp-info` 用 `display:contents` 把它三个子   */
+/* 元素提到 grid 里，这样不用改 JSX（桌面那套排布保持原样）。             */
+/*                                                                     */
+/* 第二轮（2026-11-23 晚，用户附截图）：「标题按钮就占据了大部分，歌曲    */
+/* 信息显示的空间太少」。上一次按钮从 4 行收到 2 行（347→249）还不够 ——   */
+/* 一屏只看得见 6 首。这次再挤三处，页头 249 → 约 150（屏高 28% → 17%）：  */
+/*   ① 按钮只留一行：播放全部 + 下一首 + 添加 + ⋯（重命名/删除收进 ⋯ 菜单）；*/
+/*   ② 封面 92 → 76，返回键从 40 高的胶囊压成 26 的小字；                  */
+/*   ③ 行间距、标题行高一起收，列表首行往上提。                            */
 /* ------------------------------------------------------------------ */
 
-html[data-shell='phone'] .plp-head { padding-bottom: 10px; }
-html[data-shell='phone'] .plp-back { margin-bottom: 8px; }
+html[data-shell='phone'] .plp-head { padding-bottom: 6px; }
+/* 返回键：`html[data-shell='phone'] .ghost-btn { height: 40 }` 在文件后半段，
+   同权重的选择器谁在后面谁赢——这里用 `.plp-head` 抬一格，压成一行小字。 */
+html[data-shell='phone'] .plp-head .plp-back {
+  height: 26px;
+  padding: 0 2px;
+  margin-bottom: 2px;
+  font-size: 12.5px;
+  color: var(--sy-text-2);
+}
 html[data-shell='phone'] .plp-hero {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  column-gap: 13px;
-  row-gap: 2px;
+  grid-template-columns: 76px minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 1px;
   align-items: start;
 }
 html[data-shell='phone'] .plp-info { display: contents; }
 html[data-shell='phone'] .plp-cover {
   grid-column: 1;
   grid-row: 1 / span 3;
-  width: 92px;
-  height: 92px;
+  width: 76px;
+  height: 76px;
   align-self: start;
 }
 html[data-shell='phone'] .plp-kind,
 html[data-shell='phone'] .plp-name,
 html[data-shell='phone'] .plp-note,
 html[data-shell='phone'] .plp-meta { grid-column: 2; }
+html[data-shell='phone'] .plp-kind { font-size: 10.5px; }
 html[data-shell='phone'] .plp-name {
-  font-size: 19px;
-  line-height: 1.25;
+  font-size: 18px;
+  line-height: 1.2;
   /* 长歌单名最多两行：再多就把按钮又挤下去了 */
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
 }
+
+/*
+ * 操作行：**一行、不折**。
+ *
+ * 折行是上一轮的解法（`flex-wrap: wrap`），代价是两行 88px。现在按
+ * 「主操作带字、次要操作只留图标」排：350 宽里 播放全部(≈100) +
+ * 下一首(36) + 添加(36) + 更多(36) + 三道 6px 间隙 ≈ 226，富余给标题。
+ */
 html[data-shell='phone'] .plp-acts {
   grid-column: 1 / -1;
-  margin-top: 9px;
-  gap: 8px;
+  flex-wrap: nowrap;
+  margin-top: 8px;
+  gap: 6px;
+}
+html[data-shell='phone'] .plp-acts > * { flex: 0 0 auto; }
+html[data-shell='phone'] .plp-acts .primary-btn,
+html[data-shell='phone'] .plp-acts .ghost-btn {
+  height: 36px;
+  padding: 0 13px;
+  gap: 5px;
+  font-size: 12.5px;
+}
+/* 只留图标的那几颗：方形热区，文字收掉（title / aria-label 兜住含义） */
+html[data-shell='phone'] .plp-acts .plp-ic {
+  width: 36px;
+  padding: 0;
+  justify-content: center;
+}
+html[data-shell='phone'] .plp-acts .plp-ic .plp-act-lb { display: none; }
+/* 重命名 / 删除：桌面在页头，手机在「⋯」菜单里 */
+html[data-shell='phone'] .plp-acts .plp-sec { display: none; }
+html[data-shell='phone'] .plp-acts .plp-more { display: inline-flex; }
+html:not([data-shell='phone']) .plp-acts .plp-more { display: none; }
+
+/* 列表页头（全选 / # / 标题 / 时长）：手机上再矮一点，首行才能往上提 */
+html[data-shell='phone'] .plp-listhead {
+  height: 26px;
+  margin-top: 2px;
 }
 
 /* ------------------------------------------------------------------ */
@@ -942,8 +990,8 @@ html[data-shell='phone'] .track-row.playing {
 
 html[data-shell='phone'] .plp-row {
   height: auto;
-  min-height: 62px;
-  padding: 8px 10px;
+  min-height: 56px;
+  padding: 6px 10px;
 }
 html[data-shell='phone'] .plp-row .plp-idx,
 html[data-shell='phone'] .plp-row .plp-dur { display: none; }

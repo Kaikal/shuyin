@@ -13,6 +13,7 @@
  */
 import { useEffect, useRef } from 'react'
 import { bridge, isAndroid } from '../lib/bridge'
+import { isIOS } from '../lib/shellMode'
 import { useSpectrumPos } from '../lib/spectrumPos'
 import type { SpectrumStyle } from '../lib/spectrumStyle'
 import { Spectrum } from './Spectrum'
@@ -38,12 +39,21 @@ export function SpectrumEdges({ playing, variant, imm, idle }: {
 }) {
   const [pos] = useSpectrumPos()
   /*
-   * 手机不做贴边光带。用户的模型里「频谱」就是唱片外面那一圈
-   * （开频谱 = 唱片模式 + 黑圈换环，见 ImmersivePlayer 的 specRing）；
-   * 页面上再挂一条贴着屏幕下沿的横条，既重复又挡手。
+   * 手机 / 平板（安卓和 iOS 都算）不做贴边光带。
+   *
+   * 这两端的频谱位置是**另一套**（`lib/spectrumPos` 的 MobileSpecPos：
+   * 封面外圈 / 页面底部 / 页面顶部），选哪个由播放页自己画（见
+   * ImmersivePlayer 的 `specBar` / `specRing`）。这条贴边层读的却是桌面那份
+   * `SpectrumPos`——两份真值互不相干，于是选了「顶部」或「封面外圈」之后，
+   * 屏幕最下沿那条**永远按桌面的 bottom 画在那儿**（用户 2026-11-23 的
+   * 「频谱底部会一直显示，即使我选的是上面或者唱片周围」）。
+   *
+   * 以前这里只挡了 `isAndroid`，把 iPhone 漏掉了 —— iOS 也是手机形态，
+   * 一样该走 MobileSpecPos 那一套。
+   *
    * 顺带把每 70ms 一次的 `bridge.spectrum()` 也省掉——那是一次跨语言 IPC。
    */
-  if (isAndroid) return null
+  if (isAndroid || isIOS) return null
   if (pos === 'cover') return null
 
   const vertical = pos === 'left' || pos === 'right'

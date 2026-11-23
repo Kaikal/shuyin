@@ -981,10 +981,18 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
     /*
      * 只接播放页里的触摸：window 捕获阶段能看到全 App 的事件，
      * 不判这一下的话，在歌单里横划也会去推播放页的轨道。
+     *
+     * ⚠️ 认的是 `.imm`（整块播放页），**不是 `.imm-mpager`**。
+     * 手机排版给 `.imm-shell` 留了 `padding: 8px 20px 10px`（见 immersive.css），
+     * 于是 `.imm-mpager` 的左右各有一条 20px 的空白带——那正是手指最容易落下、
+     * 也是 iOS 用户「从屏幕左边缘往右滑」时的落点。以前只认 `.imm-mpager`，
+     * 在这一条里起手的手势整个被忽略：用户看到的就是「靠屏幕边滑返回不了，
+     * 从中间滑可以」（2026-11-23，iPhone 唱片页）。
+     * 控件（按钮 / 进度条 / 操作行）在 onTouchStart 里另有排除，不受影响。
      */
     const inside = (e: TouchEvent) => {
       const el = e.target as Element | null
-      return !!el && typeof el.closest === 'function' && !!el.closest('.imm-mpager')
+      return !!el && typeof el.closest === 'function' && !!el.closest('.imm')
     }
     const asReact = (e: TouchEvent) => e as unknown as React.TouchEvent
     const start = (e: TouchEvent) => { if (inside(e)) mpRef.current?.onTouchStart(asReact(e)) }

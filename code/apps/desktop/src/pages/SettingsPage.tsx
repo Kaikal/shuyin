@@ -13,7 +13,7 @@ import {
   IconCheck, IconDownload, IconFolder, IconGitee, IconGithub, IconGlobe, IconMusicNote, IconTrash, IconUpload,
 } from '../components/icons'
 import { bridge } from '../lib/bridge'
-import { useShell } from '../lib/shellMode'
+import { useShell, isIOS } from '../lib/shellMode'
 import { SPECTRUM_STYLES, useSpectrumStyle, type SpectrumStyle } from '../lib/spectrumStyle'
 import {
   MOBILE_SPEC_POSITIONS, SPECTRUM_POSITIONS, useSpectrumPos, useMobileSpecPos, type SpectrumPos,
@@ -885,23 +885,32 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           <span className="set-label">
             保存目录
             <HelpTip
-              text={bridge.isAndroid
-                ? '下载的歌曲和 .lrc 歌词默认存到系统公共的「音乐/疏音」文件夹——文件管理器、其他播放器都能看到、能播。\n点「更改…」可以选任意文件夹（会记住这个授权）。'
-                : '下载的歌曲和 .lrc 歌词都放这里，选一个空文件夹也行（会自动建好）。\n已经在队列里的任务仍按原目录写入，新任务才用新目录。'}
+              text={isIOS
+                ? 'iOS 只允许 App 写自己的沙箱：歌曲和 .lrc 都放在「文件」App → 我的 iPhone → 疏音 里，\n可以在那儿拷贝、隔空投送或分享出去。系统不提供「换目录」的能力（没有 SAF / 文件对话框持久授权）。'
+                : bridge.isAndroid
+                  ? '下载的歌曲和 .lrc 歌词默认存到系统公共的「音乐/疏音」文件夹——文件管理器、其他播放器都能看到、能播。\n点「更改…」可以选任意文件夹（会记住这个授权）。'
+                  : '下载的歌曲和 .lrc 歌词都放这里，选一个空文件夹也行（会自动建好）。\n已经在队列里的任务仍按原目录写入，新任务才用新目录。'}
             />
           </span>
           <span className="set-ctl">
-            <button className="ghost-btn" onClick={() => void pickDlDir()}>更改…</button>
-            <button className="ghost-btn" onClick={() => void dl.setDir('')} disabled={!dl.customDir}>恢复默认</button>
+            {/* iOS 没有「换目录」这条路，放两颗按不动的按钮比不放更糟 */}
+            {!isIOS && (
+              <>
+                <button className="ghost-btn" onClick={() => void pickDlDir()}>更改…</button>
+                <button className="ghost-btn" onClick={() => void dl.setDir('')} disabled={!dl.customDir}>恢复默认</button>
+              </>
+            )}
           </span>
         </div>
         <div className="set-path">
           <IconFolder width={13} height={13} />
           <span className="set-path-text" title={dl.dir}>
-            {dl.dir || (bridge.isAndroid ? '（默认：公共「音乐/疏音」）' : '（默认：系统「下载」文件夹）')}
+            {dl.dir || (isIOS
+              ? '（App 的「文件」目录）'
+              : bridge.isAndroid ? '（默认：公共「音乐/疏音」）' : '（默认：系统「下载」文件夹）')}
           </span>
           <button className="link-btn" disabled={!dl.dir} onClick={() => void bridge.revealInFolder(dl.dir)}>
-            {bridge.isAndroid ? '复制路径' : '打开'}
+            {bridge.isAndroid || isIOS ? '复制路径' : '打开'}
           </button>
         </div>
       </section>

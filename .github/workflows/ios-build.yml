@@ -157,6 +157,14 @@ jobs:
           # 原地读取（不复制到临时目录）：文件本身走安全作用域，配合 Rust 侧
           # startAccessingSecurityScopedResource 读——大歌单复制一次太慢
           d['LSSupportsOpeningDocumentsInPlace'] = True
+          # ---- 下载目录：让 App 的 Documents 在「文件」里可见 ----
+          # iOS 没有公共「下载」文件夹，下载只能落沙箱里的 Documents。
+          # 不写 UIFileSharingEnabled，那块目录在「文件」App 里根本不出现，
+          # 用户下完歌以为没下下来（2026-11-23 反馈「找不到下载目录」）。
+          # 两个键要一起：前者让 Documents 出现在「我的 iPhone」下，
+          # 后者允许原地打开（编辑态），缺一个都不显示。
+          d['UIFileSharingEnabled'] = True
+          d['LSSupportsOpeningDocumentsInPlace'] = True
           plistlib.dump(d, open(p, 'wb'))
           print('displayName =', d['CFBundleDisplayName'], '| region =', d['CFBundleDevelopmentRegion'])
           print('docTypes =', [x['CFBundleTypeName'] for x in d['CFBundleDocumentTypes']])

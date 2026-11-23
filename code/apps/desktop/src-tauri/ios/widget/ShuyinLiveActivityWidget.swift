@@ -411,8 +411,21 @@ struct ShuyinLiveActivityWidget: Widget {
             } compactLeading: {
                 Artwork(art: context.state.art, size: 19)
             } compactTrailing: {
-                TimeLabel(state: context.state, compact: true)
-                    .frame(width: 34)
+                /*
+                 * 紧凑态右侧：**播放状态**，不是倒计时。
+                 *
+                 * 原来这里是 `TimeLabel`（`Text(timerInterval:)` 塞进 34pt）。
+                 * 两个毛病（2026-11-23 用户截图里那块是空的）：
+                 *   · 岛的这一格是系统给的，`timerInterval` 那种自走秒文本在
+                 *     这个宽度里经常直接画不出来（宽度不够就整块被裁掉）；
+                 *   · 就算画出来，倒计时也说明不了「在放还是在停」——
+                 *     用户要的恰恰是后者（「状态和歌曲信息不匹配」）。
+                 * 换成图标：在放 = waveform（强调色），暂停 = pause.fill（灰）。
+                 */
+                Image(systemName: context.state.playing ? "waveform" : "pause.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(context.state.playing ? syAccent : syText2)
+                    .frame(width: 24)
             } minimal: {
                 // 同时挂着两三条岛时只剩这么点地方，只放封面
                 Artwork(art: context.state.art, size: 17)

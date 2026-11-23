@@ -2025,13 +2025,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       fav = false,
     ) => {
       if (!isIOS) return
+      /*
+       * 序号 + 串行队列：**最后一条一定赢**。
+       *
+       * 以前这里是「异步压封面 → invoke」两头都异步、彼此不排队，于是：
+       *   · 切歌/暂停那一刻会连着发两条（一条来自「换歌」effect，一条来自
+       *     「换句」effect），谁先到 ActivityKit 全看封面解码耗时；
+       *   · 更糟的是 `liveArtOf` 第二次进来时 `cachedPath` 已经是新路径、
+       *     `cachedB64` 还是空串——**当场返回一张空封面**并立刻发出，
+       *     而第一条稍后才带着封面和**旧状态**落地。
+       * 用户看到的就是「岛上的播放/暂停状态和 App 里对不上」，
+       * 而且时好时坏（2026-11-23 第二轮反馈）。
+       *
+       * 现在：拿号 → 等封面 → 号过期就整条丢掉（更新的那条会覆盖它），
+       * 没过期就排在上一条 `invoke` 后面发出去。顺序 = 调用顺序。
+       */
+      const seq = ++liveSeq.current
       if (!t) {
         // 队列空了 / 播完了：把锁屏上那条收掉，别留一块过期的卡片
-        void bridge.liveEnd().catch(() => { /* 没有活着的 activity 时是空操作 */ })
+        liveChain.current = liveChain.current.then(() =>
+          bridge.liveEnd().catch(() => { /* 没有活着的 activity 时是空操作 */ }),
+        )
         return
       }
       const art = await liveArtOf(cachedCoverPath(t.cover) ?? null)
-      void bridge.liveSync({
+      if (seq !== liveSeq.current) return
+      const payload = {
         title: t.title ?? '',
         artist: t.artist ?? '',
         album: t.album ?? '',
@@ -2041,11 +2060,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         fav,
         position: Math.max(0, position || 0),
         duration: Math.max(0, duration || 0),
+        /* 锚点必须是**发出这一刻**：等封面解码可能花掉几十毫秒，
+           用进来时的时间戳会让锁屏的进度条往回跳一格 */
         anchor: Date.now() / 1000,
-      }).catch(() => { /* 灵动岛起不来不该影响播放 */ })
+      }
+      liveChain.current = liveChain.current.then(() =>
+        bridge.liveSync(payload).catch(() => { /* 灵动岛起不来不该影响播放 */ }),
+      )
     },
     [],
   )
+
+  /** 灵动岛推送的序号与串行队列（见 liveSyncNow 里的说明） */
+  const liveSeq = useRef(0)
+  const liveChain = useRef<Promise<void>>(Promise.resolve())
 
   /*
    * 当前这一句歌词（iOS 锁屏 / 灵动岛用）。

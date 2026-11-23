@@ -12,7 +12,7 @@ import { useMemo } from 'react'
 import { coverUrlOf } from '../lib/coverUrl'
 import { dlLabel, useDownloads, type DownloadTask } from '../lib/DownloadsProvider'
 import { bridge } from '../lib/bridge'
-import { useShell } from '../lib/shellMode'
+import { useShell, isIOS } from '../lib/shellMode'
 import { IconDownload, IconFolder, IconRefresh, IconTrash } from '../components/icons'
 
 const mb = (n: number) => (n / 1048576).toFixed(1)
@@ -152,9 +152,16 @@ export function DownloadsPage() {
 
       <div className="dlp-dir">
         <span className="dlp-dir-label">保存到</span>
-        <span className="dlp-dir-path" title={dl.dir}>{dl.dir || '（还没取到）'}</span>
+        <span className="dlp-dir-path" title={dl.dir}>
+          {dl.dir || (isIOS ? '（App 的「文件」目录）' : '（还没取到）')}
+        </span>
         <span className="dlp-dir-hint">
-          {bridge.isAndroid ? '公共文件夹，其他应用也能扫到' : '想换位置去「设置 → 下载目录」'}
+          {bridge.isAndroid
+            ? '公共文件夹，其他应用也能扫到'
+            : isIOS
+              /* iOS 没有「换目录」这回事：沙箱里只有 App 自己的 Documents */
+              ? '在「文件」App → 我的 iPhone → 疏音 里'
+              : '想换位置去「设置 → 下载目录」'}
         </span>
       </div>
 

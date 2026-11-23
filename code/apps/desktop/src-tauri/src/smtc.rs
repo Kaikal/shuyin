@@ -288,6 +288,17 @@ pub fn update(
 ) {
 }
 
+/// 只翻「播放 / 暂停」并把元信息按上一次推的再发一遍（Apple 平台）。
+///
+/// 给**灵动岛/锁屏实时活动的播放键**用：那条路径由 Swift 的 intent 直接落到
+/// Rust 的 `liveactivity::handle_remote_command`，不经过本模块的 `dispatch`，
+/// 所以锁屏那张「正在播放」卡不会自己跟着翻。没有这一句，用户按岛上的暂停，
+/// 声音停了、岛也变了，锁屏卡还画着 ▶（2026-11-23「状态不匹配」的一层）。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub fn refresh_state(playing: bool, pos: f64, dur: f64) {
+    apple::reapply(playing, pos, dur);
+}
+
 /* ------------------------------------------------------------------ */
 /* Apple（macOS / iOS）：MPNowPlayingInfoCenter + MPRemoteCommandCenter  */
 /*                                                                      */

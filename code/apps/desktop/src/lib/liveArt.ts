@@ -30,6 +30,18 @@ const MAX_B64 = 3000
 /** 上一次的结果。切歌/暂停会反复调这个，同一张封面没必要重算 */
 let cachedPath = ''
 let cachedB64 = ''
+/**
+ * 正在解码的那一张。
+ *
+ * 以前只有「结果缓存」，同一张封面在**解码途中**被第二次问到时会命中
+ * `localPath === cachedPath` 这条捷径、直接返回**空串**（`cachedB64` 这时还是空的），
+ * 于是调用方以为「这首歌没封面」，推给灵动岛的 ContentState 就是无图的那一份。
+ * 而这个空结果往往比前一条带图的**晚到**，把正确的状态覆盖掉——用户看到的就是
+ * 「岛上的封面/播放状态和 App 对不上」（2026-11-23）。
+ * 现在同一个路径的并发请求共享同一个 Promise，谁都不会拿到半成品。
+ */
+let inflightPath = ''
+let inflight: Promise<string> | null = null
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -68,26 +80,40 @@ function encode(img: HTMLImageElement, quality: number): string {
 export async function liveArtOf(localPath: string | null | undefined): Promise<string> {
   if (!localPath || !isTauri) return ''
   if (localPath === cachedPath) return cachedB64
-  cachedPath = localPath
-  cachedB64 = ''
-  try {
-    /*
-     * 先让 Rust 读成 data URL，再在 canvas 上缩放。
-     * 为什么不直接 `<img src=convertFileSrc(path)>`：asset:// 跟页面不同源，
-     * canvas 会被污染，`toDataURL()` 直接抛 SecurityError。而 data: URL
-     * 是同源的，怎么读都不受限。
-     */
-    const dataUrl = await invoke<string>('read_cover_data_url', { path: localPath })
-    const img = await loadImage(dataUrl)
-    let b64 = encode(img, 0.55)
-    if (!b64) return ''
-    // 塞不下就降一档质量再试（极少数噪点封面压不下去）
-    if (b64.length > MAX_B64) b64 = encode(img, 0.38)
-    if (b64.length > MAX_B64) b64 = ''
-    cachedB64 = b64
-    return b64
-  } catch {
-    // 读不到就当没有封面，不要因为一张图把整条灵动岛搞挂
-    return ''
-  }
+  /* 正在解同一张：等它，别返回空串（见 inflight 的注释） */
+  if (localPath === inflightPath && inflight) return inflight
+  inflightPath = localPath
+  inflight = (async () => {
+    try {
+      /*
+       * 先让 Rust 读成 data URL，再在 canvas 上缩放。
+       * 为什么不直接 `<img src=convertFileSrc(path)>`：asset:// 跟页面不同源，
+       * canvas 会被污染，`toDataURL()` 直接抛 SecurityError。而 data: URL
+       * 是同源的，怎么读都不受限。
+       */
+      const dataUrl = await invoke<string>('read_cover_data_url', { path: localPath })
+      const img = await loadImage(dataUrl)
+      let b64 = encode(img, 0.55)
+      if (!b64) return ''
+      // 塞不下就降一档质量再试（极少数噪点封面压不下去）
+      if (b64.length > MAX_B64) b64 = encode(img, 0.38)
+      if (b64.length > MAX_B64) b64 = ''
+      /* 只有「这张就是最新请求的那张」才写缓存：解码期间用户已经切走了的话，
+         把它写进去会让下一次同路径的请求拿到别人的图 */
+      if (inflightPath === localPath) {
+        cachedPath = localPath
+        cachedB64 = b64
+      }
+      return b64
+    } catch {
+      // 读不到就当没有封面，不要因为一张图把整条灵动岛搞挂
+      return ''
+    } finally {
+      if (inflightPath === localPath) {
+        inflight = null
+        inflightPath = ''
+      }
+    }
+  })()
+  return inflight
 }

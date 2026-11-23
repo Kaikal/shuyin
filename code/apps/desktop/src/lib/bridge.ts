@@ -565,9 +565,24 @@ export const bridge = {
    * 点了没反应比"打不开"更让人摸不着头脑。
    */
   async revealInFolder(path: string): Promise<void> {
-    /* iOS：没有「文件管理器定位」这回事，沙箱里的文件用户也看不到；
-       按钮文案已按平台分流成「复制路径」，这里直接空操作 */
-    if (isIOS) return
+    /*
+     * iOS：没有「文件管理器定位」这回事——但**不能就这么空转**。
+     * 下载页那颗按钮在 iPhone 上写的是「复制路径」，点了却什么都不发生，
+     * 用户会以为下载坏了。这里真去写剪贴板（「文件」App 里粘一下就能定位）。
+     */
+    if (isIOS) {
+      if (!path || !path.trim()) {
+        toast('还没有下载目录', { bad: true })
+        return
+      }
+      try {
+        await navigator.clipboard.writeText(path)
+        toast('已复制路径，可在「文件」App 里找', { ok: true })
+      } catch {
+        toast('复制失败', { bad: true })
+      }
+      return
+    }
     if (isTauri) {
       const { revealItemInDir } = await import('@tauri-apps/plugin-opener')
       await revealItemInDir(path)

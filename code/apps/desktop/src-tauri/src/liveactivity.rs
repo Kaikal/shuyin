@@ -249,6 +249,45 @@ fn toggle_playback(app: &AppHandle) {
         app,
         &format!("live.playpause -> {} (was {})", if s.playing { "pause" } else { "resume" }, s.playing),
     );
+    /*
+     * 立刻用**原生真值**把岛上的图标翻过来。
+     *
+     * 以前这里只动了播放引擎，岛上那颗 ▶/⏸ 要等前端 JS 收到状态事件再推一次
+     * `live_activity_sync` 才会变；主 App 在后台时 JS 被系统挂起，这一推可能
+     * 几十秒都不到，用户看到的就是「歌在放，岛上还画着暂停」
+     * （2026-11-23 反馈「灵动岛的状态和歌曲信息不匹配」）。
+     * 现在按完就地更新 LAST 并重推，前端醒来后再用它的绝对值覆盖一次，不冲突。
+     *
+     * `playing` 传**意图**而不是快照：`resume()` 只是往音频线程投了一条命令，
+     * 紧接着读快照还会是 false——照抄就把刚翻过来的岛又推回暂停了。
+     * 位置/时长照抄快照（这两项此刻是准的：暂停时停在原地，恢复时也是原地起）。
+     */
+    push_native_state(app, !s.playing);
+}
+
+/// 用原生快照的位置/时长 + 指定的播放状态覆盖 LAST，然后重推一次。
+#[cfg(target_os = "ios")]
+fn push_native_state(app: &AppHandle, playing: bool) {
+    let Some(p) = app.try_state::<Player>() else { return };
+    let s = p.snapshot();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    {
+        /* guard 必须圈在这个块里：push_last() 还要再锁一次（Mutex 不可重入） */
+        let Ok(mut g) = LAST.lock() else { return };
+        let Some(last) = g.as_mut() else { return };
+        last.playing = playing;
+        last.position = s.position.max(0.0);
+        if s.duration > 0.0 {
+            last.duration = s.duration;
+        }
+        last.anchor = now;
+    }
+    /* 锁屏那张系统卡（Now Playing）也一起翻：它不经过 liveactivity 这条链路 */
+    crate::smtc::refresh_state(playing, s.position.max(0.0), s.duration);
+    push_last();
 }
 
 /* ------------------------------------------------------------------ */

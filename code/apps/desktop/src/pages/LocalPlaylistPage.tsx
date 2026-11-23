@@ -45,6 +45,14 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
   const [sel, setSel] = useState<Set<string>>(() => new Set())
   const anchor = useRef(-1)
   const [menu, setMenu] = useState<{ x: number; y: number; track: LocalTrack; index: number } | null>(null)
+  /*
+   * 页头那颗「⋯」（只出现在手机上）：重命名 / 删除收进菜单。
+   *
+   * 五颗按钮在 390 宽下必然折两行——用户 2026-11-23 的原话是
+   * 「标题按钮就占据了大部分，歌曲信息显示的空间太少」。手机只留
+   * 「播放全部 + 下一首 + 添加 + ⋯」一行，剩下两颗走这里。
+   */
+  const [headMenu, setHeadMenu] = useState<{ x: number; y: number } | null>(null)
   const [addTo, setAddTo] = useState<string[] | null>(null)
 
   const tracks = useMemo(() => (list ? pl.tracksOf(list, p.library) : []), [list, pl, p.library])
@@ -125,6 +133,36 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
     toast(`已从歌单移除 ${n} 首`)
   }
 
+  /* 删除歌单：页头按钮和手机「⋯」菜单共用一份（确认文案只该有一处） */
+  const askDelete = () => {
+    if (!list) return
+    void confirm({
+      title: `删除歌单「${list.name}」？`,
+      message: '只删这个歌单，歌还在曲库里。',
+      confirmText: '删除',
+      danger: true,
+    }).then(ok => {
+      if (!ok) return
+      pl.remove(list.id)
+      onBack()
+    })
+  }
+
+  const headMenuItems = (): MenuItem[] => [
+    {
+      id: 'rename', label: '重命名歌单',
+      icon: <IconMusicNote width={14} height={14} />,
+      onSelect: () => { setDraft(list?.name ?? ''); setRenaming(true) },
+    },
+    {
+      id: 'add', label: '添加歌曲',
+      icon: <IconPlus width={14} height={14} />,
+      onSelect: () => { setPicked(new Set()); setQuery(''); setPicking(true) },
+    },
+    { id: 'd1', label: '', divider: true, onSelect: () => {} },
+    { id: 'del', label: '删除歌单', danger: true, icon: <IconTrash width={14} height={14} />, onSelect: askDelete },
+  ]
+
   const rowMenu = (t: LocalTrack, i: number): MenuItem[] => [
     { id: 'play', label: '播放', icon: <IconPlay width={14} height={14} />, onSelect: () => p.playList(tracks, i) },
     { id: 'next', label: '下一首播放', icon: <IconNext width={14} height={14} />, onSelect: () => { queueToast([t], p.queueState.queue, 'next'); p.addToQueue(t, 'next') } },
@@ -195,31 +233,44 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
             </div>
             <div className="plp-acts">
               <button className="primary-btn" disabled={!tracks.length} onClick={() => p.playList(tracks, 0)}>
-                <IconPlay width={13} height={13} /> 播放全部
+                <IconPlay width={13} height={13} /> <span className="plp-act-lb">播放全部</span>
               </button>
-              <button className="ghost-btn" disabled={!tracks.length} onClick={() => { queueToast(tracks, p.queueState.queue, 'next'); p.addManyToQueue(tracks, 'next') }}>
-                <IconNext width={13} height={13} /> 下一首播放
-              </button>
-              <button className="ghost-btn" onClick={() => { setPicked(new Set()); setQuery(''); setPicking(true) }}>
-                <IconPlus width={13} height={13} /> 添加歌曲
-              </button>
-              <button className="ghost-btn" onClick={() => { setDraft(list.name); setRenaming(true) }}>重命名</button>
+              {/*
+                手机上这三颗只留图标（文字在 390 宽下会把一行撑成两行，
+                用户原话「标题按钮就占据了大部分，歌曲信息显示的空间太少」）。
+                标签包在 span 里，桌面照旧显示文字，手机 CSS 把 span 收掉、
+                按钮压成 36×36 的方形热区；title / aria-label 兜住可读性。
+              */}
               <button
-                className="ghost-btn danger"
-                onClick={() => {
-                  void confirm({
-                    title: `删除歌单「${list.name}」？`,
-                    message: '只删这个歌单，歌还在曲库里。',
-                    confirmText: '删除',
-                    danger: true,
-                  }).then(ok => {
-                    if (!ok) return
-                    pl.remove(list.id)
-                    onBack()
-                  })
-                }}
+                className="ghost-btn plp-ic" disabled={!tracks.length}
+                title="下一首播放" aria-label="下一首播放"
+                onClick={() => { queueToast(tracks, p.queueState.queue, 'next'); p.addManyToQueue(tracks, 'next') }}
+              >
+                <IconNext width={13} height={13} /><span className="plp-act-lb">下一首播放</span>
+              </button>
+              <button
+                className="ghost-btn plp-ic"
+                title="添加歌曲" aria-label="添加歌曲"
+                onClick={() => { setPicked(new Set()); setQuery(''); setPicking(true) }}
+              >
+                <IconPlus width={13} height={13} /><span className="plp-act-lb">添加歌曲</span>
+              </button>
+              <button className="ghost-btn plp-sec" onClick={() => { setDraft(list.name); setRenaming(true) }}>重命名</button>
+              <button
+                className="ghost-btn danger plp-sec"
+                onClick={askDelete}
               >
                 <IconTrash width={13} height={13} /> 删除
+              </button>
+              {/* 手机：重命名 / 删除收进这里（撑不下，也不该和「播放全部」抢注意力） */}
+              <button
+                className="ghost-btn plp-ic plp-more" aria-label="更多歌单操作" title="更多"
+                onClick={e => {
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setHeadMenu({ x: r.left, y: r.bottom })
+                }}
+              >
+                <IconMore width={15} height={15} />
               </button>
             </div>
           </div>
@@ -444,6 +495,10 @@ export function LocalPlaylistPage({ id, onBack, onOpenDetail }: Props) {
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={rowMenu(menu.track, menu.index)} onClose={() => setMenu(null)} />
+      )}
+
+      {headMenu && (
+        <ContextMenu x={headMenu.x} y={headMenu.y} items={headMenuItems()} onClose={() => setHeadMenu(null)} />
       )}
 
       <AddToPlaylistDialog
