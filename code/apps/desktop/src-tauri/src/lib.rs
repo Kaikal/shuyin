@@ -1443,7 +1443,7 @@ fn open_file_inbox(app: &AppHandle) -> Option<PathBuf> {
 ///
 /// 为什么不用 `app.fs().read()`：那条路先过 fs 插件的 scope 校验，
 /// 沙箱外路径一律 forbidden（而且这里写的是 `let Ok(..) else return`，
-/// 失败是静默的）。放开 scope 又要写 `/**`，等于把整个文件系统开给前端。
+/// 失败是静默的）。放开 scope 又要写通配根目录，等于把整个文件系统开给前端。
 #[cfg(target_os = "ios")]
 fn read_scoped(url: &tauri::Url) -> Option<Vec<u8>> {
     use objc2::rc::Retained;
@@ -1490,7 +1490,7 @@ fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {    let Ok(src) = url.t
      * （`/private/var/mobile/...`）不在允许范围里，直接返回 forbidden，
      * 而这里写的是 `let Ok(..) else { return }`——于是静默什么都不发生，
      * 用户看到的就是「用疏音打开还是不行」（2026-11-22 iPhone 实测）。
-     * 给 fs 插件放开 `/**` 是另一种写法，但那等于把整个文件系统开给前端。
+     * 给 fs 插件放开「通配整个文件系统」是另一种写法，但那等于把沙箱开给前端。
      *
      * 改用原生那一套：`startAccessingSecurityScopedResource` 拿到临时授权，
      * 直接用 std::fs 读，读完立刻 stop。这才是沙箱外文件的正规姿势。
