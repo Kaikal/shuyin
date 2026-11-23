@@ -142,10 +142,32 @@ fn handle_remote_command(cmd: &str) {
         // 播放暂停直接在 Rust 侧执行：和托盘按钮同一套路数，不依赖前端在跑
         "playpause" => toggle_playback(app),
         // 上一首/下一首需要播放队列，队列在前端，只能发事件让它自己做
-        "prev" | "next" | "fav" => {
+        "prev" | "next" => {
             let _ = app.emit(
                 "hotkey://action",
                 serde_json::json!({ "id": cmd, "source": "live" }),
+            );
+        }
+        /*
+         * 收藏：真值在前端（收藏列表只有它有一份），但**先把岛上那颗星翻过来**。
+         *
+         * 因为前端 JS 在后台可能冻着，那条事件要等它醒过来才跑——用户点一下就
+         * 盯着那颗星看，等几十秒不动等于「按钮坏了」。这里乐观翻一次，
+         * 前端醒来后会用真值把载荷覆盖回去（它推的是绝对值，不是 toggle），
+         * 所以不会翻两次。
+         */
+        "fav" => {
+            {
+                if let Ok(mut g) = LAST.lock() {
+                    if let Some(s) = g.as_mut() {
+                        s.fav = !s.fav;
+                    }
+                }
+            }
+            push_last();
+            let _ = app.emit(
+                "hotkey://action",
+                serde_json::json!({ "id": "fav", "source": "live" }),
             );
         }
         /*
