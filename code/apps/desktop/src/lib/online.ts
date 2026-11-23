@@ -296,7 +296,15 @@ const registry = new Map<string, SearchSong>()
 /* 搜索结果落盘：重启后队列里那些在线曲目还能播。
    以前只放在内存里，退出再进就「曲目已失效」，用户只能重新搜一遍。 */
 const REG_KEY = 'online.songs'
-const REG_KEEP = 300
+/**
+ * 注册表最多留多少条。
+ *
+ * 2026-11 从 300 提到 1500：一张洛雪歌单动辄三四百首，导入后这些 id 全得靠
+ * 注册表还原（歌单只存 id）。300 的窗口装不下一张歌单，重启后前半张会直接
+ * 变成「找不到的 id」——歌单里凭空少歌，而且没有任何提示。
+ * 单条 SearchSong 约 0.4KB，1500 条约 600KB 存档，安卓的 localStorage 也装得下。
+ */
+const REG_KEEP = 1500
 let regBooted: Promise<void> | null = null
 let regTimer = 0
 

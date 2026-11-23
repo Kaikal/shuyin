@@ -431,14 +431,19 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
     setEditing(null)
   }
 
+  /*
+   * 歌单卡上的「N 首」**必须走 tracksOf**，不能只数曲库里有的 id。
+   *
+   * 导入的洛雪歌单存的全是 `online:平台:歌曲id`（在线曲目，没有本地文件），
+   * 只按曲库过滤的话，一张 400 首的歌单会显示「0 首」——种子用户看到的就是
+   * 「导进来了，但一首都没有」。tracksOf 会回退到在线曲目注册表，口径和
+   * 点进去看到的列表完全一致。
+   */
   const counts = useMemo(() => {
     const map = new Map<string, number>()
-    for (const l of pl.lists) {
-      const byId = new Set(p.library.map(t => t.id))
-      map.set(l.id, l.trackIds.filter(id => byId.has(id)).length)
-    }
+    for (const l of pl.lists) map.set(l.id, pl.tracksOf(l, p.library).length)
     return map
-  }, [pl.lists, p.library])
+  }, [pl.lists, p.library, pl.tracksOf])
 
   /** 导入：选文件 → 解析 → 与曲库匹配 → 存成歌单 */
   /**

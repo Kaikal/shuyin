@@ -136,6 +136,24 @@ jobs:
           # 实时活动（灵动岛 / 锁屏）：不写这个键，Activity.request 直接抛错，
           # 岛永远不出现——而且系统不给任何提示，纯靠这个键
           d['NSSupportsLiveActivities'] = True
+          # ---- 自定义 scheme：让实时活动的 widgetURL 能把人带回 App ----
+          # Live Activity 里的 `.widgetURL` 必须是一个**已注册**的 scheme，
+          # 系统才会去打开宿主 App；没注册的表现就是「点了没反应」。
+          url_types = d.get('CFBundleURLTypes') or []
+          if not any('shuyin' in (x.get('CFBundleURLSchemes') or []) for x in url_types):
+              url_types.append({
+                  'CFBundleURLName': 'cn.shuyin.player',
+                  'CFBundleURLSchemes': ['shuyin'],
+              })
+          d['CFBundleURLTypes'] = url_types
+
+          # ---- ATS：WebView 里的 http 图片放行 ----
+          # 洛雪导出的酷狗/酷我封面有一部分还是 http://。安卓 WebView 放行，
+          # iOS 默认按 ATS 拦掉，表现是「别的图都正常，只有导入歌单的封面空白」。
+          # 前端已经把 picUrl 升级成 https，这里兜住音源脚本自己返回的 http 图。
+          ats = d.get('NSAppTransportSecurity') or {}
+          ats['NSAllowsArbitraryLoadsInWebContent'] = True
+          d['NSAppTransportSecurity'] = ats
           # 原地读取（不复制到临时目录）：文件本身走安全作用域，配合 Rust 侧
           # startAccessingSecurityScopedResource 读——大歌单复制一次太慢
           d['LSSupportsOpeningDocumentsInPlace'] = True

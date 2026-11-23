@@ -50,6 +50,8 @@ function sized(url: string, px: number): string {
  */
 export function coverUrlOf(cover: string | null | undefined, needPx?: number): string | undefined {
   if (!cover) return undefined
+  /* data: / blob: 本身就是可用的 URL，别再当文件路径转一次（转了必裂） */
+  if (/^(data:|blob:)/i.test(cover)) return cover
   if (!/^https?:\/\//i.test(cover)) return isTauri ? convertFileSrc(cover) : undefined
   /*
    * 本地存过一份就用本地那张（断网时这是唯一能画出来的图，见 `mediaCache`）。

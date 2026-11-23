@@ -608,6 +608,56 @@ html[data-shell='phone'] .plp-acts .ghost-btn {
 }
 
 /* ------------------------------------------------------------------ */
+/* 手机 · 歌单详情页头                                                  */
+/*                                                                     */
+/* 桌面是「封面 152 在左、信息在右、按钮都塞在信息列里」，390 宽一挤就完了： */
+/* 信息列只剩 212pi，5 颗按钮折成 4 行、撑到 347px，占掉屏幕 41%；封面    */
+/* 又因为 `align-items:flex-end` 沉到底下，左上留一大块空白（用户原话：   */
+/* 「导入歌单后那个布局还是有问题」）。                                   */
+/*                                                                     */
+/* 手机上改成两列 grid：封面 92 固定占左列三行，标题/来源/首数在右列，     */
+/* 操作按钮跨两列排在自己那几行——按钮终于有整行 350 可以用，两行就放得下。 */
+/* `.plp-info` 用 `display:contents` 把它三个子元素提到 grid 里，          */
+/* 这样不用改 JSX（桌面那套排布保持原样）。                                */
+/* ------------------------------------------------------------------ */
+
+html[data-shell='phone'] .plp-head { padding-bottom: 10px; }
+html[data-shell='phone'] .plp-back { margin-bottom: 8px; }
+html[data-shell='phone'] .plp-hero {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  column-gap: 13px;
+  row-gap: 2px;
+  align-items: start;
+}
+html[data-shell='phone'] .plp-info { display: contents; }
+html[data-shell='phone'] .plp-cover {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  width: 92px;
+  height: 92px;
+  align-self: start;
+}
+html[data-shell='phone'] .plp-kind,
+html[data-shell='phone'] .plp-name,
+html[data-shell='phone'] .plp-note,
+html[data-shell='phone'] .plp-meta { grid-column: 2; }
+html[data-shell='phone'] .plp-name {
+  font-size: 19px;
+  line-height: 1.25;
+  /* 长歌单名最多两行：再多就把按钮又挤下去了 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+html[data-shell='phone'] .plp-acts {
+  grid-column: 1 / -1;
+  margin-top: 9px;
+  gap: 8px;
+}
+
+/* ------------------------------------------------------------------ */
 /* 手机 · 列表行：长按多选                                              */
 /*                                                                     */
 /* 触摸屏上没有右键，多选靠「长按一行」。这两条是配套的：                 */
@@ -996,6 +1046,24 @@ html[data-shell='phone'] .sq-fav {
   height: 34px;
   top: 6px;
   right: 6px;
+}
+
+/*
+ * 触摸屏上收藏星必须**常显**。
+ *
+ * 桌面那套是 `opacity: 0` + hover 才出现（一屏几十颗星会盖住封面），但手机上
+ * 有三个后果：
+ *   ① `opacity: 0` 的元素**依然接收点击**，用户第一次点封面右上角其实点在
+ *      那颗隐形的星上——收藏了，歌单没进去；
+ *   ② 手指按下去会补一个 hover 状态，星「凭空冒出来」，看起来像点一次只多了
+ *      个按钮（用户原话：点一次右上角出现个收藏按钮）；
+ *   ③ 第二次点才真的进歌单，于是变成「要点两次」。
+ * 触摸屏没有真正的 hover，这里直接常显，顺带把它做成 34px 的可点尺寸。
+ */
+html[data-shell='phone'] .sq-fav,
+html[data-shell='tablet'] .sq-fav {
+  opacity: 1;
+  transform: none;
 }
 
 /* 问号：15px 是桌面尺寸，手指按十次中一次。直接放大到 26，视觉上也更像按钮 */

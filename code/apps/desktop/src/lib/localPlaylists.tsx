@@ -17,7 +17,7 @@ import type { LocalTrack } from '@shuyin/core'
 import type { PlatformSource } from '@shuyin/lx-provider'
 import { KEYS, settings } from './settings'
 import { coverUrlOf } from './coverUrl'
-import { trackOfId } from './online'
+import { trackOfId, ensureRegistry } from './online'
 
 export interface PlaylistMissing {
   title: string
@@ -93,7 +93,17 @@ export function PlaylistsProvider({ children }: { children: ReactNode }) {
     let alive = true
     ;(async () => {
       try {
-        const [ls, fs] = await Promise.all([
+        /*
+         * 必须**先等在线曲目注册表从存档里读出来**。
+         *
+         * 导入的洛雪歌单存的只有 `online:平台:歌曲id`，元信息（歌名/歌手/封面）
+         * 全在注册表里。以前这里只等歌单存档，注册表由「恢复播放队列」顺手唤醒，
+         * 于是冷启动进「我的」时 tracksOf 全是 undefined——歌单显示 0 首、
+         * 封面拼图一片空白（用户 2026-11-23：导入歌单「专辑封面加载不出来」）。
+         * 曲目列表本身也是空的，只是「0 首」这句文案先把问题盖住了。
+         */
+        const [, ls, fs] = await Promise.all([
+          ensureRegistry(),
           settings.get<LocalPlaylist[]>(KEYS.localPlaylists),
           settings.get<FavPlaylist[]>(KEYS.favPlaylists),
         ])

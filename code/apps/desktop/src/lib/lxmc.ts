@@ -44,6 +44,22 @@ export function isLxmcBuffer(buf: Uint8Array): boolean {
   return buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b
 }
 
+/**
+ * 封面地址归一化：`http://` 一律升到 `https://`。
+ *
+ * 洛雪导出的是平台的原始 `picUrl`，酷狗 / 酷我有一部分到今天还是明文 http。
+ * 安卓 WebView 放行明文，iPhone 的 ATS 默认拦掉——同一个歌单在安卓上封面
+ * 正常、在 iPhone 上一片空白（用户 2026-11-23：「导入歌单的专辑封面加载不出来」）。
+ * 网易云 / QQ / 酷狗 / 酷我的图片 CDN 都同时支持 https，就地升级最省事；
+ * Info.plist 里另有一层 `NSAllowsArbitraryLoadsInWebContent` 兜住音源脚本
+ * 自己返回的 http 图。
+ */
+function httpsImg(v: unknown): string | undefined {
+  const s = String(v ?? '').trim()
+  if (!s) return undefined
+  return s.startsWith('http://') ? 'https://' + s.slice('http://'.length) : s
+}
+
 function songOf(item: any): SearchSong | null {
   const src = SOURCES[String(item?.source ?? '')]
   const meta = item?.meta ?? {}
@@ -59,7 +75,7 @@ function songOf(item: any): SearchSong | null {
     albumName: String(meta.albumName ?? item?.albumName ?? ''),
     albumId: meta.albumId ?? meta.albumMid,
     interval: parseInterval(item?.interval),
-    img: meta.picUrl || undefined,
+    img: httpsImg(meta.picUrl),
     qualities: Array.isArray(meta.qualitys)
       ? meta.qualitys.map((q: any) => String(q?.type ?? '')).filter(Boolean)
       : undefined,

@@ -32,8 +32,8 @@ const COMMIT = 72
 /** 快速甩：时间短、距离短也算 */
 const FLICK = 30
 const FLICK_MS = 260
-/** 回弹时间 */
-const BACK_MS = 200
+/** 回弹 / 滑出的时间 */
+const BACK_MS = 240
 
 const EASE = 'cubic-bezier(0.32, 0.72, 0.22, 1)'
 
@@ -89,20 +89,41 @@ export function useEdgeBack(opts: {
     let dead = false
     /** 目标层（起手时定下来，中途不再换） */
     let node: HTMLElement | null = null
+    /** 目标层原本的横向位移（`.page-track` 是 -100% 这种，`.page-keep.push` 是 0） */
+    let baseX = 0
+    /** 目标层原本的内联 transform，收尾要原样还回去 */
+    let origTransform = ''
     let dx = 0
 
-    const paint = (n: HTMLElement | null, v: number) => {
-      if (!n) return
-      n.style.transform = v === 0 ? '' : `translate3d(${v}px, 0, 0)`
+    const curX = (n: HTMLElement): number => {
+      const t = getComputedStyle(n).transform
+      if (!t || t === 'none') return 0
+      try {
+        return new DOMMatrixReadOnly(t).m41 || 0
+      } catch {
+        return 0
+      }
     }
 
-    const settle = (n: HTMLElement | null, to: number) => {
+    const paint = (n: HTMLElement | null, x: number) => {
       if (!n) return
+      n.style.transform = `translate3d(${x}px, 0, 0)`
+    }
+
+    const release = (n: HTMLElement | null) => {
+      if (!n) return
+      n.style.transition = ''
+      n.style.transform = origTransform
+    }
+
+    /** 带过渡地滑到 x，结束后解除临时样式 */
+    const settle = (n: HTMLElement | null, x: number, done?: () => void) => {
+      if (!n) { done?.(); return }
       n.style.transition = `transform ${BACK_MS}ms ${EASE}`
-      paint(n, to)
+      paint(n, x)
       window.setTimeout(() => {
-        n.style.transition = ''
-        n.style.transform = ''
+        release(n)
+        done?.()
       }, BACK_MS)
     }
 
@@ -149,11 +170,25 @@ export function useEdgeBack(opts: {
       if (e.cancelable) e.preventDefault()
       if (!node) {
         node = dragLayer()
-        if (node) node.style.transition = 'none'
+        if (node) {
+          /*
+           * 掐掉入场动画，否则这里下面的 translate3d **一点都不生效**。
+           *
+           * 二层页面（`.page-keep.push`）挂着 `page-push` 入场动画，而它的
+           * `animation-fill-mode` 是 both——动画结束后最终帧（transform: none）
+           * 仍然由 animation 接管，而 **CSS 动画的优先级高于内联样式**。
+           * 于是手指在划、页面纹丝不动，松手直接换页：用户说的「能返回，
+           * 但没有动画，看着很生硬」就是这个。
+           */
+          node.style.animation = 'none'
+          node.style.transition = 'none'
+          origTransform = node.style.transform
+          baseX = curX(node)
+        }
       }
       /* 越拖越沉：拖到 200px 之后每多拖一点只跟 0.4，手感上「到头了」 */
       dx = raw <= COMMIT ? raw : COMMIT + (raw - COMMIT) * 0.4
-      paint(node, dx)
+      paint(node, baseX + dx)
     }
 
     const end = () => {
@@ -161,15 +196,40 @@ export function useEdgeBack(opts: {
       armed = false
       const n = node
       node = null
-      if (dead || !n) { settle(n, 0); return }
+      if (dead || !n) { settle(n, baseX); return }
       const ms = performance.now() - t0
       const far = dx >= COMMIT || (ms < FLICK_MS && dx >= FLICK)
-      if (!far) { settle(n, 0); return }
-      /* 先滑出去，再换页：换完这一层就不在文档里了，看不到回弹 */
+      if (!far) { settle(n, baseX); return }
+      /*
+       * 先让「滑出去」这段动画演完，再换页。
+       *
+       * 以前是 paint(innerWidth) 紧跟着 onBack()：React 当帧就把这一层卸载了，
+       * 过渡根本没机会画出来——屏幕上看起来是「啪」一下换页。等 BACK_MS
+       * 再切，用户看到的就是原生那种「当前页右移出屏、下面一页露出来」。
+       *
+       * 整条页面长条（Tab 之间返回首页）也走这一支：它的位移本来就是
+       * `-100%` 这种，往回滑到 baseX + 一屏正好是「露出第一屏」。
+       */
       n.style.transition = `transform ${BACK_MS}ms ${EASE}`
-      paint(n, window.innerWidth)
-      /* 首页 / 没有可退的层：滑出去也得滑回来，别把页面留在屏外 */
-      if (!onBack.current()) settle(n, 0)
+      paint(n, baseX + window.innerWidth)
+      window.setTimeout(() => {
+        const ok = onBack.current()
+        if (!ok) {
+          /* 理论上 canBack 已经挡过；万一没退成，把滑出屏的这层拉回来 */
+          settle(n, baseX)
+          return
+        }
+        /*
+         * 换页成功：**不要碰 transform**。
+         * `.page-track` 的新位移是 React 在 onBack 里刚写进去的，这里再还回
+         * 旧值（origTransform = -100% 之类）会当场跳回上一页。
+         */
+        n.style.transition = ''
+        /* 兜底：如果 onBack 并没有把这一层收掉（仍可见），归位，别让它留在屏外 */
+        if (n.isConnected && n.offsetParent !== null && n.classList.contains('page-keep')) {
+          n.style.transform = origTransform
+        }
+      }, BACK_MS)
     }
 
     const cancel = () => {
@@ -177,7 +237,7 @@ export function useEdgeBack(opts: {
       armed = false
       const n = node
       node = null
-      settle(n, 0)
+      settle(n, baseX)
     }
 
     window.addEventListener('touchstart', start, { capture: true, passive: true })

@@ -260,6 +260,19 @@ private struct LockScreenView: View {
         .padding(.vertical, 12)
         .activityBackgroundTint(syBg)
         .activitySystemActionForegroundColor(syText1)
+        /*
+         * 点卡片（按钮以外的任何地方）打开疏音。
+         *
+         * 这一条是用户 2026-11-23 报的「灵动岛打不开应用，点击了没反应」：
+         * 卡片上原本没有任何 `widgetURL` / `Link`，而封面又变成了
+         * 「点一下切大图」的 Button —— 手指最容易落在封面和整排控制键上，
+         * 剩下的空白区域没有明确的行为，点下去就是什么都不发生。
+         * 显式给整卡挂上 scheme，至少「点卡片 = 回到 App」这条一定会成立。
+         *
+         * scheme 必须在主 App 的 Info.plist 里注册（CI 的 plist 补丁里有），
+         * 否则系统的 url 打不开，点下去依旧没反应。
+         */
+        .widgetURL(URL(string: "shuyin://live"))
     }
 
     /// 普通形态：封面 + 歌名/歌手 + 进度 + 一句词 + 整排控制
@@ -377,6 +390,8 @@ struct ShuyinLiveActivityWidget: Widget {
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    /* 展开态点歌名/歌手也回 App：按钮占掉的地方之外要有明确的落点 */
+                    .widgetURL(URL(string: "shuyin://live"))
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     TimeLabel(state: context.state)

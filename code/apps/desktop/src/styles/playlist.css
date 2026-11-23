@@ -231,3 +231,40 @@
 /* 手机窄屏：歌单行折两行，按钮不出屏 */
 html[data-shell='phone'] .pl-lx-row { flex-wrap: wrap; }
 html[data-shell='phone'] .pl-lx-acts { flex: 1 1 100%; justify-content: flex-end; }
+
+/* ------------------------------------------------------------------ */
+/* 手机 · 导入页的拖放区                                                */
+/*                                                                     */
+/* 桌面是「图标 + 正文 + 格式标签」三列并排。390 宽下标签自己占掉 230px，   */
+/* 正文只剩 70px：「把歌单文件拖进来，或点击选择」被折成 5 行、说明折成    */
+/* 11 行，整块拖放区占了半屏，格式标签还飘在右上（用户原话：「导入歌单     */
+/* 之后那个布局还是有问题，歌单广场里好像是好的」）。                     */
+/* 手机上把格式标签换到第二行，正文就能吃满剩余宽度。                     */
+/* ------------------------------------------------------------------ */
+html[data-shell='phone'] .pl-drop {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+}
+/* 100% - (图标 42 + 间距 12)，正文不再被标签挤成一条窄缝 */
+html[data-shell='phone'] .pl-drop-main { flex: 1 1 calc(100% - 54px); }
+html[data-shell='phone'] .pl-formats {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+html[data-shell='phone'] .pl-drop-main .t { font-size: 14px; line-height: 1.45; }
+html[data-shell='phone'] .pl-drop-main .s { margin-top: 6px; font-size: 11.5px; line-height: 1.65; }
+
+/* 页头：pages.css 的窄屏规则会把它折成 column，问号按钮就掉到说明下面单独占一行。
+   恢复成一行（标题在左、问号在右上），歌单广场那条规则同一个理由。 */
+html[data-shell='phone'] .pl-page .lib-head {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+}
+html[data-shell='phone'] .pl-page .lib-head .lib-actions {
+  width: auto;
+  justify-content: flex-end;
+}
