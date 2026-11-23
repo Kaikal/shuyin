@@ -138,6 +138,16 @@ fn handle_remote_command(cmd: &str) {
     use tauri::Emitter;
 
     let Some(app) = APP.get() else { return };
+    /*
+     * 每一条都留痕。
+     *
+     * 灵动岛按钮的失败是**静默**的（Swift 侧 dlsym 查不到符号就 return，
+     * 系统也不报错），用户看到的就是「点了没反应」。有这一行就能一刀切开：
+     *   · 日志里没有 `live.cmd fav` → intent 根本没被系统执行
+     *     （类型在 Release 下没导出，见 ShuyinIntents.swift 顶部的说明）；
+     *   · 有，但星没翻 → 是推送到 ActivityKit 那一段的问题。
+     */
+    crate::append_log(app, &format!("live.cmd {cmd}"));
     match cmd {
         // 播放暂停直接在 Rust 侧执行：和托盘按钮同一套路数，不依赖前端在跑
         "playpause" => toggle_playback(app),

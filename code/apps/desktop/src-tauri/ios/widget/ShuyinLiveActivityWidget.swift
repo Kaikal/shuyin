@@ -18,6 +18,13 @@ private let syText1 = Color(red: 234 / 255, green: 235 / 255, blue: 241 / 255)
 private let syText2 = Color(red: 155 / 255, green: 158 / 255, blue: 174 / 255)
 private let syAccent = Color(red: 110 / 255, green: 139 / 255, blue: 255 / 255)
 
+/// 点卡片 / 点岛回 App 用的 scheme（主 App 的 Info.plist 里注册了 `shuyin`）。
+///
+/// 不写成 `URL(string:)!` 散落各处：字面量拼错就是「点了没反应」，
+/// 而且 Apple 明确说**同一个视图层级里超过一个 `widgetURL` 行为未定义**，
+/// 所以这里只留一个常量，锁屏卡用它做 `widgetURL`，岛内一律用 `Link`。
+private let syLiveURL = URL(string: "shuyin://live")!
+
 /* ------------------------------------------------------------------ */
 /* 进度换算                                                             */
 /* ------------------------------------------------------------------ */
@@ -153,7 +160,7 @@ private struct TimeLabel: View {
     }
 }
 
-/// 可点的封面。
+/// 可点的封面（**只给锁屏卡用**）。
 ///
 /// 点一下在「大封面」和「普通卡」之间切换（用户参考的是酷狗那张卡：
 /// 点封面换成整块封面，再点换回来）。切换本身不在这里做——发个 intent 出去，
@@ -175,10 +182,30 @@ private struct ArtTap: View {
     }
 }
 
+/// 灵动岛里的封面：**点一下打开 App**，不是切大图。
+///
+/// 为什么不能复用 `ArtTap`（这个是 2026-11-23 用户报「灵动岛打不开 APP」的真凶之一）：
+///   · `big` 只影响**锁屏卡**的形态，岛里没有「大封面」这个展示位——
+///     在岛上点封面，`big` 翻了也看不出任何变化，等于「点了没反应」；
+///   · 更糟的是它是个 `Button`，**Button 会吃掉这次点击**，于是本该
+///     「点一下回 App」的落点被一个没有可见效果的动作占住，App 自然打不开。
+///
+/// 换成 `Link`：核心 WidgetKit 的行为，不依赖 AppIntents / 主进程在不在，
+/// 系统一定会按 URL 激活 App（scheme 在 CI 的 plist 补丁里注册）。
+private struct ArtLink: View {
+    let state: ShuyinActivityAttributes.ContentState
+    let size: CGFloat
+
+    var body: some View {
+        Link(destination: syLiveURL) {
+            Artwork(art: state.art, size: size)
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 控制按钮（iOS 17+）                                                  */
 /* ------------------------------------------------------------------ */
-
 /// 四个按钮：收藏 / 上一首 / 播放暂停 / 下一首。
 ///
 /// 只在 iOS 17 及以上可用：`Button(intent:)` 与 `LiveActivityIntent` 都是
@@ -271,8 +298,11 @@ private struct LockScreenView: View {
          *
          * scheme 必须在主 App 的 Info.plist 里注册（CI 的 plist 补丁里有），
          * 否则系统的 url 打不开，点下去依旧没反应。
+         *
+         * ⚠️ 全工程只有这一处 `widgetURL`（岛内用 `Link`）：
+         * Apple 说同一视图层级里出现多个 `widgetURL` 行为**未定义**。
          */
-        .widgetURL(URL(string: "shuyin://live"))
+        .widgetURL(syLiveURL)
     }
 
     /// 普通形态：封面 + 歌名/歌手 + 进度 + 一句词 + 整排控制
@@ -375,27 +405,38 @@ struct ShuyinLiveActivityWidget: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    ArtTap(state: context.state, size: 46)
+                    /* 岛内封面 = 回 App（见 ArtLink 的注释），不是切大图 */
+                    ArtLink(state: context.state, size: 46)
                         .padding(.leading, 2)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(context.state.title)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        Text(context.state.artist.isEmpty ? "疏音" : context.state.artist)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(1)
+                    /*
+                     * 歌名/歌手整块也是回 App 的落点。
+                     *
+                     * 用 `Link` 而不是 `widgetURL`：同一层级里只能有一个
+                     * `widgetURL`（多行为未定义），而锁屏卡那份已经占了；
+                     * `Link` 还会**优先于**外层的 URL，语义更明确。
+                     */
+                    Link(destination: syLiveURL) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(context.state.title)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                            Text(context.state.artist.isEmpty ? "疏音" : context.state.artist)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    /* 展开态点歌名/歌手也回 App：按钮占掉的地方之外要有明确的落点 */
-                    .widgetURL(URL(string: "shuyin://live"))
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    TimeLabel(state: context.state)
-                        .padding(.trailing, 4)
+                    /* 倒计时那格也回 App：右上角是手指第二个习惯落点 */
+                    Link(destination: syLiveURL) {
+                        TimeLabel(state: context.state)
+                    }
+                    .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 10) {

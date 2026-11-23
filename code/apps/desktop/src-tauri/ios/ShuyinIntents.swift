@@ -23,16 +23,42 @@ private func shuyinForward(_ cmd: String) {
     cmd.withCString { fn($0) }
 }
 
+/*
+ * ⚠️ 下面五个 intent **必须是 `public struct`，成员也必须是 `public`**。
+ *
+ * 这不是洁癖，是功能前提：iOS 记下按钮里的 intent 时用的是「模块名 + 类型名」
+ * 的 mangled name，点击时要在主 App 进程里按名字把类型找回来。
+ * **Release 构建**（`-O` + wholemodule，CI 出的就是这个）会把 `internal`
+ * 类型的元数据当死代码摘掉，系统于是报
+ *   Could not find an intent with identifier ShuyinFavIntent,
+ *   mangledTypeName: Optional("13ShuyinWidget17ShuyinFavIntentV")
+ * 然后**静默什么都不做**——按钮看着能按，按下去没反应，也不报错。
+ * Debug 构建反而正常，所以这个坑在本地试不出来。
+ *
+ * 社区里两条独立确认（Apple 开发者论坛 746696 / 731852）：
+ * 「intent struct must be marked public, else in release mode system cannot
+ *   find your intent」。
+ *
+ * 2026-11-23 用户实测：收藏按钮按下去那颗星不动、点岛上的封面也打不开 App，
+ * 就是这个原因（`perform()` 从来没被调过）。
+ *
+ * 改这些结构体时：加字段要 `public`，`init()` 要 `public`，
+ * `title` / `isDiscoverable` / `openAppWhenRun` 也都要 `public`——
+ * 公开类型的协议见证必须是公开的，少一个都编译不过（或者又变回静默失联）。
+ */
+
 /// 播放 / 暂停。
 @available(iOS 17.0, *)
-struct ShuyinPlayPauseIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "播放/暂停"
+public struct ShuyinPlayPauseIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "播放/暂停"
     /// 不上「快捷指令」列表：这是纯 UI 内部动作，没有参数，暴露出去没意义
-    static var isDiscoverable: Bool = false
+    public static var isDiscoverable: Bool = false
     /// 绝不能把 App 拉到前台——点一下岛就跳出一整个播放页是很讨厌的
-    static var openAppWhenRun: Bool = false
+    public static var openAppWhenRun: Bool = false
 
-    func perform() async throws -> some IntentResult {
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
         shuyinForward("playpause")
         return .result()
     }
@@ -40,12 +66,14 @@ struct ShuyinPlayPauseIntent: LiveActivityIntent {
 
 /// 上一首。
 @available(iOS 17.0, *)
-struct ShuyinPrevIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "上一首"
-    static var isDiscoverable: Bool = false
-    static var openAppWhenRun: Bool = false
+public struct ShuyinPrevIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "上一首"
+    public static var isDiscoverable: Bool = false
+    public static var openAppWhenRun: Bool = false
 
-    func perform() async throws -> some IntentResult {
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
         shuyinForward("prev")
         return .result()
     }
@@ -53,12 +81,14 @@ struct ShuyinPrevIntent: LiveActivityIntent {
 
 /// 下一首。
 @available(iOS 17.0, *)
-struct ShuyinNextIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "下一首"
-    static var isDiscoverable: Bool = false
-    static var openAppWhenRun: Bool = false
+public struct ShuyinNextIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "下一首"
+    public static var isDiscoverable: Bool = false
+    public static var openAppWhenRun: Bool = false
 
-    func perform() async throws -> some IntentResult {
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
         shuyinForward("next")
         return .result()
     }
@@ -68,13 +98,16 @@ struct ShuyinNextIntent: LiveActivityIntent {
 ///
 /// 收藏列表只有前端有一份，所以这里只转发，由前端 `toggleFav` 落地；
 /// 落地后它会带着新的 `fav` 再推一次 ContentState，那颗星才会变实心。
+/// 前两步（Rust 记真值 + 重推）不依赖前端——JS 冻在后台时那颗星也会先翻过来。
 @available(iOS 17.0, *)
-struct ShuyinFavIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "收藏"
-    static var isDiscoverable: Bool = false
-    static var openAppWhenRun: Bool = false
+public struct ShuyinFavIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "收藏"
+    public static var isDiscoverable: Bool = false
+    public static var openAppWhenRun: Bool = false
 
-    func perform() async throws -> some IntentResult {
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
         shuyinForward("fav")
         return .result()
     }
@@ -84,13 +117,17 @@ struct ShuyinFavIntent: LiveActivityIntent {
 ///
 /// 真值在 Rust 侧（`liveactivity::BIG_ART`），这里只发个信号——
 /// 切换本身在那边重推一次 ContentState 完成，不依赖前端 JS 醒着。
+/// 只给**锁屏卡**用。灵动岛里没有「大封面」这回事（那个形态是锁屏专属），
+/// 岛上点封面 = 打开 App（见 widget 里的 `ArtLink`）。
 @available(iOS 17.0, *)
-struct ShuyinToggleArtIntent: LiveActivityIntent {
-    static var title: LocalizedStringResource = "切换封面"
-    static var isDiscoverable: Bool = false
-    static var openAppWhenRun: Bool = false
+public struct ShuyinToggleArtIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "切换封面"
+    public static var isDiscoverable: Bool = false
+    public static var openAppWhenRun: Bool = false
 
-    func perform() async throws -> some IntentResult {
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
         shuyinForward("art")
         return .result()
     }
