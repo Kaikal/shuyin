@@ -461,27 +461,46 @@ export function HomePage({ onOpenLocalPlaylist, onOpenOnlinePlaylist, onOpenLibr
         const buf = typeof raw === 'string'
           ? Uint8Array.from(atob(raw), c => c.charCodeAt(0))
           : new Uint8Array(raw)
-        const { isLxmcBuffer, parseLxmc } = await import('../lib/lxmc')
-        if (isLxmcBuffer(buf)) {
-          const lists = await parseLxmc(buf)
-          if (lists.length) {
-            for (const lx of lists) {
-              if (!lx.tracks.length) continue
-              pl.create(lx.name, { trackIds: lx.tracks.map(t => t.id), origin: 'import', originName: fileName })
-            }
-            const total = lists.reduce((n, l) => n + l.tracks.length, 0)
-            toast(`已导入 ${lists.length} 张歌单 · ${total} 首`, { ok: true })
-            const item = { name: fileName, at: Date.now(), total, matched: total }
-            const recent = (await settings.get<typeof item[]>(KEYS.recentImports)) ?? []
-            void settings.set(KEYS.recentImports, [item, ...recent.filter(x => x.name !== fileName)].slice(0, 5))
-            return
+        /* 不再只认 gzip：明文 JSON 形态的 .lxmc 也有一堆（见 parseLxAny 的注释） */
+        const { parseLxAny } = await import('../lib/lxmc')
+        const lists = await parseLxAny(buf)
+        if (lists.length) {
+          for (const lx of lists) {
+            if (!lx.tracks.length) continue
+            pl.create(lx.name, { trackIds: lx.tracks.map(t => t.id), origin: 'import', originName: fileName })
           }
+          const total = lists.reduce((n, l) => n + l.tracks.length, 0)
+          toast(`已导入 ${lists.length} 张歌单 · ${total} 首`, { ok: true })
+          const item = { name: fileName, at: Date.now(), total, matched: total }
+          const recent = (await settings.get<typeof item[]>(KEYS.recentImports)) ?? []
+          void settings.set(KEYS.recentImports, [item, ...recent.filter(x => x.name !== fileName)].slice(0, 5))
+          return
         }
         toast('无法识别该文件，请确认是洛雪歌单导出的文件', { bad: true })
         return
       }
 
       const text = await bridge.invoke<string>('read_text_abs', { path })
+      /*
+       * `.json` 也可能是洛雪导出的歌单（洛雪允许导出成 json，扩展名就不再是 lxmc）。
+       * 先按洛雪结构认一次：认出来直接建在线歌单，比去曲库里模糊匹配准得多。
+       */
+      if (/\.json$/i.test(fileName)) {
+        const { parseLxText } = await import('../lib/lxmc')
+        const lxLists = parseLxText(text)
+        if (lxLists.length) {
+          for (const lx of lxLists) {
+            if (!lx.tracks.length) continue
+            pl.create(lx.name, { trackIds: lx.tracks.map(t => t.id), origin: 'import', originName: fileName })
+          }
+          const total = lxLists.reduce((n, l) => n + l.tracks.length, 0)
+          toast(`已导入 ${lxLists.length} 张歌单 · ${total} 首`, { ok: true })
+          const item = { name: fileName, at: Date.now(), total, matched: total }
+          const recent = (await settings.get<typeof item[]>(KEYS.recentImports)) ?? []
+          void settings.set(KEYS.recentImports, [item, ...recent.filter(x => x.name !== fileName)].slice(0, 5))
+          return
+        }
+      }
       const parsed = parsePlaylist(text, fileName)
       if (!parsed.songs.length) {
         toast('文件里没有识别到歌曲', { bad: true })

@@ -862,42 +862,34 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
             </button>
           </span>
         </div>
-        <div className="set-row">
-          <span className="set-label">
-            缓存目录
-            <HelpTip
-              text={bridge.isTauri
-                ? '默认在应用数据目录里（和音源同一个家）。\n想换地方就自己选，比如系统盘满了挪到大容量盘；换目录时听过的歌会一起搬过去，不会重下。'
-                : '缓存在应用的私有目录里，跟着系统「清除数据」一起走。\n手机上不提供换位置：系统不允许普通应用随便往任意文件夹写缓存。'}
-            />
-          </span>
-          {/*
-           * 「更改…」只在桌面出现。
-           *
-           * 它走的是 Tauri 的目录选择器（`@tauri-apps/plugin-dialog`），安卓壳里没有
-           * 这套 IPC，点下去 JS 侧直接 `undefined.invoke` 抛错（用户看到的就是
-           * "Cannot read properties of undefined (reading 'invoke')"）。安卓的缓存
-           * 目录本来也是应用私有目录，"换位置"这件事在手机上不成立。
-           */}
-          {bridge.isTauri ? (
-            <span className="set-ctl">
-              <button className="ghost-btn" onClick={() => void pickCacheDir()}>更改…</button>
-              <button className="ghost-btn" onClick={() => void resetCacheDir()} disabled={!cacheCustom}>恢复默认</button>
-            </span>
-          ) : (
-            /* 手机上的右槽不能空着：空着像是「本来该有按钮但没渲染出来」 */
-            <span className="set-ctl"><span className="set-sub">应用私有目录</span></span>
-          )}
-        </div>
-        <div className="set-path">
-          <IconFolder width={13} height={13} />
-          <span className="set-path-text" title={cacheDir}>
-            {cacheDir || '（默认：数据目录下的 cache\\audio）'}
-          </span>
-          <button className="link-btn" disabled={!cacheDir} onClick={() => void bridge.revealInFolder(cacheDir)}>
-            {bridge.isAndroid ? '复制路径' : '打开'}
-          </button>
-        </div>
+        {/*
+         * 缓存目录整块只在桌面出现。
+         *
+         * 手机上的缓存是应用私有目录：既换不了位置，「复制路径 / 打开」也没有任何
+         * 用处（安卓复制出来在文件管理器里也进不去；iOS 压根没有这回事）。
+         * 用户 2026-11-24 的说法很直接：「除了下载歌曲目录，其他目录不显示了，
+         * 反正也打不开」。所以手机上只留上面那行「多大、清空」。
+         */}
+        {bridge.isTauri && (
+          <>
+            <div className="set-row">
+              <span className="set-label">缓存目录</span>
+              <span className="set-ctl">
+                <button className="ghost-btn" onClick={() => void pickCacheDir()}>更改…</button>
+                <button className="ghost-btn" onClick={() => void resetCacheDir()} disabled={!cacheCustom}>恢复默认</button>
+              </span>
+            </div>
+            <div className="set-path">
+              <IconFolder width={13} height={13} />
+              <span className="set-path-text" title={cacheDir}>
+                {cacheDir || '（默认：数据目录下的 cache\\audio）'}
+              </span>
+              <button className="link-btn" disabled={!cacheDir} onClick={() => void bridge.revealInFolder(cacheDir)}>
+                打开
+              </button>
+            </div>
+          </>
+        )}
         {cacheMsg && <div className="cache-msg">{cacheMsg}</div>}
         {/*
          * 旧版本留下的缓存副本：只在真有的时候出现，避免平时多一行看不懂的东西。

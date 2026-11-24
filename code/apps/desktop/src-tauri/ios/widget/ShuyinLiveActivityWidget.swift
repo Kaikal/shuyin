@@ -471,6 +471,22 @@ struct ShuyinLiveActivityWidget: Widget {
                 // 同时挂着两三条岛时只剩这么点地方，只放封面
                 Artwork(art: context.state.art, size: 17)
             }
+            /*
+             * 岛内整块的默认落点 = 回 App。
+             *
+             * 这是 Apple 给 `DynamicIsland` 自己的 `widgetURL(_:)`（文档原话：
+             * 「通过此函数设置的 URL 会成为每个实时活动视图用于深度链接的默认
+             * URL；如果包含 Link，Link 的优先级高于它」）。
+             *
+             * 之前只在封面 / 歌名 / 倒计时三小块上挂 `Link`，岛的其余地方
+             * （展开态的空隙、紧凑态整条胶囊）**没有任何 URL**——手指落在那里
+             * 就是「点了没反应」（用户 2026-11-24 反馈「灵动岛打不开应用」）。
+             * 补上这一条之后，除了那几个按钮，点岛上任何地方都会回 App。
+             *
+             * 注意不能改回「给每个 region 各挂一个 widgetURL」：同一层级多个
+             * widgetURL 是未定义行为，系统只认其中一个，反而可能全都不生效。
+             */
+            .widgetURL(syLiveURL)
             .keylineTint(syAccent)
         }
     }

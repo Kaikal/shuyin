@@ -432,6 +432,15 @@ export function SourcesDirSection() {
     void bridge.sourcesDefaultDir().then(d => setDir(d ?? '')).catch(() => {})
   }, [])
 
+  /*
+   * 手机上不显示这一块。
+   *
+   * 音源清单在应用私有目录里：安卓复制出来的路径在文件管理器里进不去，iOS 更是
+   * 根本看不到这个目录。留着只是一行「打不开的路径」（用户 2026-11-24：
+   * 「除了下载歌曲目录，其他目录不显示了」）。导入入口在音源页，不受影响。
+   */
+  if (!bridge.isTauri) return null
+
   return (
     <section className="set-group" data-pane="storage" data-sec="sources-dir">
       <h3>音源文件</h3>

@@ -72,6 +72,8 @@ pub fn init(app: &AppHandle) {
         let _keep = shuyin_remote_command as *const ();
         std::hint::black_box(_keep);
         ffi::adopt();
+        /* 锁屏歌词：App 进后台后 JS 会被冻住，词得由原生自己往前推 */
+        spawn_lyric_ticker();
     }
 }
 
@@ -91,6 +93,18 @@ pub fn live_activity_sync(state: LiveState) -> Result<(), String> {
         let mut state = state;
         /* 放大封面是「灵动岛上的点击」定的，前端那份 payload 里没有它 */
         state.big = BIG_ART.load(std::sync::atomic::Ordering::Relaxed);
+        /* 刚在岛上翻过收藏：这两秒里别让心跳把星又灭回去（见 FAV_GUARD） */
+        if let Some(v) = fav_guard_of(&state.title) {
+            if state.fav != v {
+                if let Some(app) = APP.get() {
+                    crate::append_log(
+                        app,
+                        &format!("live.fav guard \"{}\" push={} native={v}", state.title, state.fav),
+                    );
+                }
+                state.fav = v;
+            }
+        }
         if let Ok(mut g) = LAST.lock() {
             *g = Some(state.clone());
         }
@@ -100,10 +114,125 @@ pub fn live_activity_sync(state: LiveState) -> Result<(), String> {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* 锁屏歌词：原生自己算当前句                                          */
+/* ------------------------------------------------------------------ */
+
+/// 一整首歌的歌词时间轴（秒, 文本），换歌时整表替换。
+///
+/// 为什么要搬到原生来算：iPhone 上的「桌面歌词」在系统层面做不到（iOS 不允许
+/// 应用往别的 App 上面悬浮窗口，那是安卓的 SAW 权限），能显示歌词的地方只有
+/// 锁屏卡 / 灵动岛。而那张卡的内容由前端推——App 进后台后 WebView 的 JS 会被
+/// 系统冻住，词就停在冻住那一刻（酷狗那边看着「能显示」，是因为它的词由原生算）。
+///
+/// 所以这里存一张表，由下面那条后台线程按播放位置自己算当前句、自己推。
+#[cfg(target_os = "ios")]
+static LYRICS: std::sync::Mutex<(Vec<f64>, Vec<String>)> =
+    std::sync::Mutex::new((Vec::new(), Vec::new()));
+
+/// 一条歌词。字段与安卓 `lyric_timeline` 那条命令一致（`t` 秒 / `x` 文本）。
+#[derive(serde::Deserialize)]
+pub struct LyricLine {
+    #[serde(default)]
+    pub t: f64,
+    #[serde(default)]
+    pub x: String,
+}
+
+/// 前端把整首歌词的时间轴交过来（换歌时还会先发一条空表清场）。
+///
+/// 安卓走的是 Kotlin 那条同名命令；这里补齐 iOS / 桌面，前端才能不分平台地推。
+#[tauri::command]
+pub fn lyric_timeline(lines: Vec<LyricLine>) {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = lines;
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let mut ts = Vec::with_capacity(lines.len());
+        let mut xs = Vec::with_capacity(lines.len());
+        for l in lines {
+            if l.x.is_empty() {
+                continue;
+            }
+            ts.push(l.t);
+            xs.push(l.x);
+        }
+        if let Ok(mut g) = LYRICS.lock() {
+            *g = (ts, xs);
+        }
+    }
+}
+
+/// 按位置取「正在唱的那一句」（空串 = 还没到第一句 / 纯音乐）。
+#[cfg(target_os = "ios")]
+fn line_at(pos: f64) -> String {
+    let Ok(g) = LYRICS.lock() else { return String::new() };
+    let (ts, xs) = &*g;
+    if ts.is_empty() {
+        return String::new();
+    }
+    /* 二分找最后一个 t <= pos */
+    let mut lo = 0usize;
+    let mut hi = ts.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if ts[mid] <= pos {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return String::new();
+    }
+    let mut s = xs[lo - 1].clone();
+    if s.chars().count() > 60 {
+        s = s.chars().take(60).collect();
+    }
+    s
+}
+
+/// 后台线程：每 ~900ms 算一次当前句，变了才推（推一次就消耗一格更新预算）。
+///
+/// 900ms 的取样间隔对歌词足够（句与句之间通常好几秒），而「只有变了才推」
+/// 把真正发出去的次数压到每句一次——进后台听一小时的歌也就几百次，
+/// 和系统给本地更新的额度相比不算过分。JS 醒着的时候两边推的是同一句，
+/// 不会来回跳。
+#[cfg(target_os = "ios")]
+pub fn spawn_lyric_ticker() {
+    std::thread::spawn(|| {
+        let mut last = String::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            let Some(app) = APP.get() else { continue };
+            let Some(p) = app.try_state::<Player>() else { continue };
+            let (playing, pos) = p.playing_and_pos();
+            if !playing {
+                continue;
+            }
+            let line = line_at(pos);
+            if line == last {
+                continue;
+            }
+            let Ok(mut g) = LAST.lock() else { continue };
+            let Some(s) = g.as_mut() else { continue };
+            if s.line == line {
+                last = line;
+                continue;
+            }
+            s.line = line.clone();
+            drop(g);
+            last = line;
+            push_last();
+        }
+    });
+}
+
 /// 收摊：队列清空、停止播放、用户关掉开关时调用。
 #[tauri::command]
-pub fn live_activity_end() -> Result<(), String> {
-    #[cfg(target_os = "ios")]
+pub fn live_activity_end() -> Result<(), String> {    #[cfg(target_os = "ios")]
     {
         if let Ok(mut g) = LAST.lock() {
             *g = None;
@@ -127,6 +256,33 @@ static BIG_ART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// 最后一次推给 Swift 的载荷。
 #[cfg(target_os = "ios")]
 static LAST: std::sync::Mutex<Option<LiveState>> = std::sync::Mutex::new(None);
+
+/// 刚从岛上翻过的收藏值 + 时刻 + 那首歌的标题。
+///
+/// 为什么需要这道闸：`fav` 的真值在前端（收藏列表只有它有一份），所以岛上那颗星
+/// 是「Rust 先乐观翻一次，前端醒来再用真值对齐」。问题在于这两步之间有窗口——
+/// 用户按星的同一瞬间，换句 / 暂停这些心跳也会各推一次 `live_activity_sync`，
+/// 而它们带的是**翻之前**的 `fav`（前端那一刻还没处理完收藏写入）。
+/// 那一条如果落在乐观翻转之后，星就又灭了，用户看到的就是「能收藏，但星不切换」。
+///
+/// 所以：记下刚翻的值，2 秒内同一首歌的推送里 `fav` 与它不一致就不用（用翻过的值）。
+/// 2 秒足够跨过前端那一轮写库 + 重渲染；更久的真值变化（用户回 App 里取消收藏）
+/// 照样能推下来。
+#[cfg(target_os = "ios")]
+static FAV_GUARD: std::sync::Mutex<Option<(String, bool, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// 乐观翻转留下的有效值（同一首歌、2 秒内）。
+#[cfg(target_os = "ios")]
+fn fav_guard_of(title: &str) -> Option<bool> {
+    let Ok(g) = FAV_GUARD.lock() else { return None };
+    let (t, v, at) = (*g).clone()?;
+    if t == title && at.elapsed() < std::time::Duration::from_secs(2) {
+        Some(v)
+    } else {
+        None
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* 灵动岛按钮 → 播放器                                                  */
@@ -171,6 +327,14 @@ fn handle_remote_command(cmd: &str) {
                 if let Ok(mut g) = LAST.lock() {
                     if let Some(s) = g.as_mut() {
                         s.fav = !s.fav;
+                        /*
+                         * 记下「刚翻成什么」，2 秒内挡住心跳里那份旧值
+                         * （前端收藏写入是异步的，见 FAV_GUARD）。
+                         */
+                        if let Ok(mut fg) = FAV_GUARD.lock() {
+                            *fg = Some((s.title.clone(), s.fav, std::time::Instant::now()));
+                        }
+                        crate::append_log(app, &format!("live.fav flip -> {} \"{}\"", s.fav, s.title));
                     }
                 }
             }

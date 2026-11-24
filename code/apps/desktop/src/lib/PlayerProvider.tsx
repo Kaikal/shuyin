@@ -289,8 +289,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 「这一帧报的就是我在等的那一首」。
    */
   const loadIndex = useRef<number | null>(null)
+  /** 这一轮加载是什么时候起的：给「下标对不上但确实在响」留一条兜底 */
+  const loadAt = useRef(0)
   const startLoading = useCallback((immediate = false) => {
     loadingRef.current = true
+    loadAt.current = performance.now()
     window.clearTimeout(loadingTimer.current)
     /*
      * 本地文件几十毫秒就出声，220ms 后再亮转圈（闪一下反而像卡了）。
@@ -1226,7 +1229,26 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           const idx = (p as { index?: number }).index
           const sameTrack = loadIndex.current == null || typeof idx !== 'number' || idx === loadIndex.current
           const durOk = sameTrack && p.duration > 0 && (expect <= 1 || Math.abs(p.duration - expect) < 2)
-          if ((p.playing && sameTrack) || durOk || p.error) stopLoading()
+          if ((p.playing && sameTrack) || durOk || p.error) {
+            stopLoading()
+          } else if (p.playing && typeof idx === 'number' && performance.now() - loadAt.current > 2000) {
+            /*
+             * 「确实在响，但报的下标和我在等的不是同一个」——不能再转下去了。
+             *
+             * iOS 上出现过这个形状（2026-11-24：「歌已经开始，还显示加载中，
+             * 过一会才正常」）：音频早就在放，可 `index` 和我们这一轮记的
+             * 对不上（队列被重排 / 原生那边的下标比前端慢一次），于是
+             * `playing && sameTrack` 永远不成立，只能等 15 秒那条兜底把转圈收掉
+             * ——用户看到的就是「明明响了一首，按钮上还在转」。
+             *
+             * 两秒是给「上一首还在收尾、新的一首还没接上」那段留的余量；
+             * 过了两秒还在响，就认定加载已经完成，顺便把两边的下标对齐，
+             * 后面「试听识别 / 已加载」那些判据才跟着对上。
+             */
+            void bridge.trace(`load idx 不一致：等 ${loadIndex.current} 报 ${idx}，按已在播收尾`)
+            loadIndex.current = idx
+            stopLoading()
+          }
         }
         /*
          * 「取链中」不能比声音活得久。
@@ -1926,7 +1948,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 冻结风险仍然由下面那条 `visibilitychange` 兜：真·点开就锁屏的，那条会再递一次。
    */
   useEffect(() => {
-    if (!isAndroid) return
+    /*
+     * iOS 也要这份预告表。
+     *
+     * 安卓靠它解决「熄屏后放完一首就停」；iOS 是同一个病灶——后台 WebView 的 JS
+     * 会被系统冻住，`ended` 没人接。iOS 原生侧（Rust player）现在也会拿这张表
+     * 自己接下一首（见 player.rs 的曲终检测），这里把表递过去就行。
+     */
+    if (!isAndroid && !isIOS) return
     window.clearTimeout(prefetchTimer.current)
     if (!snapshot.playing) return
     prefetchTimer.current = window.setTimeout(() => { void buildPrefetchRef.current(queueRef.current) }, 1200)
@@ -1939,7 +1968,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 兜住；取链是异步的，能不能跑完看运气，但试一次不亏。
    */
   useEffect(() => {
-    if (!isAndroid || typeof document === 'undefined') return
+    if ((!isAndroid && !isIOS) || typeof document === 'undefined') return
     const onVis = () => {
       if (document.visibilityState === 'hidden') void buildPrefetchRef.current(queueRef.current)
     }
@@ -2212,13 +2241,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    */
   const lastTimeline = useRef('')
   useEffect(() => {
-    if (!isAndroid) return
+    /*
+     * iOS 也推：锁屏卡上的那句词以前靠前端每句推一次，App 一进后台 JS 就被冻住，
+     * 词停在那一刻（用户：「iPhone 没有桌面歌词」）。原生拿到整张表就能自己算
+     * （见 liveactivity 的 line_at）。
+     */
+    if (!isAndroid && !isIOS) return
     /* 切歌立刻清空：新歌开头几秒不该还唱着上一首的歌词 */
     lastTimeline.current = ''
     void bridge.invoke('lyric_timeline', { lines: [] }).catch(() => {})
-  }, [currentId, isAndroid])
+  }, [currentId, isAndroid, isIOS])
   useEffect(() => {
-    if (!isAndroid) return
+    if (!isAndroid && !isIOS) return
     const lines = lyrics?.lines ?? []
     if (!lines.length) return
     const head = lines[0]
@@ -2231,7 +2265,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }).catch(() => { /* 推不过去只是退回老路（前端推当前句），不影响播放 */ })
     /* 真机上没有 logcat 可看：留个记号，排查「锁屏歌词不动」时一眼就知道表有没有送到 */
     try { localStorage.setItem('__tl', `${lines.length}|${Date.now()}`) } catch { /* 隐私模式写不进去 */ }
-  }, [lyrics, isAndroid])
+  }, [lyrics, isAndroid, isIOS])
   useEffect(() => {
     if (!isAndroid) return
     const lines = lyrics?.lines ?? []
@@ -2876,9 +2910,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       void liveSyncNow(
         t, snapRef.current.playing, secs, snapRef.current.duration,
         liveLineOf(lyrics, secs),
+        /*
+         * 收藏态必须跟着一起推。
+         *
+         * 这个参数默认 false，漏传就等于「拖一次进度，岛上那颗星灭掉」——
+         * 用户看到的是「收藏按钮状态不会切换」（2026-11-24 反馈）。
+         */
+        curFavOn,
       )
     }
-  }, [queueState, liveSyncNow, lyrics])
+  }, [queueState, liveSyncNow, lyrics, curFavOn])
 
   /*
    * 锁屏 / 控制中心拖进度条 → 原生那边已经直接 seek 了播放器，这里把 UI 跟上。

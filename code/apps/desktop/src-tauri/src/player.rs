@@ -10,7 +10,7 @@ use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -27,6 +27,13 @@ static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 pub fn set_log_path(p: std::path::PathBuf) {
     let _ = LOG_PATH.set(p);
+}
+
+/// 启动时注入的 AppHandle：原生自动接下一首时要顺手更新系统媒体卡片。
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+pub fn attach_app(app: tauri::AppHandle) {
+    let _ = APP.set(app);
 }
 
 fn log_line(line: &str) {
@@ -955,12 +962,36 @@ pub struct PlayerSnapshot {
     pub index: i64,
     /// 曲终（一次性，读取后复位）
     pub ended: bool,
+    /// 原生自己接上了下一首时，报它接到的下标（-1 = 没有）。
+    ///
+    /// 前端拿它把队列下标对齐（见 PlayerProvider 的 `auto` 处理）：
+    /// App 在后台时 JS 会被系统摁住，`ended` 推过去也没人接——所以
+    /// 「放完自动下一首」必须由原生自己完成，前端醒来后对齐即可。
+    pub auto: i64,
     /// 正在执行 seek（见 `Shared::seeking`）。前端拿到 true 时不要用 position 回写进度条
     pub seeking: bool,
     /// 播放错误（一次性，读取后复位）：格式不支持 / 文件损坏 / 设备异常
     pub error: Option<String>,
     /// 在线曲目已缓冲到的秒数（本地曲目恒为 0）。进度条画淡色第二层用
     pub buffered: f64,
+}
+
+/// 前端事先递过来的「接下来几首」直链。
+///
+/// 和安卓的 `next_prefetch` 是同一件事：原生手里有下一首的地址，曲终就能自己接，
+/// 不用等 JS（iOS 后台会把 JS 冻住，等它接就是「放完这首就没了」）。
+#[derive(Clone)]
+pub struct PrefetchItem {
+    pub index: usize,
+    pub path: Option<String>,
+    pub url: Option<String>,
+    pub duration: f64,
+    /// 元信息：原生接下一首时顺手把系统媒体卡片（锁屏 / 控制中心）一起更新，
+    /// 否则会停在上一首的歌名上，直到用户回到 App。
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub cover: String,
 }
 
 pub struct Shared {
@@ -984,6 +1015,10 @@ pub struct Shared {
     pub remote: AtomicBool,
     pub index: AtomicUsize,
     pub ended: AtomicBool,
+    /// 原生自动接上下一首时记下的下标（-1 = 没有，见 PlayerSnapshot::auto）
+    pub auto: AtomicI64,
+    /// 前端递来的预告表（FIFO）：曲终就取队头自己放
+    pub prefetch: Mutex<VecDeque<PrefetchItem>>,
     /// seek 进行中。
     ///
     /// `Cmd::Seek` 要在音频线程里排队，处理前 `position_base` 还是旧值，
@@ -1013,6 +1048,8 @@ impl Default for Shared {
             remote: AtomicBool::new(false),
             index: AtomicUsize::new(usize::MAX),
             ended: AtomicBool::new(false),
+            auto: AtomicI64::new(-1),
+            prefetch: Mutex::new(VecDeque::new()),
             seeking: AtomicBool::new(false),
             error: Mutex::new(None),
             spectrum: Arc::new(Spectrum::default()),
@@ -1050,6 +1087,8 @@ impl Player {
         let shared = Arc::new(Shared::default());
         let (tx, rx) = mpsc::channel::<Cmd>();
         let sh = shared.clone();
+        /* 原生自动接下一首要往自己这条通道里塞一条 Play（见下面的曲终检测） */
+        let tx_self = tx.clone();
 
         std::thread::spawn(move || {
             let mut stream = match OutputStreamBuilder::open_default_stream() {
@@ -1193,6 +1232,7 @@ impl Player {
                         sh.index.store(usize::MAX, Ordering::SeqCst);
                         sh.playing.store(false, Ordering::SeqCst);
                         sh.ended.store(false, Ordering::SeqCst);
+                        sh.auto.store(-1, Ordering::SeqCst);
                         sh.seeking.store(false, Ordering::SeqCst);
                         sh.spectrum.clear();
                     }
@@ -1296,6 +1336,57 @@ impl Player {
                         *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = dur;
                         *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (dur, Instant::now());
                         *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        /*
+                         * **先问预告表：有下一首就自己接，不交给前端。**
+                         *
+                         * iOS 在后台会把 WebView 的 JS 冻住，`ended` 推过去没人接，
+                         * 用户听到的就是「放完这首就停」（2026-11-24 反馈）。
+                         * 这里直接按下一条命令，走的是和「用户点歌」完全同一条
+                         * 加载路径（同一套解码 / 缓冲 / 错误处理）。
+                         *
+                         * 接不上（表空 / 那首取链失败）才退回老路：置 `ended`，
+                         * 等前端醒来自己 next。
+                         */
+                        let next = sh
+                            .prefetch
+                            .lock()
+                            .ok()
+                            .and_then(|mut q| q.pop_front());
+                        if let Some(n) = next {
+                            let src = match (&n.url, &n.path) {
+                                (Some(u), _) if !u.is_empty() => TrackSrc::Url(u.clone()),
+                                (_, Some(p)) if !p.is_empty() => TrackSrc::File(p.clone()),
+                                _ => TrackSrc::Url(String::new()),
+                            };
+                            if !src.as_str().is_empty() {
+                                sh.auto.store(n.index as i64, Ordering::SeqCst);
+                                /*
+                                 * 系统媒体卡片（锁屏 / 控制中心）现在就换歌名：
+                                 * 等前端醒来再换的话，新歌已经响着、卡片还挂在上一首。
+                                 */
+                                if let Some(app) = APP.get() {
+                                    crate::smtc::update(
+                                        app,
+                                        n.title.clone(),
+                                        n.artist.clone(),
+                                        n.album.clone(),
+                                        true,
+                                        n.cover.clone(),
+                                        0.0,
+                                        n.duration,
+                                    );
+                                }
+                                log_line(&format!("auto -> idx={} \"{}\"", n.index, n.title));
+                                let _ = tx_self.send(Cmd::Play {
+                                    src,
+                                    index: n.index,
+                                    duration_hint: n.duration,
+                                    start_at: 0.0,
+                                    autoplay: true,
+                                });
+                                continue;
+                            }
+                        }
                         sh.ended.store(true, Ordering::SeqCst);
                     }
                 }
@@ -1341,10 +1432,30 @@ impl Player {
         start_at: f64,
         autoplay: bool,
     ) -> Result<(), String> {
+        /*
+         * 任何**用户发起**的播放都清掉「原生自动接上一首」的标记。
+         *
+         * 这个标记是给前端对账用的（前端醒来发现队列下标和它不一致就跟着对齐）。
+         * 用户自己点了别的歌，前一次自动接的那首就翻篇了——不清的话，前端下一次
+         * 醒来会被一个过期的下标把队列拉回去。
+         */
+        self.shared.auto.store(-1, Ordering::SeqCst);
         self.tx
             .send(Cmd::Play { src, index, duration_hint, start_at, autoplay })
             .map_err(|e| e.to_string())
     }
+
+    /// 换一份预告表（前端在「当前这首已经在放」之后递过来）。
+    ///
+    /// 整表替换而不是追加：前端每次给的都是一份完整的「接下来几首」，
+    /// 追加会让同下标越堆越多，曲终接上一首几年前递的旧地址。
+    pub fn set_prefetch(&self, items: Vec<PrefetchItem>) {
+        if let Ok(mut q) = self.shared.prefetch.lock() {
+            q.clear();
+            q.extend(items);
+        }
+    }
+
     pub fn pause(&self) {
         let _ = self.tx.send(Cmd::Pause);
     }
@@ -1380,6 +1491,18 @@ impl Player {
         self.shared.spectrum.snapshot()
     }
 
+    /// 只读一次「在播 + 当前位置」。
+    ///
+    /// 给锁屏歌词那条线程用：`snapshot()` 会把 `ended` 这类一次性标记读走，
+    /// 后台线程抢着读就等于把「曲终」这条消息吞掉，前端永远等不到——
+    /// 所以这里走单独一份不消费标记的入口。
+    pub fn playing_and_pos(&self) -> (bool, f64) {
+        (
+            self.shared.playing.load(Ordering::SeqCst),
+            current_position(&self.shared),
+        )
+    }
+
     pub fn snapshot(&self) -> PlayerSnapshot {
         let sh = &self.shared;
         let remote = sh.remote.load(Ordering::SeqCst);
@@ -1404,6 +1527,7 @@ impl Player {
             track_url: if remote { track } else { None },
             index: sh.index.load(Ordering::SeqCst) as i64,
             ended: sh.ended.swap(false, Ordering::SeqCst),
+            auto: sh.auto.load(Ordering::SeqCst),
             seeking: sh.seeking.load(Ordering::SeqCst),
             error: sh.error.lock().unwrap_or_else(|e| e.into_inner()).take(),
             buffered,

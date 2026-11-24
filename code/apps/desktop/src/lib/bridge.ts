@@ -57,6 +57,14 @@ export interface IncomingFile {
   size: number
   /** 内容里能不能找到洛雪脚本的痕迹（`@name` / `module.exports` / `musicUrl`） */
   source: boolean
+  /**
+   * 暂存失败的原因（读不出来 / 超过 32MB / 写不进暂存目录）。
+   *
+   * 以前这几条路上原生是**静默 return**，用户点完「用疏音打开」什么都不发生，
+   * 只能得到「打不开」这个结论。现在把原因带回来，前端提示一句——
+   * 至少能分清是权限、格式还是文件太大。
+   */
+  error?: string
 }
 
 export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

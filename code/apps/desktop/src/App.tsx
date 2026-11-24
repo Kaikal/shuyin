@@ -722,11 +722,21 @@ export function App() {
     const seen = new Set<string>()
 
     const ask = async (f: IncomingFile | null) => {
-      if (!alive || !f?.path) return
+      if (!alive || !f) return
       if (f.id) {
         if (seen.has(f.id)) return
         seen.add(f.id)
       }
+      /*
+       * 原生那边没读成文件时会带 error 回来（stage_open_failed 写的 pending.json）。
+       * 以前这种情形是静默 return —— 用户点了「用疏音打开」屏幕上什么都不会发生，
+       * 只能靠猜。现在把原因直接说给他。
+       */
+      if (f.error) {
+        toast(`打不开「${f.name || '这个文件'}」：${f.error}`, { bad: true })
+        return
+      }
+      if (!f.path) return
       if (isPlaylistFile(f.name)) {
         pushIncomingPlaylist({ path: f.path, name: f.name })
         /*

@@ -423,6 +423,52 @@ fn play_url(
     )
 }
 
+/// 预告表：前端把「接下来几首」已经取到的直链递过来。
+///
+/// 为什么需要它（iOS 独有）：后台播放时 WebView 的 JS 会被系统冻住，
+/// 曲终推 `ended` 过去没人接，用户听到的就是「放完这首就停」。
+/// 原生手里有下一首的地址就能自己接（见 player.rs 的曲终检测）。
+///
+/// 和安卓的 `next_prefetch` 是同一件事、同一份 payload（前端只写一次）。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrefetchIn {
+    index: i64,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    duration: f64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    artist: String,
+    #[serde(default)]
+    album: String,
+    #[serde(default)]
+    cover: String,
+}
+
+#[tauri::command]
+fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
+    let list = items
+        .into_iter()
+        .filter(|i| i.index >= 0)
+        .map(|i| player::PrefetchItem {
+            index: i.index as usize,
+            path: i.path.filter(|p| !p.is_empty()),
+            url: i.url.filter(|u| !u.is_empty()),
+            duration: i.duration.max(0.0),
+            title: i.title,
+            artist: i.artist,
+            album: i.album,
+            cover: i.cover,
+        })
+        .collect();
+    player.set_prefetch(list);
+}
+
 /* ------------------------------------------------------------------ */
 /* 出网（绕 CORS 的平台 API 代理）                                      */
 /* ------------------------------------------------------------------ */
@@ -1502,12 +1548,41 @@ fn read_scoped(url: &tauri::Url) -> Option<Vec<u8>> {
     }
 }
 
+/// 「用疏音打开」失败时留一张便条给前端。
+///
+/// 以前这条链路上每一步都是静默 `return`：用户点完「用疏音打开」什么都不发生，
+/// 只能得出「打不开」这个结论，我们这边也无从判断是权限、格式还是大小。
+/// 现在把原因写进 pending.json，前端弹一句，日志里也留一份。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn stage_open_failed(app: &AppHandle, name: &str, msg: &str) {
+    crate::append_log(app, &format!("open-file: {msg}"));
+    let Some(inbox) = open_file_inbox(app) else { return };
+    let _ = std::fs::create_dir_all(&inbox);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let obj = serde_json::json!({
+        "id": format!("{now}-{name}"),
+        "path": "",
+        "name": name,
+        "size": 0,
+        "source": false,
+        "error": msg,
+    });
+    let _ = std::fs::write(inbox.join("pending.json"), obj.to_string());
+}
+
 /// 把「用疏音打开」送进来的文件摆到 inbox 上。
 ///
 /// 只落盘、不推送：Apple 平台的冷启动打开早于 WebView 就绪，推事件必丢；
 /// 前端启动 / 回到前台时用 `take_open_file` 取一次，天然不漏。
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {    let Ok(src) = url.to_file_path() else { return };
+fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
+    let Ok(src) = url.to_file_path() else {
+        stage_open_failed(app, "open-file", "系统给的不是本地文件地址");
+        return;
+    };
     let Some(inbox) = open_file_inbox(app) else { return };
     let _ = std::fs::create_dir_all(&inbox);
     let raw = src
@@ -1531,14 +1606,36 @@ fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {    let Ok(src) = url.t
     #[cfg(target_os = "ios")]
     let bytes = match read_scoped(url) {
         Some(b) => b,
-        None => return,
+        None => {
+            /*
+             * 安全作用域那条路走不通时再试一次「直接读」。
+             *
+             * 「用疏音打开」有两种落地方式：真正的 in-place（沙箱外的 URL，
+             * 必须先 startAccessingSecurityScopedResource）和系统把文件先拷进
+             * 我们容器里的 `Documents/Inbox/…`（这种本来就在沙箱内，不需要授权）。
+             * 以前只有前一条路，后一种会静默失败——用户看到的就是
+             * 「用疏音打开文件不能用」（2026-11-24）。
+             */
+            match std::fs::read(&src) {
+                Ok(b) => b,
+                Err(e) => {
+                    stage_open_failed(app, &raw, &format!("读不出这个文件：{e}"));
+                    return;
+                }
+            }
+        }
     };
     #[cfg(not(target_os = "ios"))]
-    let Ok(bytes) = app.fs().read(FilePath::Url(url.clone())) else { return };
+    let Ok(bytes) = app.fs().read(FilePath::Url(url.clone())) else {
+        stage_open_failed(app, &raw, "读不出这个文件");
+        return;
+    };
     if bytes.len() > 32 * 1024 * 1024 {
+        stage_open_failed(app, &raw, "文件超过 32MB，不像是音源或歌单");
         return;
     }
     if std::fs::write(&dest, &bytes).is_err() {
+        stage_open_failed(app, &raw, "写不进暂存目录");
         return;
     }
     let head: String = String::from_utf8_lossy(&bytes).chars().take(6000).collect();
@@ -1558,6 +1655,10 @@ fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {    let Ok(src) = url.t
         "source": looks,
     });
     let _ = std::fs::write(inbox.join("pending.json"), obj.to_string());
+    crate::append_log(
+        app,
+        &format!("open-file: staged {raw} {}B source={looks}", bytes.len()),
+    );
 }
 
 /// 把 iOS 冷启动攒下的 URL 摆到 inbox。
@@ -3156,6 +3257,8 @@ pub fn run() {
             app.manage(player);
             // 音频线程没有 AppHandle，日志路径从这儿注入（打包版 stderr 看不到）
             crate::player::set_log_path(log_path(app.handle()));
+            /* 曲终自动接下一首要顺手更新系统媒体卡片（锁屏/控制中心），那边要 AppHandle */
+            crate::player::attach_app(app.handle().clone());
 
             /* ---- 移动端（iOS）：**必须**在这里显式建窗 ----
              *
@@ -3389,12 +3492,14 @@ pub fn run() {
             hotkeys_apply,
             hotkeys_clear,
             player_state,
+            next_prefetch,
             play_file,
             play_url,
             net_request,
             smtc_update,
             liveactivity::live_activity_sync,
             liveactivity::live_activity_end,
+            liveactivity::lyric_timeline,
             read_cover_data_url,
             update_dmg_install,
             probe_audio_url,

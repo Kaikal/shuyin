@@ -3609,8 +3609,22 @@ html[data-shell='phone'] .imm-mp-stage {
    * 用户：「我不要上下露出一个边缘，只要拖动的时候有下一个进来的动画」。
    * 所以邻居在这里默认 `opacity: 0`（见下），只有真正开始竖着拖
    * （stage[data-slide='1']）才显形——静止时上下只有阴影，没有别的封面。
+   *
+   * 46：唱片那张的阴影是 `0 26px 60px`，模糊半径 60 意味着它会在盘沿外
+   * 再铺开将近 60px。原来只留 26px，阴影被裁成一条硬边（2026-11-24 用户：
+   * 「唱片周围总是有一个正方形的黑色阴影」）。
    */
-  --mp-peek: 26px;
+  --mp-peek: 46px;
+  /*
+   * 左右同理。**这是方形阴影的真正来源**：`.imm-mp-clip` 的宽度以前就写成
+   * `--mp-size`，也就是和唱片一样宽，`overflow: hidden` 于是把左右两侧
+   * 的阴影齐着盘沿切掉了——上下还能露一点、左右完全贴边，看上去就是一个
+   * 方形的暗框（两个手机端都能看到，因为都是 phone 壳）。
+   *
+   * 给 clip 多留出两侧的呼吸位，唱片本身仍按 `--mp-size` 居中，
+   * 视觉尺寸一点没变。
+   */
+  --mp-bleed: 56px;
 }
 html[data-shell='phone'] .imm-mp-stage[data-vinyl='true'] {
   --mp-size: clamp(190px, min(100vw - 88px, 44vh), 316px);
@@ -3624,7 +3638,8 @@ html[data-shell='phone'] .imm-mp-clip {
    */
   place-content: center;
   overflow: hidden;
-  width: var(--mp-size);
+  /* 宽度 = 内容宽 + 两侧阴影呼吸位（见 stage 上 --mp-bleed 的注释） */
+  width: calc(var(--mp-size) + 2 * var(--mp-bleed));
   /* 只留「当前封面 + 上下各一条」这么高，轨道其余部分裁掉。
      max-height 兜住矮屏：stage 装不下时就少露一点，别把歌名顶下去。 */
   height: calc(var(--mp-size) + 2 * var(--mp-peek));

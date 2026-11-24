@@ -101,6 +101,39 @@ export async function parseLxmc(input: Uint8Array): Promise<LxPlaylist[]> {
   return parseLxmcText(text)
 }
 
+/**
+ * 按「是不是压缩包」自己选路：gzip 就解压，否则当纯文本 JSON 读。
+ *
+ * 为什么不能只认 gzip：洛雪不同版本导出的 `.lxmc` 形态不一样——
+ * v2 是 gzip 容器，但也有人（以及部分第三方工具）直接存成明文 JSON，
+ * 文件名还叫 `.lxmc`。以前 `isLxmcBuffer` 一判死就弹「这个 .lxmc 打不开」，
+ * 安卓上「音源能导、洛雪歌单导不进来」正是这个（2026-11-24 反馈）。
+ */
+export async function parseLxAny(input: Uint8Array): Promise<LxPlaylist[]> {
+  if (isLxmcBuffer(input)) {
+    const lists = await parseLxmc(input)
+    if (lists.length) return lists
+    /* gzip 解压成功但结构不认识：继续按明文再试一次（有些工具会压两层/带 BOM） */
+  }
+  return parseLxText(decodeText(input))
+}
+
+/** 字节 → 文本：优先 UTF-8（洛雪就是 UTF-8），带 BOM 时去掉 */
+export function decodeText(input: Uint8Array): string {
+  let s = ''
+  try {
+    s = new TextDecoder('utf-8').decode(input)
+  } catch {
+    s = String.fromCharCode(...Array.from(input.slice(0, 4096)))
+  }
+  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s
+}
+
+/** 已解码的文本 → 歌单列表（空数组 = 不是洛雪歌单） */
+export function parseLxText(text: string): LxPlaylist[] {
+  return parseLxmcText(text)
+}
+
 /** 已解压的 JSON 文本 → 歌单列表（v2 的 data 数组 / v1 的平铺对象都认） */
 function parseLxmcText(text: string): LxPlaylist[] {
   let root: any

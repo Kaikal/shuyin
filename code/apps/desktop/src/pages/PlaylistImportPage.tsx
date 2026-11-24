@@ -14,7 +14,7 @@ import {
   matchSongs, parsePlaylist,
   type MatchOutcome, type ParsedPlaylist,
 } from '../lib/playlistImport'
-import { isLxmcBuffer, parseLxmc, type LxPlaylist } from '../lib/lxmc'
+import { parseLxAny, parseLxText, type LxPlaylist } from '../lib/lxmc'
 import { onIncomingPlaylist } from '../lib/incoming'
 import { toast } from '../lib/toast'
 import { queueToast } from '../lib/queueToast'
@@ -93,22 +93,21 @@ export function PlaylistImportPage({ onBack }: { onBack?(): void }) {
         const buf = typeof raw === 'string'
           ? Uint8Array.from(atob(raw), c => c.charCodeAt(0))
           : new Uint8Array(raw)
-        if (isLxmcBuffer(buf)) {
-          const lists = await parseLxmc(buf)
-          if (lists.length) {
-            setFile({ name, path })
-            setParsed(null)
-            setOutcome(null)
-            setLxLists(lists)
-            const total = lists.reduce((n, l) => n + l.tracks.length, 0)
-            const item: RecentImport = { name, at: Date.now(), total, matched: total }
-            setRecent(prev => {
-              const next = [item, ...prev.filter(x => x.name !== name)].slice(0, 5)
-              void settings.set(KEYS.recentImports, next)
-              return next
-            })
-            return
-          }
+        /* gzip 与明文 JSON 两种形态都认（见 parseLxAny） */
+        const lists = await parseLxAny(buf)
+        if (lists.length) {
+          setFile({ name, path })
+          setParsed(null)
+          setOutcome(null)
+          setLxLists(lists)
+          const total = lists.reduce((n, l) => n + l.tracks.length, 0)
+          const item: RecentImport = { name, at: Date.now(), total, matched: total }
+          setRecent(prev => {
+            const next = [item, ...prev.filter(x => x.name !== name)].slice(0, 5)
+            void settings.set(KEYS.recentImports, next)
+            return next
+          })
+          return
         }
         setFile({ name, path })
         setParsed(null)
@@ -119,6 +118,27 @@ export function PlaylistImportPage({ onBack }: { onBack?(): void }) {
       }
 
       const text = await bridge.invoke<string>('read_text_abs', { path })
+      /*
+       * `.json` 里也可能是洛雪歌单（洛雪能把歌单导出成 json）。
+       * 认出来就直接走「在线歌单」这条更准的路，不进模糊匹配。
+       */
+      if (/\.json$/i.test(name)) {
+        const lxLists = parseLxText(text)
+        if (lxLists.length) {
+          setFile({ name, path })
+          setParsed(null)
+          setOutcome(null)
+          setLxLists(lxLists)
+          const total = lxLists.reduce((n, l) => n + l.tracks.length, 0)
+          const item: RecentImport = { name, at: Date.now(), total, matched: total }
+          setRecent(prev => {
+            const next = [item, ...prev.filter(x => x.name !== name)].slice(0, 5)
+            void settings.set(KEYS.recentImports, next)
+            return next
+          })
+          return
+        }
+      }
       const pr = parsePlaylist(text, name)
       setLxLists(null)
       if (!pr.songs.length) {
