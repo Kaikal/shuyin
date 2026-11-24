@@ -124,8 +124,27 @@ object FloatingLyrics {
     )
     private var colorIdx = 0
 
+    /** 胶囊底板：接近黑的一层玻璃（ARGB 206 = 八成不透明，压得住亮壁纸又不糊住词） */
+    private val CAPSULE_BG = Color.argb(206, 16, 18, 26)
+    /** 胶囊描边：一圈几乎看不见的白，浅色壁纸上才分得出边界 */
+    private val CAPSULE_LINE = Color.argb(46, 255, 255, 255)
+
     fun toggle(ctx: Context) {
         if (shown) hide() else show(ctx)
+    }
+
+    /**
+     * 点胶囊右侧那颗图标 → 回 App。
+     *
+     * 浮窗本身不关：用户点图标多半是想去搜别的歌 / 看歌词页，切回来还要接着看词。
+     * 拉不起来（系统拦了后台启动）就静默——那颗图标本来只是顺手。
+     */
+    private fun openApp(ctx: Context) {
+        try {
+            val i = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: return
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            ctx.startActivity(i)
+        } catch (_: Exception) { /* 没权限拉 Activity：不影响听歌 */ }
     }
 
     /**
@@ -179,47 +198,67 @@ object FloatingLyrics {
                 }
 
                 /*
-                 * 歌词板：两行字 + 右上角的 ×，两者叠在同一个 FrameLayout 里。
+                 * **胶囊字幕条**（2026-11-24 用户按酷狗那张图定稿）。
                  *
-                 * **窗宽就是整屏宽**（2026-11-01 用户定稿）：字幕条铺满屏幕，
-                 * 上排贴左、下排贴右，整条压在其他应用上面，不随句子长短伸缩。
-                 * 预算给满屏宽，板子内部再扣掉内边距和 × 的让位。
+                 * 窗还是满屏宽（拖动、夹边界都按满宽算，简单可靠），但内容收成
+                 * 居中的一条胶囊：左边一句歌词、右边一颗 App 图标，跟用户在
+                 * OPPO 上看到的酷狗桌面歌词同一个形状。
+                 *
+                 * 和早先「满屏两行字幕」的区别：
+                 *   · 只画**当前句**（胶囊里塞两行就成一块小板了，用户要的是一条）；
+                 *   · 下一句仍然收在前端推送里（`pendingNext`），展开态如果要看
+                 *     还能加回来，这里只是不画；
+                 *   · 底板交给胶囊自己画，画布 `plateColor = 0`——两层圆角叠一起
+                 *     会露出「板中板」。
                  */
-                val budgetW = screenW
-                /* 两行**同一个字号**（2026-11-01 用户要求）：字幕条不做「大字+小字」的层级 */
-                val board = LyricBoard(ctx, null, 17f, 17f).apply {
+                val budgetW = (screenW - dp(104)).coerceAtLeast(dp(120))
+                val board = LyricBoard(ctx, null, 15f, 12f).apply {
                     maxWidth = budgetW
+                    alignCenter = true
+                    reserveClose = false
+                    plateColor = 0
                     hl = Color.parseColor(PALETTE[colorIdx].second)
-                    setLines(pendingCur, pendingNext, pendingProg, pendingFlip)
+                    setLines(pendingCur, "", pendingProg, false)
                     fallback = pendingTitle
                 }
-                val holder = FrameLayout(ctx)
-                /* 板子撑满整屏宽：底板就是一条全宽字幕条，字在上排贴左、下排贴右 */
-                holder.addView(board, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-                /* 右上角常驻关闭键：不点歌词、不出色板也能一秒关掉 */
-                val close = TextView(ctx).apply {
-                    text = "×"
-                    setTextColor(Color.parseColor("#F2F3F7"))
-                    textSize = 17f
-                    gravity = Gravity.CENTER
-                    setPadding(0, 0, 0, dp(2))
+                /* 右端那颗 App 图标：点一下回 App（酷狗那颗 K 就是这个用途） */
+                val appIcon = android.widget.ImageView(ctx).apply {
+                    setImageDrawable(
+                        try { ctx.packageManager.getApplicationIcon(ctx.packageName) } catch (_: Exception) { null },
+                    )
+                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(3), dp(3), dp(3), dp(3))
                     background = GradientDrawable().apply {
                         shape = GradientDrawable.OVAL
-                        setColor(Color.argb(126, 10, 12, 18))
+                        setColor(Color.argb(60, 255, 255, 255))
                     }
-                    setOnClickListener { hide() }
-                    contentDescription = "关闭悬浮歌词"
+                    contentDescription = "打开疏音"
+                    setOnClickListener { openApp(ctx) }
                 }
-                holder.addView(
-                    close,
-                    FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP or Gravity.END).apply {
-                        topMargin = dp(3)
-                        marginEnd = dp(5)
-                    },
+
+                val capsule = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(2), dp(2), dp(4), dp(2))
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(24).toFloat()
+                        setColor(CAPSULE_BG)
+                        setStroke(dp(1).coerceAtLeast(1), CAPSULE_LINE)
+                    }
+                    elevation = dp(6).toFloat()
+                }
+                capsule.addView(board, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+                capsule.addView(
+                    appIcon,
+                    LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(2) },
                 )
-                closeBtn = close
-                col.addView(holder, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                /*
+                 * 关闭入口从这颗胶囊上拿掉了：图上的酷狗也没有 ×（它从 App 里关）。
+                 * 我们的两个入口还在——通知栏第四颗「词」按钮、播放页更多面板里那颗开关。
+                 */
+                closeBtn = null
+                col.addView(capsule, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
                 /* 胶囊底：三颗播控和七颗色点各自一枚，浮在别人家界面上一根细线就够 */
                 fun pill(alpha: Int) = GradientDrawable().apply {
@@ -485,7 +524,8 @@ object FloatingLyrics {
             syncPlayIcon(PlaybackService.playingNow())
             val b = lyric ?: return@post
             b.fallback = pendingTitle
-            b.setLines(cur, next, prog, flip)
+            /* 胶囊只有一行（见建窗处的说明）：下一句照收不误，但这里不画 */
+            b.setLines(cur, "", prog, false)
             /* 换句会改窗宽：宽了就把窗往左拉回屏幕内，别被系统裁掉一截 */
             root?.post { clampPos() }
         }
@@ -573,7 +613,8 @@ object FloatingLyrics {
             bar?.visibility = View.GONE
             cancelBarTimer()
         }
-        lyric?.plateColor = if (on) PLATE_COLOR else 0
+        /* 底板由胶囊那层 GradientDrawable 画，画布自己不再铺（会叠出「板中板」） */
+        lyric?.plateColor = 0
         lyric?.invalidate()
         /* 窗口是 WRAP_CONTENT，显隐改了高度，得主动 relayout 一次 */
         root?.let { c -> lp?.let { p -> try { wm?.updateViewLayout(c, p) } catch (_: Exception) {} } }

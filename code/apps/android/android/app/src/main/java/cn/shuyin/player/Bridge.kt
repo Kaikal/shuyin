@@ -346,13 +346,20 @@ class Bridge(private val web: WebView) {
          */
         "next_prefetch" -> {
             val items = a.optJSONArray("items") ?: org.json.JSONArray()
+            /* 表是从第几首算起的：曲终要靠它对起点，对不上就整表作废 */
+            val base = a.optInt("base", -1)
             /*
              * 服务没起来就先存着，别丢。前端一挂载就算预告，那时常常还没播，
              * service 尚未 start——原来这里 `instance?.` 一空就整表扔掉，
              * 后面队列不再变化也就不会重发，原生手里一首都没有（播完即停）。
              */
             val svc = PlaybackService.instance
-            if (svc != null) svc.setPrefetch(items) else PlaybackService.pendingPrefetch = items
+            if (svc != null) {
+                svc.setPrefetch(items, base)
+            } else {
+                PlaybackService.pendingPrefetch = items
+                PlaybackService.pendingPrefetchBase = base
+            }
             null
         }
         "smtc_update" -> {

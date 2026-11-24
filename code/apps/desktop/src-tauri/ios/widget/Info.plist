@@ -25,5 +25,13 @@
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.widgetkit-extension</string>
 	</dict>
+	<!--
+	  Apple 的文档把「高频更新」这个键写在**宿主 App** 的 Info.plist 里
+	  （CI 的 plist 补丁已经加了一份）。这里在扩展上也放一份纯属兜底：
+	  不带它时系统按低频额度限流，播放/暂停、换歌、歌词这些推送会被静静丢掉——
+	  表现是「岛上的播放键一直不动」「倒计时走完了歌还在播」，而 App 里一切正常。
+	-->
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 </dict>
 </plist>

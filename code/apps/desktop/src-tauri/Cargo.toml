@@ -52,6 +52,11 @@ hex = "0.4"
 rayon = "1.10"
 # 封面转 data URL（iOS 的 Live Activity 扩展读不到 App 沙箱，只能把图塞进状态里）
 base64 = "0.22"
+# 封面缩略图：原生自己接下一首时，手里只有封面**网址**，而两个消费方都不认网址——
+#   · MPMediaItemArtwork 要文件/内存里的图；
+#   · Live Activity 的 ContentState 只放得下 4KB，得是一张 72×72 的小 JPEG。
+# 只开解码所需的那几种格式，不要默认的那一大堆（体积和编译时间都花在没用的地方）。
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 # 出网：平台 API 代理（绕 CORS）+ 在线曲目流式读取（HTTP Range）
 # 用系统 TLS（Windows=schannel），不额外打包根证书

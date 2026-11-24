@@ -18,7 +18,7 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 
 /* 分片大小见下方 SEG_BYTES：单连接按需拉的旧做法已由分段并发取代 */
 
-fn agent() -> &'static ureq::Agent {
+pub(crate) fn agent() -> &'static ureq::Agent {
     static A: OnceLock<ureq::Agent> = OnceLock::new();
     A.get_or_init(|| {
         let mut b = ureq::AgentBuilder::new()

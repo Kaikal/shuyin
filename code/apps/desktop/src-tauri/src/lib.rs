@@ -7,15 +7,17 @@
 
 pub mod db;
 pub mod hotkeys;
-
 /// 构建标识：真机 `app.log` 第一行会写出来。
 ///
 /// 每次出**诊断包**就把这里改一下。未签名 IPA 由用户自己重签安装，版本号
 /// 又长期不动，光看界面分不出手里这份是不是刚下的——上一轮就白排查了一天。
-pub const BUILD_TAG: &str = "2026-11-24.diag2";
+pub const BUILD_TAG: &str = "2026-11-24.diag3";
+/// 封面小图（原生接歌时给系统卡 / 灵动岛补封面）
+pub mod coverart;
 #[cfg(target_os = "ios")]
 pub mod ios_openurl;
 pub mod liveactivity;
+pub mod lyrics_pip;
 pub mod net;
 #[cfg(desktop)]
 pub mod platform_login;
@@ -471,7 +473,7 @@ struct PrefetchIn {
 }
 
 #[tauri::command]
-fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
+fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>, base: Option<i64>) {
     let list: Vec<_> = items
         .into_iter()
         .filter(|i| i.index >= 0)
@@ -491,8 +493,13 @@ fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
      * 「后台放完一首就停」的第一嫌疑就是表空——而表空有两种原因：
      * 前端没算出来（send=0），或者根本没递到（这一行就看得出来）。
      */
-    crate::player::log(&format!("pf recv n={}", list.len()));
-    player.set_prefetch(list);
+    crate::player::log(&format!(
+        "pf recv n={} base={}",
+        list.len(),
+        base.map(|b| b.to_string()).unwrap_or_else(|| "-".into())
+    ));
+    /* base 决定这张表可不可信（见 Shared::pf_base 的说明） */
+    player.set_prefetch(list, base.map(|b| b.max(0) as usize));
 }
 
 /// 原生取链上下文：接下来能播的歌 + 取链原料 + 启用的音源脚本。
@@ -756,6 +763,20 @@ async fn update_dmg_install(
 ///
 /// 有了它，耳机按键才会路由到本应用，「音量键浮层 / 锁屏」上也会显示歌名——
 /// 这两件事是同一个机制（SMTC），不做就只能靠 RegisterHotKey 碰运气。
+/// 开关「桌面歌词（画中画）」，返回开关之后的真值。
+///
+/// iOS 专用：安卓那条是系统悬浮窗（`float_lyric_toggle`，走 Kotlin），
+/// 桌面端是独立的歌词窗口。这里只在 iOS 有实体，其它平台恒 false。
+#[tauri::command]
+fn pip_lyric_toggle() -> bool {
+    crate::lyrics_pip::toggle()
+}
+
+#[tauri::command]
+fn pip_lyric_state() -> bool {
+    crate::lyrics_pip::on()
+}
+
 #[tauri::command]
 fn smtc_update(
     app: AppHandle,
@@ -766,11 +787,12 @@ fn smtc_update(
     cover: Option<String>,
     position: Option<f64>,
     duration: Option<f64>,
+    fav: Option<bool>,
 ) {
     /*
-     * 前四个参数四个平台一样；后三个只有 Apple 用得上（Windows 的 SMTC
+     * 前四个参数四个平台一样；后四个只有 Apple / 安卓用得上（Windows 的 SMTC
      * 也能吃封面和进度，但那条 Update() 路径得单独打开，先不混进来）。
-     * 用 Option 是为了让老前端（没传这三个字段）照样能调。
+     * 用 Option 是为了让老前端（没传这几个字段）照样能调。
      */
     smtc::update(
         &app,
@@ -781,6 +803,7 @@ fn smtc_update(
         cover.unwrap_or_default(),
         position.unwrap_or(0.0),
         duration.unwrap_or(0.0),
+        fav.unwrap_or(false),
     );
 }
 
@@ -1881,9 +1904,21 @@ fn delete_source_script(path: String) -> Result<(), String> {
 #[tauri::command]
 fn pause(player: State<'_, Player>) {
     player.pause();
-}#[tauri::command]
-fn resume(player: State<'_, Player>) {
-    player.resume();
+    /*
+     * 用户自己按的暂停：iOS 那条「耳机回来接着放」的意图作废。
+     * 不作废的话，「蓝牙断开 → 在 App 里按暂停 → 耳机重连」会自己响起来。
+     */
+    smtc::clear_route_intent();
+}
+
+/// 恢复播放：返回「原生手里到底有没有播放器」。
+///
+/// 前端拿这个返回值当分界线：`true` = 一个 resume 就够；`false` = 播放器已经
+/// 没了（被 Stop 收掉 / 上一轮加载失败），这时前端**立刻**重新加载，而不是
+/// 干等 900ms 的回查超时再推倒重来（那一段用户听到的是「咔一下、转圈、又从头放」）。
+#[tauri::command]
+fn resume(player: State<'_, Player>) -> bool {
+    player.resume()
 }
 
 #[tauri::command]
@@ -3628,6 +3663,8 @@ pub fn run() {
             net_request,
             smtc_update,
             liveactivity::live_activity_sync,
+            pip_lyric_toggle,
+            pip_lyric_state,
             liveactivity::live_activity_end,
             liveactivity::lyric_timeline,
             read_cover_data_url,

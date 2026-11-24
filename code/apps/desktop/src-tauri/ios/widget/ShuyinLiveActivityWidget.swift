@@ -189,16 +189,41 @@ private struct ArtTap: View {
 ///     在岛上点封面，`big` 翻了也看不出任何变化，等于「点了没反应」；
 ///   · 更糟的是它是个 `Button`，**Button 会吃掉这次点击**，于是本该
 ///     「点一下回 App」的落点被一个没有可见效果的动作占住，App 自然打不开。
-///
-/// 换成 `Link`：核心 WidgetKit 的行为，不依赖 AppIntents / 主进程在不在，
-/// 系统一定会按 URL 激活 App（scheme 在 CI 的 plist 补丁里注册）。
 private struct ArtLink: View {
     let state: ShuyinActivityAttributes.ContentState
     let size: CGFloat
 
     var body: some View {
-        Link(destination: syLiveURL) {
+        OpenTap {
             Artwork(art: state.art, size: size)
+        }
+    }
+}
+
+/// 「点一下回 App」的通用包装。
+///
+/// iOS 17 走 `ShuyinOpenIntent`（`openAppWhenRun = true`，在主 App 进程里跑完
+/// 就把 App 拉到前台）。**不再依赖 `Link` / `widgetURL`**：2026-11-24 实测，
+/// Safari 里输 `shuyin://live` 能跳进来（scheme 正常），但同一台机器上点岛里的
+/// 歌名/封面/倒计时全部没反应——说明 Live Activity 里「按 URL 激活 App」这条链
+/// 会被系统吞掉。同一张卡上的播放/收藏键（也是 intent）却是好的，所以回 App
+/// 也改走 intent。
+///
+/// iOS 16 没有 `Button(intent:)`，那边退回 `Link`（锁屏卡仍然有 `widgetURL`）。
+private struct OpenTap<Content: View>: View {
+    private let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        if #available(iOS 17.0, *) {
+            Button(intent: ShuyinOpenIntent()) { content() }
+                .buttonStyle(.plain)
+                .tint(.white)
+        } else {
+            Link(destination: syLiveURL) { content() }
         }
     }
 }
@@ -411,13 +436,10 @@ struct ShuyinLiveActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.center) {
                     /*
-                     * 歌名/歌手整块也是回 App 的落点。
-                     *
-                     * 用 `Link` 而不是 `widgetURL`：同一层级里只能有一个
-                     * `widgetURL`（多行为未定义），而锁屏卡那份已经占了；
-                     * `Link` 还会**优先于**外层的 URL，语义更明确。
+                     * 歌名/歌手整块也是回 App 的落点（见 `OpenTap` 的注释：
+                     * 这里换成 intent，`Link` 在岛上不灵）。
                      */
-                    Link(destination: syLiveURL) {
+                    OpenTap {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(context.state.title)
                                 .font(.system(size: 15, weight: .semibold))
@@ -433,16 +455,24 @@ struct ShuyinLiveActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     /* 倒计时那格也回 App：右上角是手指第二个习惯落点 */
-                    Link(destination: syLiveURL) {
+                    OpenTap {
                         TimeLabel(state: context.state)
                     }
                     .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 10) {
-                        /* 展开态整块居中排，歌词居中比左对齐更像「字幕」 */
-                        LyricLine(text: context.state.line, centered: true)
-                        ProgressBar(state: context.state)
+                        /*
+                         * 展开态整块居中排，歌词居中比左对齐更像「字幕」。
+                         * 歌词 + 进度条这一块也包一层「回 App」：用户的手指
+                         * 最容易落在这两行上，而它们原本什么都不会发生。
+                         */
+                        OpenTap {
+                            VStack(spacing: 10) {
+                                LyricLine(text: context.state.line, centered: true)
+                                ProgressBar(state: context.state)
+                            }
+                        }
                         if #available(iOS 17.0, *) {
                             Controls(state: context.state)
                         }

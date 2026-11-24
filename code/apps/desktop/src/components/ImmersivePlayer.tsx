@@ -247,8 +247,16 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
   const [qualSheet, setQualSheet] = useState(false)
   /* 定时关闭（安卓）：真值在原生，这里只负责弹面板 */
   const [sleepSheet, setSleepSheet] = useState(false)
-  /* 安卓桌面歌词（悬浮窗）的开关态。真值在原生侧，这里只是界面上那几处开关的显示 */
+  /* 手机桌面歌词的开关态（安卓 = 系统悬浮窗，iOS = 画中画字幕）。真值在原生侧 */
   const [floatOn, setFloatOn] = useState(false)
+  /*
+   * 两个平台都有「桌面歌词」，但落地通道完全不同：
+   *   · 安卓：`SYSTEM_ALERT_WINDOW` 悬浮窗（Kotlin `FloatingLyrics`）
+   *   · iOS：画中画（`AVSampleBufferDisplayLayer` 自绘，见 ShuyinLyricsPiP.swift）
+   * 命令名分开，前端只按平台选一条。
+   */
+  const hasFloat = isAndroid || isIOS
+  const floatStateCmd = isAndroid ? 'float_lyric_state' : 'pip_lyric_state'
   /*
    * 浮窗自己带「×」之后，原生侧会单方面把窗关掉，本地这份 state 就过期了。
    *
@@ -258,11 +266,11 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * 「桌面歌词的开关显示不准确」有一半是这里）。
    */
   useEffect(() => {
-    if (!open || !isAndroid) return
-    void bridge.invoke<{ on: boolean }>('float_lyric_state')
-      .then(r => setFloatOn(!!r?.on))
+    if (!open || !hasFloat) return
+    void bridge.invoke<boolean | { on: boolean }>(floatStateCmd)
+      .then(r => setFloatOn(typeof r === 'boolean' ? r : !!r?.on))
       .catch(() => { /* 命令不存在就保持原样 */ })
-  }, [open])
+  }, [open, hasFloat, floatStateCmd])
   /*
    * 浮窗自己那颗 ×、以及窗口被系统回收，原生都会推一条 `float://state`。
    * 以前只靠「每次打开面板时问一次」，面板开着的时候窗被关掉，开关还亮着——
@@ -288,11 +296,11 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * （个别 ROM 上 onResume 早于页面可见）。
    */
   useEffect(() => {
-    if (!isAndroid) return
+    if (!hasFloat) return
     const sync = () => {
       if (document.visibilityState === 'hidden') return
-      void bridge.invoke<{ on: boolean }>('float_lyric_state')
-        .then(r => setFloatOn(!!r?.on))
+      void bridge.invoke<boolean | { on: boolean }>(floatStateCmd)
+        .then(r => setFloatOn(typeof r === 'boolean' ? r : !!r?.on))
         .catch(() => { /* 命令不存在就保持原样 */ })
     }
     const off = onNative('app://resume', sync)
@@ -308,6 +316,19 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
    * 现在两边都走这里，状态只认原生返回的那份。
    */
   const toggleFloat = () => {
+    /*
+     * iOS：画中画没有「权限」这一步，`pip_lyric_toggle` 直接返回开关后的真值。
+     * 第一次开要在**前台**建好窗口，之后 App 一进后台系统就把它浮起来。
+     */
+    if (isIOS) {
+      void bridge.invoke<boolean>('pip_lyric_toggle').then(on => {
+        setFloatOn(!!on)
+        toast(on
+          ? '桌面歌词已开启：切到别的应用或回桌面就会浮起来'
+          : '桌面歌词已关闭')
+      }).catch(() => toast('桌面歌词没能开启（系统画中画不可用）'))
+      return
+    }
     void bridge.invoke<{ on: boolean; needPermission?: boolean }>('float_lyric_toggle').then(r => {
       setFloatOn(!!r?.on)
       if (r?.needPermission) toast('请先允许「显示在其他应用上层」，再打开桌面歌词')
@@ -1401,16 +1422,13 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
         <IconLyric width={13} height={13} />
         <span className="it-lbl">{mobile ? (pager === 'lyric' ? '封面' : '歌词页') : (solo ? '播放页' : '全屏歌词')}</span>
       </button>
-      {/* 桌面端 = 独立歌词窗口；安卓 = 系统悬浮窗（走原生，状态见 toggleFloat）。
-          **iOS 没有这颗**：系统禁止跨应用悬浮窗，桌面歌词在 iPhone 上做不出来
-          （歌词由灵动岛 / 锁屏卡承担，见 liveactivity）。以前这里落到桌面那一支，
-          点了只是把状态翻一下、屏幕上什么都不出现。 */}
-      {!isIOS && (
-        <button className="imm-tool" onClick={isAndroid ? toggleFloat : onToggleLyrics}
-          aria-pressed={isAndroid ? floatOn : lyricsOn} title="桌面歌词">
-          <IconDesktopLyric width={13} height={13} /> <span className="it-lbl">桌面歌词</span>
-        </button>
-      )}
+      {/* 桌面端 = 独立歌词窗口；手机 = 系统级浮层（安卓悬浮窗 / iOS 画中画）。
+          iOS 这条以前被整颗拿掉过，理由是「系统不允许跨应用悬浮窗」——那句只对
+          悬浮窗成立，画中画是另一条合法通道（酷狗的桌面歌词就是它）。 */}
+      <button className="imm-tool" onClick={hasFloat ? toggleFloat : onToggleLyrics}
+        aria-pressed={hasFloat ? floatOn : lyricsOn} title="桌面歌词">
+        <IconDesktopLyric width={13} height={13} /> <span className="it-lbl">桌面歌词</span>
+      </button>
       <button className="imm-tool" data-panel-toggle onClick={onOpenQueue} title="播放列表 (Q)">
         <IconQueue width={13} height={13} /> <span className="it-lbl">列表</span>
       </button>
@@ -1425,13 +1443,12 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
   const immMenu: MenuItem[] = t ? [
     { id: 'detail', label: '歌曲详情', icon: <IconInfo width={13} height={13} />, onSelect: onOpenDetail },
     { id: 'queue', label: '播放列表', icon: <IconQueue width={13} height={13} />, onSelect: onOpenQueue },
-    /* iOS 没有桌面歌词（系统禁止跨应用悬浮窗），右键菜单里这一项跟着收掉 */
-    ...(isIOS ? [] : [{
+    {
       id: 'lyrics',
-      label: (isAndroid ? floatOn : lyricsOn) ? '关闭桌面歌词' : '打开桌面歌词',
+      label: (hasFloat ? floatOn : lyricsOn) ? '关闭桌面歌词' : '打开桌面歌词',
       icon: <IconDesktopLyric width={13} height={13} />,
-      onSelect: isAndroid ? toggleFloat : onToggleLyrics,
-    }]),
+      onSelect: hasFloat ? toggleFloat : onToggleLyrics,
+    },
     {
       id: 'full', label: full ? '退出全屏' : '全屏',
       icon: <IconFullscreen width={13} height={13} />, onSelect: () => void toggleFull(),
@@ -2632,9 +2649,9 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
               else setSolo(true)
             },
           },
-          /* 安卓专属：真正的悬浮窗歌词（其他应用上层），开关在原生侧持久。
+          /* 手机专属：系统级浮层歌词（安卓悬浮窗 / iOS 画中画），开关真值在原生。
              名字说的是它实际的样子——浮在桌面/别的应用上，就是「桌面歌词」 */
-          ...(isAndroid ? [{
+          ...(hasFloat ? [{
             id: 'float', label: '桌面歌词', sw: true, on: floatOn, keepOpen: true,
             onClick: toggleFloat,
           }] : []),

@@ -144,6 +144,10 @@ jobs:
           # 实时活动（灵动岛 / 锁屏）：不写这个键，Activity.request 直接抛错，
           # 岛永远不出现——而且系统不给任何提示，纯靠这个键
           d['NSSupportsLiveActivities'] = True
+          # 高频更新。不写这个键，系统按「低频」额度限流：播放/暂停、换歌、
+          # 歌词这些推送会被静静丢掉——表现就是「岛上的播放键一直不动」
+          # 「倒计时走完了歌还在播」（2026-11-24 反馈），而 App 里一切正常。
+          d['NSSupportsLiveActivitiesFrequentUpdates'] = True
           # ---- 自定义 scheme：让实时活动的 widgetURL 能把人带回 App ----
           # Live Activity 里的 `.widgetURL` 必须是一个**已注册**的 scheme，
           # 系统才会去打开宿主 App；没注册的表现就是「点了没反应」。
@@ -401,7 +405,7 @@ jobs:
           ls -l "$APP"/Assets.car 2>/dev/null || true
           echo "--- 文件关联（决定「用疏音打开」里有没有我们）"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$APP/Info.plist" 2>/dev/null || echo "(没有 CFBundleDocumentTypes)"
-          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations NSSupportsLiveActivities; do
+          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations NSSupportsLiveActivities NSSupportsLiveActivitiesFrequentUpdates; do
             printf "%s = " "$k"
             /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null | head -3 || echo "(缺失)"
           done

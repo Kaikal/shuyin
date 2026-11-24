@@ -228,6 +228,30 @@ const cleanLibrary = (list: LocalTrack[]): LocalTrack[] =>
 
 const Ctx = createContext<PlayerCtx | null>(null)
 
+/**
+ * 原生那一帧状态里「这次 resume 有没有落脚点」需要看的几个字段。
+ *
+ * **两套命名都要认**：Tauri（iOS / 桌面）走 camelCase，安卓的 Kotlin 桥是 snake_case。
+ * 以前这里只写了 snake_case，于是 iOS 上 `track_path` 恒为 undefined →
+ * 「原生手里有没有这首」永远判成没有 → 点播放走不到「一个 resume 就够」那条路，
+ * 而是掉进重新加载（用户听到「咔一下、转圈、又从头放一遍」）。
+ */
+type LiveProbe = {
+  index?: number
+  playing?: boolean
+  want?: boolean
+  trackPath?: string | null
+  trackUrl?: string | null
+  track_path?: string | null
+  track_url?: string | null
+}
+
+/** 这一帧里「原生手上有没有一首已经加载好的歌」 */
+function hasNativeSource(live: LiveProbe | null): boolean {
+  if (!live) return false
+  return !!(live.trackPath || live.trackUrl || live.track_path || live.track_url)
+}
+
 export function usePlayer(): PlayerCtx {
   const c = useContext(Ctx)
   if (!c) throw new Error('usePlayer must be used within PlayerProvider')
@@ -1933,7 +1957,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       pfSentSig.current = sig
       pfSentAt.current = Date.now()
     }
-    void bridge.invoke('next_prefetch', { items }).catch(() => { /* 桌面端没有这条命令 */ })
+    /*
+     * `base` 必须一起递：预告表是 FIFO，原生曲终只认队头。用户连点几下「下一首」
+     * 之后队列早就跑到第 8 首了，这张表还停在从第 5 首算的 `[6,7,8,9]`——
+     * 队头一取，唱的就是**前面**那首（2026-11-24 反馈「自动切换切到前面的歌」）。
+     * 原生拿 `base` 和「此刻真正在放的第几首」对一下，对不上就整表作废走 relay。
+     */
+    void bridge.invoke('next_prefetch', { items, base: base.index }).catch(() => { /* 桌面端没有这条命令 */ })
     } finally {
       pfBusy.current = false
       pfRunningIdx.current = -1
@@ -2040,21 +2070,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 「当前下标在表里的位置」自己找下一首。只有队列 / 顺序 / 音质真的变了才
    * 重推一次——否则几千首的歌单每换一首就要序列化几 MB，那才是真的卡。
    */
-  useEffect(() => {
-    /*
-     * 只有 iOS 需要：桌面 JS 永远活着，安卓是 Kotlin 引擎自己接歌。
-     * 在安卓上白调一次只会得到「没有这条命令」，没必要。
-     */
-    if (!isIOS) return
-    let cancelled = false
-    /*
-     * 防抖：切歌单时队列会连着变好几次（先清空再填），
-     * 500ms 把这一串压成一次推送。
-     */
-    const timer = window.setTimeout(() => { void (async () => {
+  const pushChainNow = useCallback(async () => {
       try {
         const quality = onlineQuality ?? (await getPreferredQuality())
-        if (cancelled) return
         const q = queueRef.current
         /*
          * 走一遍「从当前这首开始的一整张歌单」。
@@ -2091,7 +2109,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             return nativeChainItem(track, index, quality)
           })
           .filter(Boolean) as unknown as Array<Record<string, unknown>>
-        if (!items.length || cancelled) return
+        if (!items.length) return
         await bridge.invoke('native_chain', {
           payload: {
             scripts: nativeScripts(),
@@ -2104,7 +2122,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } catch {
         /* 原料凑不齐不影响正常播放：原生接不上会退回老路 */
       }
-    })() }, 500)
+  }, [onlineQuality, advance])
+
+  /*
+   * 最新一版挂到 ref：`visibilitychange` 那条 effect 是空依赖，拿不到新闭包。
+   * （渲染期赋值，和 `buildPrefetchRef` 同一套做法）
+   */
+  const pushChainRef = useRef(pushChainNow)
+  pushChainRef.current = pushChainNow
+
+  useEffect(() => {
+    /*
+     * 只有 iOS 需要：桌面 JS 永远活着，安卓是 Kotlin 引擎自己接歌。
+     * 在安卓上白调一次只会得到「没有这条命令」，没必要。
+     */
+    if (!isIOS) return
+    let cancelled = false
+    /*
+     * 防抖：切歌单时队列会连着变好几次（先清空再填），
+     * 500ms 把这一串压成一次推送。
+     */
+    const timer = window.setTimeout(() => { if (!cancelled) void pushChainRef.current() }, 500)
     return () => { cancelled = true; window.clearTimeout(timer) }
     /*
      * 注意这里**没有 `queueState.index`**。
@@ -2129,6 +2167,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if ((!isAndroid && !isIOS) || typeof document === 'undefined') return
     const onVis = () => {
       if (document.visibilityState === 'hidden') {
+        /*
+         * 两条路一起走，因为它们死后**互相不能替代**：
+         *   · 原料表（native_chain）：同步拼、同步发，冻结前一定落得下；
+         *     原生靠它现场取链，是「无限后台」的底座。
+         *   · 直链表（buildPrefetch）：要 await 取链，冻结后就跑不完，
+         *     能递几首算几首——有它曲终就不用等取链。
+         */
+        void pushChainRef.current()
         void buildPrefetchRef.current(queueRef.current)
         return
       }
@@ -2884,18 +2930,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     window.clearTimeout(resumeGuard.current)
     const at = snapRef.current.position
     let tries = 0
-    const check = () => {
+    const check = async () => {
       resumeGuard.current = 0
       /* 用户在这段里又按了暂停：那就该停着，别替他放 */
       if (autoCancel.current) return
-      const live = lastKnownPlayerState() as { playing?: boolean; want?: boolean; track_path?: string | null; track_url?: string | null } | null
+      /*
+       * **现问一次原生**，别信缓存帧。
+       *
+       * `player://state` 是 250ms 一帧的广播，但 iOS 从后台回来 / WebView 被挂起过
+       * 那段时间里事件流是断的，`lastKnownPlayerState()` 拿到的是**冻结前**的那一帧
+       * （playing=false）。照它判就是「其实已经出声了，却被判成死路 → 重新加载」，
+       * 用户听到「咔一下、转圈、又从头放」（2026-11-24 反馈）。
+       */
+      const fresh = (await bridge.playerState().catch(() => null)) as LiveProbe | null
+      const cached = lastKnownPlayerState() as LiveProbe | null
+      const live = fresh ?? cached
       if (live && live.playing === true) return
+      const hasSrc = !!(live?.trackPath || live?.trackUrl || live?.track_path || live?.track_url)
       /*
        * 原生说「我要播，只是还没出声」（`want === true`）：那是在准备，
        * 不是死路。再给它一次机会——网络曲目 prepare + 首段缓冲偶尔真的超过 900ms，
        * 这时候推倒重来反而会让进度归零、白等一轮。最多再看两次。
        */
-      if (live?.want === true && (live.track_path || live.track_url) && tries < 2) {
+      if (live?.want === true && hasSrc && tries < 2) {
         tries += 1
         resumeGuard.current = window.setTimeout(check, 1200)
         return
@@ -2925,15 +2982,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const ep = bumpEpoch()
     const nowPlaying = snapRef.current.playing
     const t0 = currentTrack(queueState)
-    const live = lastKnownPlayerState() as {
-      index?: number
-      track_path?: string | null
-      track_url?: string | null
-      want?: boolean
-      playing?: boolean
-    } | null
-    const onNative = !!t0 && !!live && live.index === queueState.index
-      && (!!live.track_path || !!live.track_url)
+    const live = lastKnownPlayerState() as LiveProbe | null
+    /*
+     * `hasNativeSource` 同时认 camelCase（Tauri）和 snake_case（安卓）。
+     * 只认后者的话 iOS 上恒为假——这条分支从来没走到过，
+     * 于是每次「暂停 → 播放」都掉进重新加载。
+     */
+    const onNative = !!t0 && !!live && live.index === queueState.index && hasNativeSource(live)
+
+    /*
+     * 留痕：这一下点下去到底走进了哪条分支。
+     *
+     * 「暂停后点播放会转圈、还从头放一遍」这类问题只看结果猜不出来——是
+     * resume 没落脚（`onNative` 假）、是原生手里没播放器、还是回查把「其实
+     * 已经在出声」判成了死路。这一行把当时的判据全带上，下一份 app.log 就能
+     * 直接对上（`trace` 和原生日志共用一条时间轴）。
+     */
+    void bridge.trace(
+      `toggle ${nowPlaying ? 'play->pause' : 'pause->play'} idx=${queueState.index}` +
+      ` onNative=${onNative ? 1 : 0} load=${loadingRef.current ? 1 : 0}` +
+      ` want=${live?.want === true ? 1 : 0} live=${live?.playing === true ? 1 : 0}` +
+      ` dur=${(snapshot.duration || 0).toFixed(0)}`,
+    )
 
     /*
      * **①「还没有声音，但已经在往响的路上」——这一下是「停」。**
@@ -2977,8 +3047,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       snapRef.current = { ...snapRef.current, playing: true }
       setSnapshot(s => ({ ...s, playing: true }))
       loadedRef.current = trackKey(t0!)
-      armResumeGuard(t0!, queueState.index)
-      void bridge.resume(ep, 'toggle:resume-native')
+      /*
+       * 先问原生「这个 resume 能救回来吗」。
+       *
+       * 答 `true`：照旧，一个 resume 落地，再挂 900ms 的回查兜底。
+       * 答 `false`：播放器已经不在了（被 Stop 收掉 / 上一轮加载失败）。
+       *   以前这种要等回查超时（900ms + 最多两次 1.2s 的重试）才推倒重来，
+       *   而 resume 落空的那一下会先让界面「转一下」，用户听到的就是
+       *   「咔一下、转圈、又从头放一遍」（2026-11-24 反馈）。现在当场重载。
+       */
+      void bridge.resume(ep, 'toggle:resume-native').then(alive => {
+        if (alive) {
+          armResumeGuard(t0!, queueState.index)
+          return
+        }
+        const at = snapRef.current.position
+        void bridge.trace(`resume 落空 idx=${queueState.index} at=${at.toFixed(1)} -> 直接重载`)
+        playWant.current = null
+        autoCancel.current = false
+        lastPlayedIndex.current = queueState.index
+        startLoad(t0!, queueState.index, { startAt: at, autoplay: true, why: 'toggle:reload-dead' })
+      })
       return
     }
     /*

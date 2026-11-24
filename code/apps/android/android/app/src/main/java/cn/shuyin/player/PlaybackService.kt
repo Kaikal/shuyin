@@ -114,6 +114,10 @@ class PlaybackService : Service() {
         @Volatile
         var pendingPrefetch: org.json.JSONArray? = null
 
+        /** 上面那张表的起点（和它一起存，否则补收时会把起点丢掉） */
+        @Volatile
+        var pendingPrefetchBase: Int = -1
+
         /** 频段数：和桌面 Rust 侧一致（40 段对数分箱） */
         const val BANDS = 40
 
@@ -275,6 +279,18 @@ class PlaybackService : Service() {
     private val prefetch = java.util.ArrayDeque<Prefetch>()
 
     /**
+     * 上面那张表**从哪一首算起**（前端递表那一刻的队列下标）。
+     *
+     * 表是 FIFO，曲终只认队头。用户连点几次「下一首」之后队列已经跑到第 8 首，
+     * 表还停在从第 5 首算的 `[6,7,8,9]`——队头一取，唱的就是**前面**那首。
+     * 所以曲终先对起点：对不上就整表作废，交回前端（`endedFlag`）。
+     * （iOS 侧同样的坑，见 `player.rs` 的 `take_next_prefetch`。）
+     * `Int.MIN_VALUE` = 前端没给起点（老版本 / 补收），按老规矩信任这张表。
+     */
+    @Volatile
+    private var prefetchBase = Int.MIN_VALUE
+
+    /**
      * 上一次「原生自己接上了下一首」的队列下标，`-1` = 没有。
      *
      * 一直挂在 `player://state` 里，直到前端主动发来新的 `next_prefetch`
@@ -326,8 +342,9 @@ class PlaybackService : Service() {
          * 队列时最典型：index 没变，effect 不会再触发。
          */
         pendingPrefetch?.let { p ->
+            val b = pendingPrefetchBase
             pendingPrefetch = null
-            setPrefetch(p)
+            setPrefetch(p, b)
         }
         createChannel()
         /*
@@ -401,6 +418,11 @@ class PlaybackService : Service() {
                 IntentFilter().apply { addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY) },
             )
         } catch (_: Exception) { /* 同上：注册不上只是少了这个贴心动作 */ }
+        /* 耳机重连自动恢复：配着 noisyRx 一起挂，缺一个就是「断了就再也回不来」 */
+        try {
+            (getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                .registerAudioDeviceCallback(deviceCb, Handler(Looper.getMainLooper()))
+        } catch (_: Exception) { /* 个别 ROM 限制：只是不会自动恢复，手动点一下照样放 */ }
         startTick()
     }
 
@@ -543,7 +565,20 @@ class PlaybackService : Service() {
             "key:prev" -> action("prev")
             "key:next" -> action("next")
             // 收藏也回前端：收藏列表只有前端有一份
-            "key:fav" -> action("fav")
+            "key:fav" -> {
+                /*
+                 * 先把那颗心翻过来，再回前端。
+                 *
+                 * 真值在看前端（收藏列表只有一份），但「点下去 → 前端处理完 →
+                 * 推 meta 回来」在后台可能要好几秒，那几秒里图标一动不动，
+                 * 用户看到的就是「点了收藏，通知栏没反应」（2026-11-24 反馈）。
+                 * 先乐观翻转，前端那条 meta 到了再覆盖成真值——顺序不会错。
+                 */
+                metaFav = !metaFav
+                NowPlaying.fav = metaFav
+                updateNotif()
+                action("fav")
+            }
             // 切换输出：原生侧直接轮换（不涉及队列）
             "key:out" -> cycleOutput()
             // 悬浮歌词：真正的「其他应用上层」窗口，开/关都在原生侧
@@ -674,7 +709,7 @@ class PlaybackService : Service() {
                  * 之间"的那几秒。接上时不能置 `endedFlag`——一置前端就会再 advance
                  * 一次，等于跳过一首。
                  */
-                val next = synchronized(prefetch) { prefetch.pollFirst() }
+                val next = takePrefetch()
                 val left = synchronized(prefetch) { prefetch.size }
                 LockScreen.trace("end idx=$index prefetch=${if (next == null) "空" else next.index} 余=$left")
                 if (next != null) main.post { playPrefetched(next) }
@@ -744,7 +779,7 @@ class PlaybackService : Service() {
      * 整表替换而不是追加：前端每次都在自己最新的队列状态下重算一遍，
      * 拖过排序、删过歌之后，旧表里的下标可能已经指向别的曲目了。
      */
-    fun setPrefetch(items: org.json.JSONArray) {
+    fun setPrefetch(items: org.json.JSONArray, base: Int = -1) {
         /* 前端在 binder 线程写，播放结束回调在音频线程读：整表替换要加锁 */
         synchronized(prefetch) {
             prefetch.clear()
@@ -765,10 +800,39 @@ class PlaybackService : Service() {
                 )
             }
         }
+        /*
+         * 这张表从哪首算起。老版本前端不带 base（-1）时按「当前这首」算——
+         * 它本来就是从当前下标往后算的，这样才不至于整表作废。
+         */
+        prefetchBase = if (base >= 0) base else Int.MIN_VALUE
         /* 前端既然能发预告，就说明它活着并且已经知道现在放的是哪首了 */
         autoAdvanced = -1
         /* 一行日志：排查「播完一首就停」时先看这张表到底有没有递过来、递了几首 */
-        LockScreen.trace("setPrefetch n=${items.length()}")
+        LockScreen.trace("setPrefetch n=${items.length()} base=$base")
+    }
+
+    /**
+     * 曲终从预告表取下一首：**起点对不上就整表作废**。
+     *
+     * 对不上 = 用户动过队列（连点下一首 / 点了别的歌），队头已经不是「下一首」了，
+     * 宁可交回前端（`endedFlag`），也不能唱一首前面的歌。
+     */
+    private fun takePrefetch(): Prefetch? {
+        synchronized(prefetch) {
+            /* MIN_VALUE = 前端没给起点（老版本 / 服务没起来时的补收）：照旧信任这张表 */
+            if (prefetchBase != Int.MIN_VALUE && prefetchBase != index) {
+                val dropped = prefetch.size
+                prefetch.clear()
+                if (dropped > 0) {
+                    LockScreen.trace("prefetch 作废 base=$prefetchBase cur=$index drop=$dropped")
+                }
+                return null
+            }
+            val p = prefetch.pollFirst() ?: return null
+            /* 吃掉一项：起点跟着往前挪一首 */
+            prefetchBase = p.index
+            return p
+        }
     }
 
     /**
@@ -879,6 +943,8 @@ class PlaybackService : Service() {
     private fun stopPlayback() {
         wantPlay = false
         endedFlag = false
+        /* 用户把播放停掉了：耳机再回来也不该自己开始放 */
+        resumeOnDeviceBack = false
         /* 队列被清空 / 用户停了：预告作废，别再自己接一首出来 */
         synchronized(prefetch) { prefetch.clear() }
         autoAdvanced = -1
@@ -1039,12 +1105,57 @@ class PlaybackService : Service() {
         }
     }
 
+    /**
+     * 「因为耳机断开才停的」——耳机回来就自动接着放。
+     *
+     * 安卓系统自己不做这件事（它只会发 ACTION_AUDIO_BECOMING_NOISY 让你暂停，
+     * 重连时**不发任何东西**）。酷狗 / QQ 音乐那种「蓝牙断一下再连上，歌自己继续」
+     * 是 App 自己记的意图，这里补上。
+     *
+     * 判据必须是「断开那一刻真的在播」：用户自己按了暂停再插拔耳机，
+     * 不能被我们擅自开始放。
+     */
+    @Volatile
+    private var resumeOnDeviceBack = false
+
     /** 拔耳机 / 蓝牙断开：按「用户暂停」处理，通知与状态一起收 */
     private val noisyRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context?, intent: Intent?) {
             if (intent?.action != AudioManager.ACTION_AUDIO_BECOMING_NOISY) return
-            LockScreen.trace("BECOMING_NOISY → pause")
+            /*
+             * 先读播放态再暂停：反过来读到的永远是 false，标志就永远记不上，
+             * 用户听到的仍然是「重连了不自己放」（这一行顺序是整段的关键）。
+             */
+            resumeOnDeviceBack = playingNow()
+            LockScreen.trace("BECOMING_NOISY → pause (resume=${resumeOnDeviceBack})")
             setPlayingInService(false)
+        }
+    }
+
+    /**
+     * 耳机 / 蓝牙回来 → 把断连时那一首接着放。
+     *
+     * 只认「输出类」设备（A2DP / SCO / 有线耳机 / USB 声卡）：
+     * 插充电线、连手柄也会走 onAudioDevicesAdded，那些不该让音乐突然响起来。
+     */
+    private val deviceCb = object : android.media.AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+            val out = addedDevices.any { d ->
+                when (d.type) {
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_USB_HEADSET,
+                    AudioDeviceInfo.TYPE_HEARING_AID,
+                    -> true
+                    else -> false
+                }
+            }
+            if (!out || !resumeOnDeviceBack) return
+            resumeOnDeviceBack = false
+            LockScreen.trace("device back → resume")
+            setPlayingInService(true)
         }
     }
 
@@ -2011,7 +2122,7 @@ class PlaybackService : Service() {
                     requestFocus()
                     return
                 }
-                val next = synchronized(prefetch) { if (prefetch.isEmpty()) null else prefetch.pollFirst() }
+                val next = takePrefetch()
                 if (next != null) {
                     playPrefetched(next)
                     return
@@ -2063,6 +2174,11 @@ class PlaybackService : Service() {
     }
 
     private fun toggleInService() {
+        /*
+         * 用户自己按了播放/暂停：之前「因为耳机断开才停」的那份意图作废。
+         * 不作废的话，「断开 → 手动暂停 → 重连接上」会自己响起来。
+         */
+        resumeOnDeviceBack = false
         val p = mp
         if (p == null || !prepared) {
             /*
@@ -2430,6 +2546,9 @@ class PlaybackService : Service() {
         stopTick()
         try { unregisterReceiver(screenRx) } catch (_: Exception) { /* 没注册成功 */ }
         try { unregisterReceiver(noisyRx) } catch (_: Exception) { /* 没注册成功 */ }
+        try {
+            (getSystemService(Context.AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(deviceCb)
+        } catch (_: Exception) { /* 没注册成功 */ }
         netCb?.let { cb -> try { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(cb) } catch (_: Exception) { /* 已经注销 */ } }
         netCb = null
         FloatingLyrics.onShownChanged = null

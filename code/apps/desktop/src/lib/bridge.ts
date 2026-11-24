@@ -383,7 +383,21 @@ export const bridge = {
    * 那正是「暂停了过几秒又响」。代号比当前小的 open 一律不执行。
    */
   async pause(epoch?: number, why = ''): Promise<void> { return invoke('pause', { epoch: epoch ?? 0, why }) },
-  async resume(epoch?: number, why = ''): Promise<void> { return invoke('resume', { epoch: epoch ?? 0, why }) },
+  /**
+   * 恢复播放。返回「原生手里到底有没有播放器」。
+   *
+   * iOS 侧（Rust）会答 `true/false`；安卓/桌面那条命令没有返回值（Kotlin 里是
+   * Unit），拿到的就是 null——那不是「失败」，一律当 `true` 处理，让老路照旧。
+   *
+   * 为什么要这个答案：播放器已经被 Stop 收掉 / 上一轮加载失败时，`resume` 是
+   * **静默空操作**。前端以前只能等 900ms 的回查超时再推倒重来，用户听到的是
+   * 「咔一下、转圈、又从头放一遍」（2026-11-24 反馈）。有了这个返回值，当场
+   * 就能决定「直接重新加载」。
+   */
+  async resume(epoch?: number, why = ''): Promise<boolean> {
+    const r = await invoke<boolean | null | undefined>('resume', { epoch: epoch ?? 0, why })
+    return r !== false
+  },
   /**
    * 把前端的关键节点写进原生日志（安卓是 `lock.log`）。
    *

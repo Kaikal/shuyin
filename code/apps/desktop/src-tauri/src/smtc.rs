@@ -263,6 +263,7 @@ pub fn update(
     _cover: String,
     _position: f64,
     _duration: f64,
+    _fav: bool,
 ) {
     let _ = app.run_on_main_thread(move || apply(&title, &artist, &album, playing));
 }
@@ -285,6 +286,7 @@ pub fn update(
     _cover: String,
     _position: f64,
     _duration: f64,
+    _fav: bool,
 ) {
 }
 
@@ -298,6 +300,42 @@ pub fn update(
 pub fn refresh_state(playing: bool, pos: f64, dur: f64) {
     apple::reapply(playing, pos, dur);
 }
+
+/// 把音频会话重新要回来（iOS）。resume 之前调一次。
+///
+/// 为什么需要：暂停得久了（尤其熄屏、切到别的 App），iOS 会把我们的
+/// `AVAudioSession` 收回。这时 `sink.play()` 本身不报错，但音频单元要重新起来
+/// ——用户听到的就是「点播放先卡一下才出声」。重新 `setActive` 一次把这步提前，
+/// 已经在播时这一下是幂等的。
+#[cfg(target_os = "ios")]
+pub fn ensure_session() {
+    apple::reactivate();
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn ensure_session() {}
+
+/// 锁屏/控制中心那颗 ♥ 的「实心 / 空心」。
+///
+/// 系统不认我们在卡片里写的任何字段——那颗键是 `MPRemoteCommandCenter.likeCommand`
+/// 自己画出来的，**只有 `isActive` 能染**。不设它，收藏成功之后它一直画空心的，
+/// 用户看到的就是「点了收藏，心没变」（2026-11-24 反馈）。
+#[cfg(target_os = "ios")]
+pub fn set_like(on: bool) {
+    apple::set_like(on);
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn set_like(_on: bool) {}
+
+/// 用户主动暂停：取消「等耳机回来接着放」的意图（iOS 路由变化那条用）。
+#[cfg(target_os = "ios")]
+pub fn clear_route_intent() {
+    apple::clear_route_intent();
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn clear_route_intent() {}
 
 /* ------------------------------------------------------------------ */
 /* Apple（macOS / iOS）：MPNowPlayingInfoCenter + MPRemoteCommandCenter  */
@@ -438,10 +476,15 @@ mod apple {
         Ok(())
     }
 
+    /// 重新激活音频会话（`ensure_session` 的实体，见外面的说明）。
+    #[cfg(target_os = "ios")]
+    pub(super) fn reactivate() {
+        let _ = setup_audio_session();
+    }
+
     /// 让 App 接收远控事件（锁屏/控制中心/耳机线的按钮都经由此路）
     #[cfg(target_os = "ios")]
-    unsafe fn begin_remote_events() {
-        let app: *mut AnyObject = objc2::msg_send![class!(UIApplication), sharedApplication];
+    unsafe fn begin_remote_events() {        let app: *mut AnyObject = objc2::msg_send![class!(UIApplication), sharedApplication];
         if app.is_null() {
             return;
         }
@@ -508,6 +551,125 @@ mod apple {
         }
     }
 
+    /*
+     * 蓝牙耳机断开后重连，用户不会再去点播放——他以为「耳机回来了，歌自己接着放」。
+     *
+     * iOS 不会替我们做这件事：路由一断，系统把会话挂起（我们这边收到
+     * `AVAudioSessionRouteChangeNotification`，reason = OldDeviceUnavailable），
+     * 重连时只发一个 NewDeviceAvailable，**不恢复播放**。安卓那套
+     * `ACTION_AUDIO_BECOMING_NOISY` + 焦点恢复的体感，就差了这一段。
+     *
+     * 判据必须是「断开那一刻真的在播」：用户自己暂停之后再去插拔耳机，
+     * 不该被我们擅自开始放。
+     */
+    #[cfg(target_os = "ios")]
+    static ROUTE_RESUME: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    #[cfg(target_os = "ios")]
+    pub(super) fn clear_route_intent() {
+        ROUTE_RESUME.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(target_os = "ios")]
+    fn was_playing(app: &AppHandle) -> bool {
+        use tauri::Manager;
+        app.try_state::<crate::player::Player>()
+            .map(|p| p.snapshot().playing)
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "ios")]
+    fn observe_route_changes(app: &AppHandle) {
+        use std::ptr::NonNull;
+        use std::sync::atomic::Ordering as O;
+        unsafe {
+            let center: *mut AnyObject =
+                objc2::msg_send![class!(NSNotificationCenter), defaultCenter];
+            if center.is_null() {
+                return;
+            }
+            /* 一、输出路由变了：拔耳机 / 蓝牙断开 / 蓝牙重连 */
+            let name = ns("AVAudioSessionRouteChangeNotification");
+            let app2 = app.clone();
+            let block = block2::StackBlock::new(move |note: NonNull<AnyObject>| {
+                unsafe {
+                    let user: *mut AnyObject = objc2::msg_send![note.as_ptr(), userInfo];
+                    if user.is_null() {
+                        return;
+                    }
+                    let k = ns("AVAudioSessionRouteChangeReasonKey");
+                    let v: *mut AnyObject = objc2::msg_send![user, objectForKey: &*k];
+                    if v.is_null() {
+                        return;
+                    }
+                    let reason: usize = objc2::msg_send![v, unsignedIntegerValue];
+                    match reason {
+                        // NewDeviceAvailable：耳机 / 蓝牙回来了
+                        1 => {
+                            let _ = setup_audio_session();
+                            if ROUTE_RESUME.swap(false, O::SeqCst) {
+                                log_route(&app2, "route back -> resume");
+                                dispatch(&app2, "play", None);
+                            }
+                        }
+                        // OldDeviceUnavailable：拔掉 / 断开
+                        2 => {
+                            if was_playing(&app2) {
+                                /*
+                                 * 顺序要紧：`dispatch("pause")` 里会清掉这份意图
+                                 * （它同时也是「用户按了暂停」那条路），所以先暂停、
+                                 * 再把「回来要接着放」写上去。
+                                 */
+                                log_route(&app2, "route lost -> pause (will resume)");
+                                dispatch(&app2, "pause", None);
+                                ROUTE_RESUME.store(true, O::SeqCst);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let _: Retained<AnyObject> = objc2::msg_send![
+                center,
+                addObserverForName: &*name,
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &block
+            ];
+
+            /*
+             * 二、音频服务被系统重启（来电 / 长时间占用之后）。
+             *
+             * 这一下会把我们配好的 category 和已激活的会话全部抹掉，而且
+             * **不会**再发中断结束通知。不重新配一遍，后面就是「在播但没声音」。
+             */
+            let reset = ns("AVAudioSessionMediaServicesWereResetNotification");
+            let app3 = app.clone();
+            let reset_block = block2::StackBlock::new(move |_note: NonNull<AnyObject>| {
+                unsafe {
+                    let _ = setup_audio_session();
+                    log_route(&app3, "media services reset -> reactivate");
+                    if ROUTE_RESUME.load(O::SeqCst) || was_playing(&app3) {
+                        dispatch(&app3, "play", None);
+                    }
+                }
+            });
+            let _: Retained<AnyObject> = objc2::msg_send![
+                center,
+                addObserverForName: &*reset,
+                object: std::ptr::null_mut::<AnyObject>(),
+                queue: std::ptr::null_mut::<AnyObject>(),
+                usingBlock: &reset_block
+            ];
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    fn log_route(app: &AppHandle, msg: &str) {
+        crate::append_log(app, &format!("[route] {msg}"));
+    }
+
     /* ---------------- 锁屏按钮 → 播放器 ---------------- */
 
     /// 上一次推给系统的 Now Playing 内容（不含播放状态）。
@@ -524,6 +686,7 @@ mod apple {
         artist: String,
         album: String,
         cover: String,
+        fav: bool,
     }
 
     /// 只翻播放状态，元信息沿用上一次推的。
@@ -539,10 +702,26 @@ mod apple {
         let snap = {
             let Ok(g) = LAST.lock() else { return };
             g.as_ref()
-                .map(|x| (x.title.clone(), x.artist.clone(), x.album.clone(), x.cover.clone()))
+                .map(|x| (x.title.clone(), x.artist.clone(), x.album.clone(), x.cover.clone(), x.fav))
         };
-        let Some((title, artist, album, cover)) = snap else { return };
-        apply(&title, &artist, &album, playing, &cover, pos, dur);
+        let Some((title, artist, album, cover, fav)) = snap else { return };
+        apply(&title, &artist, &album, playing, &cover, pos, dur, fav);
+    }
+
+    /// ♥ 的实心/空心（`likeCommand.isActive`）。类或命令拿不到时静默跳过。
+    pub fn set_like(on: bool) {
+        unsafe {
+            let Some(center_cls) = cls("MPRemoteCommandCenter") else { return };
+            let center: Retained<AnyObject> = objc2::msg_send![center_cls, sharedCommandCenter];
+            if center.is_null() {
+                return;
+            }
+            let cmd: *mut AnyObject = objc2::msg_send![&center, likeCommand];
+            if cmd.is_null() {
+                return;
+            }
+            let _: () = objc2::msg_send![cmd, setActive: on];
+        }
     }
 
     /// 锁屏 / 控制中心 / 耳机按键的落地动作。
@@ -579,11 +758,14 @@ mod apple {
                 if s.playing {
                     p.pause();
                 }
+                /* 用户自己停的：「耳机回来接着放」这份意图作废 */
+                clear_route_intent();
                 reapply(false, s.position, s.duration);
             }
             "playpause" => {
                 if s.playing {
                     p.pause();
+                    clear_route_intent();
                 } else {
                     p.resume();
                 }
@@ -630,15 +812,22 @@ mod apple {
 
     /// 封面 → MPMediaItemArtwork。
     ///
-    /// 只吃本地文件路径（前端给的是 mediaCache 缓存槽的绝对路径）。
-    /// 网络地址一律不读：异步线程里下一张图会拖住整条 meta 推送，
-    /// 而锁屏那张图晚半秒没人看得出来。
+    /// 吃本地文件路径，也吃**已经下载过**的封面网址（见 `coverart::lookup`）：
+    /// 原生接歌时会把封面拉下来落盘，前端随后推 meta 用的是同一个网址，
+    /// 这里能直接命中那份文件——否则打开 App 的那一刻图会被「无封面」覆盖掉，
+    /// 用户看到的就是「切歌后好不容易出来的封面又没了」。
+    /// 网络地址一律**不在这里下载**：同步路径上等不了网络，宁可维持现状。
     fn artwork(path: &str) -> Option<Retained<AnyObject>> {
         use objc2::rc::Allocated;
-        if path.is_empty() || path.contains("://") {
+        if path.is_empty() {
             return None;
         }
-        let bytes = std::fs::read(path).ok()?;
+        let local = if path.contains("://") {
+            crate::coverart::lookup(path)?.path
+        } else {
+            path.to_string()
+        };
+        let bytes = std::fs::read(&local).ok()?;
         if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
             return None;
         }
@@ -685,6 +874,7 @@ mod apple {
             setup_audio_session()?;
             unsafe { begin_remote_events() };
             observe_interruptions(app);
+            observe_route_changes(app);
         }
 
         unsafe {
@@ -776,6 +966,7 @@ mod apple {
         cover: &str,
         position: f64,
         duration: f64,
+        fav: bool,
     ) {
         unsafe {
             /*
@@ -794,6 +985,8 @@ mod apple {
                 if let Ok(mut g) = LAST.lock() {
                     *g = None;
                 }
+                /* 没有歌就没有「已收藏」：那颗 ♥ 得退回空心，否则下一首一开就是亮的 */
+                set_like(false);
                 if let Some(np_cls) = cls("MPNowPlayingInfoCenter") {
                     let center: *mut AnyObject = objc2::msg_send![np_cls, defaultCenter];
                     if !center.is_null() {
@@ -862,6 +1055,19 @@ mod apple {
             let st: isize = if playing { 1 } else { 2 };
             let _: () = objc2::msg_send![&center, setPlaybackState: st];
 
+            /*
+             * ♥ 的实心/空心。
+             *
+             * 系统只认 `likeCommand.isActive`，卡片字典里写什么都没有这一格
+             * （`MPNowPlayingInfoPropertyIsLiveStream` 那些是别的东西）。
+             * 这一句缺了就是「收藏成功，心还是空心」——Android 那边是自绘通知，
+             * 换个图标就行，iOS 只能靠这条。
+             */
+            let like: *mut AnyObject = objc2::msg_send![&center, likeCommand];
+            if !like.is_null() {
+                let _: () = objc2::msg_send![like, setActive: fav];
+            }
+
             /* 记下元信息：锁屏按键后要在原地重推状态（见 reapply） */
             if let Ok(mut g) = LAST.lock() {
                 *g = Some(LastInfo {
@@ -869,6 +1075,7 @@ mod apple {
                     artist: artist.to_string(),
                     album: album.to_string(),
                     cover: cover.to_string(),
+                    fav,
                 });
             }
 
@@ -889,6 +1096,7 @@ pub fn update(
     cover: String,
     position: f64,
     duration: f64,
+    fav: bool,
 ) {
-    apple::apply(&title, &artist, &album, playing, &cover, position, duration);
+    apple::apply(&title, &artist, &album, playing, &cover, position, duration, fav);
 }

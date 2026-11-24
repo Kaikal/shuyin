@@ -74,6 +74,10 @@ pub fn init(app: &AppHandle) {
         ffi::adopt();
         /* 锁屏歌词：App 进后台后 JS 会被冻住，词得由原生自己往前推 */
         spawn_lyric_ticker();
+        /* 状态对账：换歌 / 暂停发生在 JS 冻着的时候，岛和锁屏卡得由原生自己跟上 */
+        spawn_state_ticker();
+        /* 桌面歌词（画中画）：200ms 一帧，只在用户开着的时候跑 */
+        spawn_pip_ticker();
     }
 }
 
@@ -108,6 +112,14 @@ pub fn live_activity_sync(state: LiveState) -> Result<(), String> {
         if let Ok(mut g) = LAST.lock() {
             *g = Some(state.clone());
         }
+        /*
+         * 顺手把系统「正在播放」卡那颗 ♥ 也翻过来。
+         *
+         * 锁屏/控制中心的 ♥ 是 `likeCommand` 自己画的，和灵动岛那颗星是**两套 UI**：
+         * 岛上点了收藏，岛上变实心，系统那张卡还是空心的（用户 2026-11-24
+         * 「通知栏的收藏按钮状态不会切换」）。这里用同一份 fav 真值把它对齐。
+         */
+        crate::smtc::set_like(state.fav);
         let json = serde_json::to_string(&state).map_err(|e| e.to_string())?;
         ffi::sync(&json);
         Ok(())
@@ -227,6 +239,62 @@ pub fn spawn_lyric_ticker() {
             last = line;
             push_last();
         }
+    });
+}
+
+/// 当前句 + 句内进度（0~1）。画中画的字幕要按进度逐字染色，比 `line_at` 多这一步。
+#[cfg(target_os = "ios")]
+fn line_progress_at(pos: f64) -> (String, f64) {
+    let Ok(g) = LYRICS.lock() else { return (String::new(), 0.0) };
+    let (ts, xs) = &*g;
+    if ts.is_empty() {
+        return (String::new(), 0.0);
+    }
+    let mut lo = 0usize;
+    let mut hi = ts.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if ts[mid] <= pos {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return (String::new(), 0.0);
+    }
+    let start = ts[lo - 1];
+    /* 下一句的开头就是这一句的结尾；最后一句没有下一句，按 4 秒估算 */
+    let end = ts.get(lo).copied().unwrap_or(start + 4.0);
+    let prog = if end > start {
+        ((pos - start) / (end - start)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut text = xs[lo - 1].clone();
+    if text.chars().count() > 60 {
+        text = text.chars().take(60).collect();
+    }
+    (text, prog)
+}
+
+/// 桌面歌词（画中画）的心跳。
+///
+/// 200ms 一帧：句内进度要连得上，但画中画是常驻窗口、每秒重绘 5 次已经足够
+/// （Swift 侧还会把进度量化到 2% 再决定要不要真重画）。
+/// **只在开关打开时工作**——关着的时候这个线程几乎不占资源。
+#[cfg(target_os = "ios")]
+pub fn spawn_pip_ticker() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if !crate::lyrics_pip::on() {
+            continue;
+        }
+        let Some(app) = APP.get() else { continue };
+        let Some(p) = app.try_state::<Player>() else { continue };
+        let (playing, pos) = p.playing_and_pos();
+        let (line, prog) = line_progress_at(pos);
+        crate::lyrics_pip::update(&line, prog, playing);
     });
 }
 
@@ -356,6 +424,12 @@ fn handle_remote_command(cmd: &str) {
             BIG_ART.store(!now, std::sync::atomic::Ordering::Relaxed);
             push_last();
         }
+        /*
+         * 回 App：真正把 App 拉到前台的是 intent 自己（`openAppWhenRun = true`），
+         * 到这里只需要留一行痕——`app.log` 里没有 `live.cmd open` 就说明
+         * 那一下点击连 intent 都没跑到（跟推送、scheme 都无关）。
+         */
+        "open" => {}
         other => {
             crate::append_log(app, &format!("live.cmd unknown {other}"));
         }
@@ -395,72 +469,220 @@ fn push_last() {
     }
 }
 
+/// 推送一次「换歌」。原生自己接了下一首（直链表 / 现场取链）时调。
+///
+/// 为什么要从原生推：那一瞬间后台 JS 还冻着，前端那条 `live_activity_sync`
+/// 不会发生。少了这一推，锁屏/灵动岛就**整块停在上一首**——歌名不动、
+/// 倒计时按上一首的时长走完停在那儿、播放键一直画着「暂停」。
+/// 用户 2026-11-24 报的「倒计时结束了但歌还在播」「岛上的状态不跟 App 联动」
+/// 都是这一条缺失造成的。
+///
+/// `art` 是 72×72 JPEG 的 base64（见 `coverart`）；空串就画音符占位。
+pub fn push_track(
+    title: &str,
+    artist: &str,
+    album: &str,
+    art: &str,
+    playing: bool,
+    position: f64,
+    duration: f64,
+) {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (title, artist, album, art, playing, position, duration);
+    }
+    #[cfg(target_os = "ios")]
+    {
+        /* 还没有任何一条 activity（用户没推过 / 开关关着）：别在这儿凭空造一条 */
+        let Ok(mut g) = LAST.lock() else { return };
+        let Some(s) = g.as_mut() else { return };
+        s.title = title.to_string();
+        s.artist = artist.to_string();
+        s.album = album.to_string();
+        s.art = art.to_string();
+        /* 新的一首：上一首那句词、那颗星都不该留在卡上 */
+        s.line = String::new();
+        s.fav = false;
+        s.playing = playing;
+        s.position = position.max(0.0);
+        if duration > 0.0 {
+            s.duration = duration;
+        }
+        s.anchor = unix_now();
+        s.big = BIG_ART.load(std::sync::atomic::Ordering::Relaxed);
+        drop(g);
+        flush();
+    }
+}
+
+/// 状态对账线程：**原生自己发现「换歌了 / 暂停了」就直接推一次**。
+///
+/// 为什么不能只靠前端推：iOS 后台会把 WebView 的 JS 冻住，而原生接歌、系统
+/// 中断、耳机线控这些动作都发生在 JS 冻着的时候。前端那一推要等用户打开 App
+/// 才来——在这之前灵动岛和锁屏卡全是旧的（用户看到的就是「岛上的播放键不跟
+/// App 联动」「倒计时走完了歌还在放」）。
+///
+/// 700ms 是「够快」和「别烧更新预算」的折中：只在**状态真的变了**（下标 /
+/// 播放态 / 时长）时才推，正常播一首歌期间一次都不推（进度由系统自己走秒）。
+#[cfg(target_os = "ios")]
+pub fn spawn_state_ticker() {
+    std::thread::spawn(|| {
+        let mut last_idx: i64 = i64::MIN;
+        let mut last_playing = false;
+        let mut last_dur = -1.0f64;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let Some(app) = APP.get() else { continue };
+            let Some(p) = app.try_state::<Player>() else { continue };
+            let (idx, playing, pos, dur) = p.state_lite();
+            if idx < 0 {
+                /* 没有在放的歌：什么都不用推（收摊由前端 live_activity_end 负责） */
+                last_idx = i64::MIN;
+                continue;
+            }
+            if idx != last_idx {
+                /*
+                 * 元信息得先拿到：`meta_of` 查的是原料链 / 直链表，启动那一两秒
+                 * 里可能还没递到。拿不到就**不动 last_idx**，下一轮再试。
+                 */
+                let Some((title, artist, album, cover, hint)) = p.meta_of(idx) else { continue };
+                last_idx = idx;
+                last_playing = playing;
+                last_dur = dur;
+                /*
+                 * 前端已经推过同一首（它比我们快的时候）：只记账，不再推。
+                 * 每条更新都要占灵动岛的预算，能不推就不推。
+                 */
+                let already = LAST
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|s| s.title == title && s.album == album))
+                    .unwrap_or(false);
+                if already {
+                    continue;
+                }
+                let art = crate::coverart::resolve(&cover)
+                    .map(|a| a.b64)
+                    .unwrap_or_default();
+                crate::append_log(
+                    app,
+                    &format!("live.track idx={idx} \"{title}\" art={}B", art.len()),
+                );
+                push_track(
+                    &title,
+                    &artist,
+                    &album,
+                    &art,
+                    playing,
+                    pos,
+                    if dur > 0.0 { dur } else { hint },
+                );
+                continue;
+            }
+            if playing == last_playing && (dur - last_dur).abs() <= 0.5 {
+                /* 状态没变，再看一眼**进度有没有漂**（下面这段的理由） */
+                let drift = {
+                    let Ok(g) = LAST.lock() else { continue };
+                    match g.as_ref() {
+                        Some(s) => {
+                            let expect = if s.playing {
+                                s.position + (unix_now() - s.anchor).max(0.0)
+                            } else {
+                                s.position
+                            };
+                            pos - expect
+                        }
+                        None => 0.0,
+                    }
+                };
+                /*
+                 * 漂了 6 秒以上：卡上那条锚点是错的，重推一次真值。
+                 *
+                 * 什么时候会错：JS 在后台冻了几分钟，醒来时用一帧**很旧**的位置
+                 * 推了一次（`snapshot.position` 还停在冻住那一刻），进度条和倒计时
+                 * 就按那个错锚点走——用户看到「倒计时结束了，歌还在播」。
+                 * 只在漂得多的时候纠正，正常走秒一次都不推。
+                 */
+                if drift.abs() <= 6.0 {
+                    continue;
+                }
+                crate::append_log(app, &format!("live.drift {drift:+.1}s -> 重推"));
+            }
+            last_playing = playing;
+            last_dur = dur;
+            push_native_state(&app, playing);
+        }
+    });
+}
+
+#[cfg(target_os = "ios")]
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// 把 LAST 原样推给 Swift（`push_last` 会先按锚点把进度补到「现在」，
+/// 而刚构造出来的状态本身就是「现在」，不用再补）。
+#[cfg(target_os = "ios")]
+fn flush() {
+    let json = {
+        let Ok(g) = LAST.lock() else { return };
+        match g.as_ref().and_then(|s| serde_json::to_string(s).ok()) {
+            Some(j) => j,
+            None => return,
+        }
+    };
+    ffi::sync(&json);
+}
+
 #[cfg(target_os = "ios")]
 fn toggle_playback(app: &AppHandle) {
     let Some(p) = app.try_state::<Player>() else { return };
-    let s = p.snapshot();
-    /*
-     * 「有没有歌」两个字段都得看：在线曲目的 track_path 恒为 None，
-     * 值在 track_url 里。只判前者会让播在线歌时按钮完全没反应
-     * （这个坑托盘那边已经踩过一次，见 do_tray_action 的注释）。
-     */
-    let has = s
-        .track_path
-        .as_deref()
-        .map(|t| !t.is_empty())
-        .unwrap_or(false)
-        || s.track_url.as_deref().map(|t| !t.is_empty()).unwrap_or(false);
-    if !has {
+    let (_, playing, _, _) = p.state_lite();
+    if !p.has_track() {
         crate::append_log(app, "live.playpause ignored: no track");
         return;
     }
-    if s.playing {
+    if playing {
         p.pause();
     } else {
         p.resume();
     }
     crate::append_log(
         app,
-        &format!("live.playpause -> {} (was {})", if s.playing { "pause" } else { "resume" }, s.playing),
+        &format!("live.playpause -> {} (was {})", if playing { "pause" } else { "resume" }, playing),
     );
     /*
-     * 立刻用**原生真值**把岛上的图标翻过来。
-     *
-     * 以前这里只动了播放引擎，岛上那颗 ▶/⏸ 要等前端 JS 收到状态事件再推一次
-     * `live_activity_sync` 才会变；主 App 在后台时 JS 被系统挂起，这一推可能
-     * 几十秒都不到，用户看到的就是「歌在放，岛上还画着暂停」
-     * （2026-11-23 反馈「灵动岛的状态和歌曲信息不匹配」）。
-     * 现在按完就地更新 LAST 并重推，前端醒来后再用它的绝对值覆盖一次，不冲突。
+     * 立刻用**原生真值**把岛上的图标翻过来（前端醒来后会用绝对值覆盖一次）。
      *
      * `playing` 传**意图**而不是快照：`resume()` 只是往音频线程投了一条命令，
-     * 紧接着读快照还会是 false——照抄就把刚翻过来的岛又推回暂停了。
-     * 位置/时长照抄快照（这两项此刻是准的：暂停时停在原地，恢复时也是原地起）。
+     * 紧接着读状态还会是 false——照抄就把刚翻过来的岛又推回暂停了。
      */
-    push_native_state(app, !s.playing);
+    push_native_state(app, !playing);
 }
 
 /// 用原生快照的位置/时长 + 指定的播放状态覆盖 LAST，然后重推一次。
 #[cfg(target_os = "ios")]
 fn push_native_state(app: &AppHandle, playing: bool) {
     let Some(p) = app.try_state::<Player>() else { return };
-    let s = p.snapshot();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+    /* 走 `state_lite`：`snapshot()` 会把「曲终」这个一次性标记读走 */
+    let (_, _, pos, dur) = p.state_lite();
+    let now = unix_now();
     {
         /* guard 必须圈在这个块里：push_last() 还要再锁一次（Mutex 不可重入） */
         let Ok(mut g) = LAST.lock() else { return };
         let Some(last) = g.as_mut() else { return };
         last.playing = playing;
-        last.position = s.position.max(0.0);
-        if s.duration > 0.0 {
-            last.duration = s.duration;
+        last.position = pos.max(0.0);
+        if dur > 0.0 {
+            last.duration = dur;
         }
         last.anchor = now;
     }
     /* 锁屏那张系统卡（Now Playing）也一起翻：它不经过 liveactivity 这条链路 */
-    crate::smtc::refresh_state(playing, s.position.max(0.0), s.duration);
+    crate::smtc::refresh_state(playing, pos.max(0.0), dur);
     push_last();
 }
 

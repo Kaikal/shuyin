@@ -2357,15 +2357,16 @@ html[data-shell='phone'] .queue-drawer .q-clear { font-size: 13px; padding: 6px 
  * （用户：「待插入歌曲还在上面呢，空出来的行却在下面两行」2026-11-11）。
  * 「浮起来」靠底板/描边/投影表达就够了，不动盒模型。
  */
+/*
+ * 拖动中的那一行：**不加任何视觉变化**。
+ *
+ * 以前这里给它换了底板、描边、投影，还配一个 `scale(1.006)`。行是满宽的，
+ * 那块底板左右各比内容窄 4~6px，看起来就是「手指推的那一首往右边缩进了一点」；
+ * 放大又会被列表的横向裁剪吃掉一圈。用户 2026-11-24 的原话是「不要这个动画」。
+ * 跟手已经由 JS 写的 `translateY` 表达了，这里只留层级，免得被上下行盖住。
+ */
 html[data-shell='phone'] .q-row.is-dragging {
-  border-radius: 14px;
-  /*
-   * 别写死 `#1e2230`：这条是「拖起来那一行」的底板，浅色主题下它原来是
-   * 一块近黑的浮片，压在白色的队列上——里面的歌名是深色字，等于看不见。
-   * 跟随 `--hd-bg-elevated`：深色主题 #14161c、浅色主题白卡片。
-   */
-  background: var(--hd-bg-elevated);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55), inset 0 0 0 1px var(--sy-accent-a55);
+  z-index: 3;
 }
 /* 落位框：78 高、accent/8% 底 + accent/38% 描边 */
 html[data-shell='phone'] .q-row.drop-before::before,

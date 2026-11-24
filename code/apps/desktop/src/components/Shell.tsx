@@ -978,7 +978,15 @@ export function QueueDrawer({ open, onClose, overPlayer = false }: {
     /* 加上 `scrolled`：自动滚动把列表往上顶了，被拖那一行得跟着顶回去，
        否则手指不动、行却越滚越远 */
     const dy = dragY.current - d.startY + d.scrolled
-    d.row.style.transform = `translateY(${dy}px) scale(1.006)`
+    /*
+     * 只给位移，**不要 scale**。
+     *
+     * 以前这里带一个 `scale(1.006)`（想让它看起来「抬起来一点」）。行是满宽的，
+     * 放大会被 `.q-list` 的横向裁剪吃掉两侧半个像素，视觉上就是「我手指推的那首歌
+     * 往右边缩进了一点」——用户 2026-11-24 明确要求去掉这个动画，安卓 / iOS 两端
+     * 用的是同一份样式，一起没。
+     */
+    d.row.style.transform = `translateY(${dy}px)`
     applyShift()
   }
 

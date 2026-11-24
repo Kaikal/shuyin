@@ -21,6 +21,7 @@ FILES = %w[
   ShuyinLiveActivity.swift
   ShuyinActivityAttributes.swift
   ShuyinIntents.swift
+  ShuyinLyricsPiP.swift
 ].freeze
 
 SRC_DIR = __dir__
