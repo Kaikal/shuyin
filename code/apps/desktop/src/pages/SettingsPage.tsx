@@ -623,7 +623,15 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         <div className="set-row">
           <span className="set-label">展示位置</span>
         </div>
-        {bridge.isAndroid ? (
+        {/*
+         * 展示位置：**手机和桌面是两套真值**。
+         *
+         * 桌面挂的是贴边层（`SpectrumPos`，可以贴屏幕四边）；手机是播放页自绘
+         * 的那一圈（`MobileSpecPos`）。以前这里只判 `isAndroid`，iOS 落到桌面那套
+         * 选项上——iPhone 上选「贴左边」什么都不会发生（2026-11-24 用户要求
+         * iPhone 功能与安卓一致）。
+         */}
+        {bridge.isAndroid || isIOS ? (
           <div className="pos-grid" role="radiogroup" aria-label="频谱展示位置">
             {MOBILE_SPEC_POSITIONS.map(pp => (
               <button
@@ -747,8 +755,15 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         </div>
       </section>
 
-      {/* 音乐桌面 / 桌面歌词：桌面端独有的能力，手机上没有对应物 */}
-      {bridge.isTauri && (<>
+      {/*
+       * 音乐桌面 / 桌面歌词：**Windows 桌面独有的能力**（WorkerW 嵌壁纸层、
+       * 独立置顶歌词窗），手机上没有对应物。
+       *
+       * 判据必须是 `isDesktop` 而不是 `isTauri`：iOS 也是 Tauri 壳，以前这两块
+       * 跟着漏到 iPhone 上——点「打开」不会有任何反应（2026-11-24 用户反馈
+       * 「iPhone 端功能应该和安卓端一样」）。
+       */}
+      {bridge.isDesktop && (<>
       <section className="set-group" data-pane="shell" data-sec="desk">
         <h3>音乐桌面</h3>
         <div className="set-row">
@@ -869,8 +884,10 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
          * 用处（安卓复制出来在文件管理器里也进不去；iOS 压根没有这回事）。
          * 用户 2026-11-24 的说法很直接：「除了下载歌曲目录，其他目录不显示了，
          * 反正也打不开」。所以手机上只留上面那行「多大、清空」。
+         *
+         * 判据是 `isDesktop`（`isTauri` 在 iOS 上也是 true，那样这块又会冒出来）。
          */}
-        {bridge.isTauri && (
+        {bridge.isDesktop && (
           <>
             <div className="set-row">
               <span className="set-label">缓存目录</span>
@@ -1007,9 +1024,11 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         </div>
       </section>
 
-      {/* 快捷键是桌面专属：安卓没有物理键盘，耳机键走系统媒体会话（SMTC 那条路在
-          桌面才有意义）。留着这一整块等于给用户一个按了不会有反应的设置项。 */}
-      {bridge.isTauri && <HotkeySection />}
+      {/* 快捷键是桌面专属：手机没有物理键盘（耳机键走系统媒体会话，那条路在
+          设置里没得配）。留着这一整块等于给用户一堆按了不会有反应的快捷键。
+          判据用 `isDesktop`——`isTauri` 在 iOS 上也是 true，那块会漏到 iPhone 上
+          （用户 2026-11-24 就是看到这个）。 */}
+      {bridge.isDesktop && <HotkeySection />}
 
       <AccountSection />
 

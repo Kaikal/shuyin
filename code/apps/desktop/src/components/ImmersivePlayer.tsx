@@ -1401,11 +1401,16 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
         <IconLyric width={13} height={13} />
         <span className="it-lbl">{mobile ? (pager === 'lyric' ? '封面' : '歌词页') : (solo ? '播放页' : '全屏歌词')}</span>
       </button>
-      {/* 桌面端 = 独立歌词窗口；安卓 = 系统悬浮窗（走原生，状态见 toggleFloat） */}
-      <button className="imm-tool" onClick={isAndroid ? toggleFloat : onToggleLyrics}
-        aria-pressed={isAndroid ? floatOn : lyricsOn} title="桌面歌词">
-        <IconDesktopLyric width={13} height={13} /> <span className="it-lbl">桌面歌词</span>
-      </button>
+      {/* 桌面端 = 独立歌词窗口；安卓 = 系统悬浮窗（走原生，状态见 toggleFloat）。
+          **iOS 没有这颗**：系统禁止跨应用悬浮窗，桌面歌词在 iPhone 上做不出来
+          （歌词由灵动岛 / 锁屏卡承担，见 liveactivity）。以前这里落到桌面那一支，
+          点了只是把状态翻一下、屏幕上什么都不出现。 */}
+      {!isIOS && (
+        <button className="imm-tool" onClick={isAndroid ? toggleFloat : onToggleLyrics}
+          aria-pressed={isAndroid ? floatOn : lyricsOn} title="桌面歌词">
+          <IconDesktopLyric width={13} height={13} /> <span className="it-lbl">桌面歌词</span>
+        </button>
+      )}
       <button className="imm-tool" data-panel-toggle onClick={onOpenQueue} title="播放列表 (Q)">
         <IconQueue width={13} height={13} /> <span className="it-lbl">列表</span>
       </button>
@@ -1420,12 +1425,13 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
   const immMenu: MenuItem[] = t ? [
     { id: 'detail', label: '歌曲详情', icon: <IconInfo width={13} height={13} />, onSelect: onOpenDetail },
     { id: 'queue', label: '播放列表', icon: <IconQueue width={13} height={13} />, onSelect: onOpenQueue },
-    {
+    /* iOS 没有桌面歌词（系统禁止跨应用悬浮窗），右键菜单里这一项跟着收掉 */
+    ...(isIOS ? [] : [{
       id: 'lyrics',
       label: (isAndroid ? floatOn : lyricsOn) ? '关闭桌面歌词' : '打开桌面歌词',
       icon: <IconDesktopLyric width={13} height={13} />,
       onSelect: isAndroid ? toggleFloat : onToggleLyrics,
-    },
+    }]),
     {
       id: 'full', label: full ? '退出全屏' : '全屏',
       icon: <IconFullscreen width={13} height={13} />, onSelect: () => void toggleFull(),
@@ -1593,8 +1599,10 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
             <div className="imm-top-menus">{menus}</div>
             {/* 音乐桌面 / 全屏：两个都是桌面窗口层面的事。
                 安卓上 musicDesk 是空实现、全屏按钮只是把系统栏再藏一次（=没有全屏），
-                留着就是「点了没反应」——直接不渲染。 */}
-            {bridge.isTauri && (
+                留着的就是「点了没反应」——直接不渲染。
+                iOS 同理（而且是同一个坑：`isTauri` 在 iOS 上也是 true，以前这两个
+                按钮漏到了 iPhone 上）。判据用 `isDesktop`。 */}
+            {bridge.isDesktop && (
               <>
                 {/* 音乐桌面：铺满屏幕的壁纸式音乐屏。放在全屏按钮左边——
                     两者都是「换一种看法」，但一个是把应用放大，一个是把它退到桌面背景。 */}

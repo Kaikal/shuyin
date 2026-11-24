@@ -280,9 +280,10 @@ export function LibraryPage({
               <button className="ghost-btn" onClick={() => void p.scan('fast')} disabled={p.scanning}>
                 <IconRefresh width={16} height={16} /> 重新扫描
               </button>
-              {/* 安卓没有系统文件夹选择器（`pick_music_folder` 恒回 null），
-                  这颗按钮点下去只会什么都不发生 —— 干脆不出现 */}
-              {!bridge.isAndroid && (
+              {/* 安卓 / iOS 都没有系统文件夹选择器（`pick_music_folder` 在移动端
+                  直接回错误），这颗按钮点下去只会什么都不发生 —— 干脆不出现。
+                  用 `isDesktop` 判：`isTauri` 在 iOS 上也是 true。 */}
+              {bridge.isDesktop && (
                 <button className="ghost-btn" onClick={() => void addFolder()} disabled={p.scanning}>
                   <IconFolder width={16} height={16} /> 添加文件夹
                 </button>
@@ -297,7 +298,7 @@ export function LibraryPage({
                 title="扫描所有磁盘（自动跳过系统目录）">
                 全盘扫描
               </button>
-              {!bridge.isAndroid && (
+              {bridge.isDesktop && (
                 <button className="ghost-btn" onClick={() => void addFolder()} disabled={p.scanning}>
                   <IconFolder width={14} height={14} /> 添加文件夹
                 </button>

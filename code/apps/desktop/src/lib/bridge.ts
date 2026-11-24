@@ -24,6 +24,19 @@ export { isAndroid }
 export const isMac =
   isTauri && typeof navigator !== 'undefined' && /Macintosh/.test(navigator.userAgent)
 
+/**
+ * 真·桌面（Windows / macOS / Linux）。
+ *
+ * **不能拿 `isTauri` 当「桌面」判据**：iOS 也是 Tauri 打的，WKWebView 里同样注入
+ * `__TAURI_INTERNALS__`，于是所有「桌面专属」的 UI 会整块漏到 iPhone 上——
+ * 音乐桌面 / 桌面歌词 / 快捷键 / 换缓存目录 / 全屏按钮 / 添加文件夹，全都是
+ * 点了没反应的死开关（用户 2026-11-24：「iPhone 端设置里面还残留有快捷键功能，
+ * iPhone 端功能应该和安卓端一样」）。
+ *
+ * 手机上要跟安卓一模一样，判据统一走这个；「手机」用 `isAndroid || isIOS`。
+ */
+export const isDesktop = isTauri && !isIOS
+
 /** 有原生能力（桌面或安卓），即「不是浏览器预览」 */
 export const isNative = isTauri || isAndroid
 
@@ -257,6 +270,7 @@ export interface LyricsRawPayload {
 export const bridge = {
   invoke,
   isTauri,
+  isDesktop,
   isAndroid,
   isMac,
   isNative,
