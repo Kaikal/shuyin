@@ -270,7 +270,35 @@ jobs:
 
       - name: Build for device (unsigned; export step allowed to fail)
         run: |
-          pnpm -F shuyin-desktop tauri ios build --ci --target aarch64 --export-method debugging || true
+          mkdir -p build-logs
+          # 这里以前是整条 `|| true`：Rust/archive 失败也被吞掉，错误只剩下一步
+          # 的一句「主包没出来」，看起来像扩展的问题（2026-11-24 就这么被带偏的）。
+          # 现在只放过「导出 IPA 需要证书」那一段，但**必须真的产出 .app**，
+          # 并把错误原文写进 step summary + 日志 artifact。
+          pnpm -F shuyin-desktop tauri ios build --ci --target aarch64 --export-method debugging \
+            > build-logs/tauri-ios-build.log 2>&1 || true
+          tail -60 build-logs/tauri-ios-build.log
+          APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d -path "*Applications*" | head -1)
+          if [ -z "$APP" ]; then
+            {
+              echo "### iOS 构建失败：没有产出 .app"
+              echo ""
+              echo '```'
+              grep -nE "error(\[[^]]+\])?:|error: |Undefined symbol|ld: |fatal error" build-logs/tauri-ios-build.log | head -40 || true
+              echo '```'
+              echo ""
+              echo "<details><summary>完整日志尾部</summary>"
+              echo ""
+              echo '```'
+              tail -150 build-logs/tauri-ios-build.log
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "主包没出来（错误已写进 step summary 与 build-logs 日志）"
+            exit 1
+          fi
+          echo "app: $APP"
 
       - name: Build Live Activity widget extension and embed
         run: |
@@ -291,6 +319,7 @@ jobs:
 
           WIDGET=apps/desktop/src-tauri/ios/widget
           ( cd "$WIDGET" && xcodegen generate --quiet )
+          mkdir -p build-logs
           xcodebuild -project "$WIDGET/ShuyinWidget.xcodeproj" \
                      -target ShuyinWidget \
                      -sdk iphoneos \
@@ -299,11 +328,30 @@ jobs:
                      MARKETING_VERSION="$MV" \
                      CURRENT_PROJECT_VERSION="$BV" \
                      CONFIGURATION_BUILD_DIR="$PWD/$WIDGET/build" \
-                     build 2>&1 | tail -40
+                     build > build-logs/widget-build.log 2>&1 || true
+          tail -40 build-logs/widget-build.log
 
           APPEX=$(find "$WIDGET/build" -maxdepth 2 -name "*.appex" -type d | head -1)
           echo "appex: $APPEX"
-          if [ -z "$APPEX" ]; then echo "扩展没编出来（看上面的 xcodebuild 日志）"; exit 1; fi
+          if [ -z "$APPEX" ]; then
+            {
+              echo "### 灵动岛扩展没编出来"
+              echo ""
+              echo '```'
+              grep -nE "error:|Undefined symbol|ld: |fatal error" build-logs/widget-build.log | head -30 || true
+              echo '```'
+              echo ""
+              echo "<details><summary>完整日志尾部</summary>"
+              echo ""
+              echo '```'
+              tail -150 build-logs/widget-build.log
+              echo '```'
+              echo ""
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "扩展没编出来（看上面的 xcodebuild 日志 / step summary）"
+            exit 1
+          fi
 
           # PlugIns/ 是 Xcode 认可的扩展存放位置。未签名 IPA 直接拷进去即可，
           # Sideloadly / 爱思重签时会连扩展一起签。
@@ -313,6 +361,15 @@ jobs:
           echo "--- PlugIns"
           ls -la "$APP/PlugIns"
           /usr/libexec/PlistBuddy -c "Print :NSExtension" "$APP/PlugIns/ShuyinWidget.appex/Info.plist"
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          # 路径相对 workspace 根（upload-artifact 不认 defaults.run.working-directory）
+          path: code/build-logs/**
+          if-no-files-found: ignore
 
       - name: Verify app bundle (name / icon / status bar)
         run: |
