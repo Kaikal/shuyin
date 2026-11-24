@@ -7,6 +7,12 @@
 
 pub mod db;
 pub mod hotkeys;
+
+/// 构建标识：真机 `app.log` 第一行会写出来。
+///
+/// 每次出**诊断包**就把这里改一下。未签名 IPA 由用户自己重签安装，版本号
+/// 又长期不动，光看界面分不出手里这份是不是刚下的——上一轮就白排查了一天。
+pub const BUILD_TAG: &str = "2026-11-24.diag2";
 #[cfg(target_os = "ios")]
 pub mod ios_openurl;
 pub mod liveactivity;
@@ -150,10 +156,23 @@ pub(crate) fn browser_args() -> &'static str {
 /* ------------------------------------------------------------------ */
 
 fn log_path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_local_data_dir()
+    /*
+     * **iOS 的日志必须人能拿到。**
+     *
+     * `app_local_data_dir()` 在 iOS 上是 Library/Application Support/…，
+     * 「文件」App 里根本看不见——真机出问题时用户取不到日志，只能靠猜
+     * （2026-11-24「后台放完一首就停」就是这么来回猜了三轮）。
+     * 落到 Documents/疏音/app.log：Info.plist 已开 UIFileSharingEnabled，
+     * 用户可以在「文件 → 我的 iPhone → 疏音」里直接长按分享。
+     */
+    let base = if cfg!(target_os = "ios") {
+        app.path().document_dir().ok().map(|d| d.join("疏音"))
+    } else {
+        None
+    };
+    base.or_else(|| app.path().app_local_data_dir().ok())
         .map(|d| d.join("app.log"))
-        .unwrap_or_else(|_| PathBuf::from("app.log"))
+        .unwrap_or_else(|| PathBuf::from("app.log"))
 }
 
 pub(crate) fn append_log(app: &AppHandle, line: &str) {
@@ -453,7 +472,7 @@ struct PrefetchIn {
 
 #[tauri::command]
 fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
-    let list = items
+    let list: Vec<_> = items
         .into_iter()
         .filter(|i| i.index >= 0)
         .map(|i| player::PrefetchItem {
@@ -467,6 +486,12 @@ fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
             cover: i.cover,
         })
         .collect();
+    /*
+     * 一行取证：这张表到底有没有递到原生。
+     * 「后台放完一首就停」的第一嫌疑就是表空——而表空有两种原因：
+     * 前端没算出来（send=0），或者根本没递到（这一行就看得出来）。
+     */
+    crate::player::log(&format!("pf recv n={}", list.len()));
     player.set_prefetch(list);
 }
 
@@ -477,6 +502,17 @@ fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
 /// 这是「无限后台」的底座。前端只在队列/音质变化时整份递一次，平时不通信。
 #[tauri::command]
 fn native_chain(player: State<'_, Player>, payload: srchost::ChainPayload) {
+    /*
+     * 取证：原料包有没有递到、里面几首、几个脚本。
+     * `files=0` 说明启用的音源脚本没解析出文件路径，原生再怎么样也取不到链。
+     */
+    crate::player::log(&format!(
+        "chain recv items={} files={} cookies={} loop={}",
+        payload.items.len(),
+        payload.files.len(),
+        payload.cookies.len(),
+        payload.looping
+    ));
     player.set_chain(payload);
 }
 
@@ -3315,6 +3351,15 @@ pub fn run() {
             app.manage(player);
             // 音频线程没有 AppHandle，日志路径从这儿注入（打包版 stderr 看不到）
             crate::player::set_log_path(log_path(app.handle()));
+            /*
+             * 真机日志的第一行：**先确认装的是哪个包**。
+             * 未签名 IPA 要用户自己重签，很容易装回旧的那份（版本号一直没动，
+             * 界面里也看不出来），上一轮就白排查了一整天。
+             */
+            append_log(
+                app.handle(),
+                &format!("boot v{} tag={BUILD_TAG}", env!("CARGO_PKG_VERSION")),
+            );
             /* 曲终自动接下一首要顺手更新系统媒体卡片（锁屏/控制中心），那边要 AppHandle */
             crate::player::attach_app(app.handle().clone());
 

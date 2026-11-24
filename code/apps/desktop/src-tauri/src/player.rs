@@ -1146,6 +1146,17 @@ impl Player {
                用来判断歌词慢是「声卡真的落后」还是「前端渲染慢」。平时不开。 */
             let pos_log = std::env::var("SHUYIN_POS_LOG").is_ok();
             let mut pos_log_at = Instant::now();
+            /*
+             * 卡死看门狗：声明在播、声卡位置却不动。
+             *
+             * iOS 锁屏之后音频会话有可能被系统掐掉，而 cpal 的流不报错、
+             * `playing` 还挂着 true——表现就是「声音没了，界面还在播」。
+             * 这里只处理「真的不动了」（8 秒、且不在开头缓冲阶段、不在 seek 中），
+             * 重开这首一次；其余情况只留日志。
+             */
+            let mut stall_pos = -1.0f64;
+            let mut stall_at = Instant::now();
+            let mut stall_tries = 0u32;
 
             loop {
                 match rx.recv_timeout(Duration::from_millis(200)) {
@@ -1155,6 +1166,9 @@ impl Player {
                         let path = src.as_str().to_string();
                         let remote = src.is_remote();
                         sh.seeking.store(false, Ordering::SeqCst);
+                        stall_pos = -1.0;
+                        stall_at = Instant::now();
+                        stall_tries = 0;
                         if let Some(s) = sink.take() {
                             s.stop();
                         }
@@ -1390,7 +1404,75 @@ impl Player {
                         log_line(&format!("pos played={p:.3} wall={wall:.3} diff={:.3}", p - wall));
                     }
                     let empty = sink.as_ref().map(|s| s.empty()).unwrap_or(true);
+                    /*
+                     * 卡死检测（见上面 stall_* 的说明）。
+                     *
+                     * 只在「在播、不在 seek、还有剩」时判；位置动过就清零。
+                     * 8 秒是给在线曲目留的缓冲余量：刚起播那几秒位置本来就不动。
+                     */
+                    if playing && !empty && !sh.seeking.load(Ordering::SeqCst) {
+                        let dur_s = *sh.duration.lock().unwrap_or_else(|e| e.into_inner());
+                        if (wall - stall_pos).abs() < 0.05 && wall > 1.0 {
+                            if stall_at.elapsed() >= Duration::from_secs(8) {
+                                log_line(&format!(
+                                    "stall idx={} pos={wall:.2}/{dur_s:.2} try={stall_tries}",
+                                    sh.index.load(Ordering::SeqCst)
+                                ));
+                                stall_at = Instant::now();
+                                if stall_tries < 1 && wall < dur_s - 1.0 {
+                                    stall_tries += 1;
+                                    let cur = sh
+                                        .track
+                                        .lock()
+                                        .ok()
+                                        .and_then(|t| t.clone())
+                                        .filter(|p| !p.is_empty());
+                                    if let Some(p) = cur {
+                                        let src = if sh.remote.load(Ordering::SeqCst) {
+                                            TrackSrc::Url(p)
+                                        } else {
+                                            TrackSrc::File(p)
+                                        };
+                                        log_line(&format!("stall 重开 pos={wall:.2}"));
+                                        let _ = tx_self.send(Cmd::Play {
+                                            src,
+                                            index: sh.index.load(Ordering::SeqCst),
+                                            duration_hint: dur_s,
+                                            start_at: wall,
+                                            autoplay: true,
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            stall_pos = wall;
+                            stall_at = Instant::now();
+                            stall_tries = 0;
+                        }
+                    } else {
+                        stall_pos = -1.0;
+                        stall_at = Instant::now();
+                    }
                     if playing && empty {
+                        /*
+                         * 曲终那一刻的**全部判据**一行记完。
+                         *
+                         * 「后台放完一首就停」这类问题，光看提示猜不出来到底是
+                         * 没有下一首（表空/链空）、还是接上了没出声。这一行直接
+                         * 给出：位置/时长（真放完了还是被掐断）、表里几首、链里几首、
+                         * 原生上一轮接到的下标。
+                         */
+                        let (pos0, _) = *sh.played.lock().unwrap_or_else(|e| e.into_inner());
+                        let dur0 = *sh.duration.lock().unwrap_or_else(|e| e.into_inner());
+                        log_line(&format!(
+                            "end idx={} pos={pos0:.2}/{dur0:.2} pf={} chain={} auto={} relayed={} remote={}",
+                            sh.index.load(Ordering::SeqCst),
+                            sh.prefetch.lock().map(|q| q.len()).unwrap_or(0),
+                            sh.chain.lock().map(|c| c.items.len()).unwrap_or(0),
+                            sh.auto.load(Ordering::SeqCst),
+                            sh.relayed.load(Ordering::SeqCst),
+                            sh.remote.load(Ordering::SeqCst),
+                        ));
                         sh.playing.store(false, Ordering::SeqCst);
                         sh.spectrum.clear();
                         let dur = *sh.duration.lock().unwrap_or_else(|e| e.into_inner());
@@ -1697,7 +1779,19 @@ fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
         for _ in 0..skip {
             it = it.and_then(|i| next_chain_item(&chain, i.index));
         }
-        let Some(item) = it else { return false };
+        let Some(item) = it else {
+            /*
+             * 表里没有「当前这首」的下一项 = 前端没把原料递过来
+             * （队列刚换、或者 JS 在递之前就锁屏被冻）。这一行是判断
+             * 「后台为什么接不上」的关键：链里 0 首 vs 有货但取链失败。
+             */
+            log_line(&format!(
+                "relay 无下一项 cur={cur} chain={} skip={skip}",
+                chain.items.len()
+            ));
+            return false;
+        };
+
         (chain.files.clone(), chain.cookies.clone(), item)
     };
 
