@@ -316,6 +316,10 @@ jobs:
               echo ""
               echo "</details>"
             } >> "$GITHUB_STEP_SUMMARY"
+            # 注解区是唯一能在 run 页面（不下载 artifact）直接看到的东西，
+            # 把错误行再 emit 一遍：本地看不到日志时靠这几行定位。
+            grep -nE "error(\[[^]]+\])?:|Undefined symbol|ld: |fatal error" build-logs/tauri-ios-build.log \
+              | head -12 | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-500)"; done || true
             echo "主包没出来（错误已写进 step summary 与 build-logs 日志）"
             exit 1
           fi
@@ -370,6 +374,8 @@ jobs:
               echo ""
               echo "</details>"
             } >> "$GITHUB_STEP_SUMMARY"
+            grep -nE "error:|Undefined symbol|ld: |fatal error" build-logs/widget-build.log \
+              | head -12 | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-500)"; done || true
             echo "扩展没编出来（看上面的 xcodebuild 日志 / step summary）"
             exit 1
           fi
