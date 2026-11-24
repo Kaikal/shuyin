@@ -319,8 +319,16 @@ jobs:
             # 注解区是唯一能在 run 页面（不下载 artifact）直接看到的东西。
             # 取**日志尾部**：tauri 把 xcodebuild 的包装摘要打在最后，而真正的
             # 编译器错误在它前面几十行；head 只会抓到那些没用的摘要行。
-            grep -nE "error|Error|ERROR|failed|FAILED|warning:|note:|Undefined symbol|ld: " \
+            # 只要 rustc / swiftc 的**源码定位行**：`error[E0308]: ...` 与
+            # `--> src/xxx.rs:12:5`。宽匹配会把尾部那串 tauri 包装摘要
+            # （failed to build iOS app / ARCHIVE FAILED）全捞进来，反而把
+            # 真正的错误挤掉。
+            grep -nE "error\[E[0-9]+\]|--> *src/|no method named|cannot find |mismatched types" \
               build-logs/tauri-ios-build.log | tail -8 \
+              | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-1200)"; done || true
+            # Rust 编译错误在后面，Swift 的在 xcodebuild 段：两段都扫一遍
+            grep -nE "\.swift:[0-9]+:[0-9]+: error:" \
+              build-logs/tauri-ios-build.log | tail -6 \
               | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-1200)"; done || true
             echo "主包没出来（错误已写进 step summary 与 build-logs 日志）"
             exit 1

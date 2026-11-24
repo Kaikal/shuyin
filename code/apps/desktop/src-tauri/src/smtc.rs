@@ -712,10 +712,14 @@ mod apple {
     pub fn set_like(on: bool) {
         unsafe {
             let Some(center_cls) = cls("MPRemoteCommandCenter") else { return };
+            /*
+             * `sharedCommandCenter` 是单例，不可能返回 nil；而且 objc2 的
+             * `Retained` 根本没有 `is_null()`（它是 NonNull 的包装）——
+             * 写成 `center.is_null()` 就是一条编译错误，而这段只在 Apple
+             * 上编译，本地 Windows 的 cargo check 完全看不见。
+             * 「类拿不到」这件事已经由 `cls()` 的 Option 挡住了。
+             */
             let center: Retained<AnyObject> = objc2::msg_send![center_cls, sharedCommandCenter];
-            if center.is_null() {
-                return;
-            }
             let cmd: *mut AnyObject = objc2::msg_send![&center, likeCommand];
             if cmd.is_null() {
                 return;
@@ -1063,10 +1067,14 @@ mod apple {
              * 这一句缺了就是「收藏成功，心还是空心」——Android 那边是自绘通知，
              * 换个图标就行，iOS 只能靠这条。
              */
-            let like: *mut AnyObject = objc2::msg_send![&center, likeCommand];
-            if !like.is_null() {
-                let _: () = objc2::msg_send![like, setActive: fav];
-            }
+            /*
+             * 注意：`likeCommand` 是 **MPRemoteCommandCenter** 的方法，不是
+             * MPNowPlayingInfoCenter 的（`center` 上面那个正是后者）。向错的
+             * 类发这个选择器不是编译错——裸 msg_send 在编译期不校验——而是
+             * 运行时 `unrecognized selector` 直接崩。这里回到 `set_like`，
+             * 它自己去拿正确的单例。
+             */
+            set_like(fav);
 
             /* 记下元信息：锁屏按键后要在原地重推状态（见 reapply） */
             if let Ok(mut g) = LAST.lock() {
