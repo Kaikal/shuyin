@@ -1945,3 +1945,86 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
     p.then(v => { clearTimeout(t); resolve(v) }, e => { clearTimeout(t); reject(e) })
   })
 }
+
+/* ------------------------------------------------------------------ */
+/* 原生取链上下文（iOS 后台续播的底座）                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 交给原生宿主的「接下来能播的歌 + 取链原料」。
+ *
+ * 为什么需要把原料（平台原始对象）搬过去：iOS 切后台后 WebView 的 JS 会被系统
+ * 冻住，前端算好的直链表耗完就没人补了。原生内嵌 QuickJS 跑同一批音源脚本，
+ * 只要手里有「平台 + musicInfo + 音质」，它就能自己一直往下接。
+ *
+ * `items` 的约定：**按播放顺序排，第一项是当前这首**（原生靠它定位「下一首」）。
+ */
+export interface NativeChainItem {
+  index: number
+  /** 曲目 id：原生据此去缓存目录找现成文件（离线后台） */
+  id: string
+  platform: string
+  quality: string
+  /**
+   * 平台原始对象（洛雪 `musicInfo`），**已序列化成 JSON 文本**。
+   *
+   * 为什么不直接给对象：整张歌单几千首会一直躺在原生内存里，展开成对象树
+   * 要十几 MB，iOS 后台会被系统按内存杀掉。原生只在取链时解析当前这一首。
+   */
+  raw: string | null
+  duration: number
+  title: string
+  artist: string
+  album: string
+  cover: string
+  path?: string
+}
+
+/** 启用的音源脚本文件（原生按这个顺序试，和这边的降级链一致） */
+export function nativeScriptFiles(): string[] {
+  const enabled = new Set(sourceManager.enabledIds())
+  return sourceManager
+    .list()
+    .filter(s => enabled.has(s.id) && s.status !== 'error' && !!s.filePath)
+    .map(s => s.filePath)
+}
+
+/** 平台登录 cookie（原生按域名注入，与这边 COOKIE_HOSTS 同一张表） */
+export function nativeCookies(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const p of ['wy', 'tx', 'kg', 'kw'] as const) {
+    const c = cookieOf(p)
+    if (c) out[p] = c
+  }
+  return out
+}
+
+/**
+ * 单首曲目的取链原料。返回 null = 原生接不了这首（本地文件另有 path，不走这里）。
+ *
+ * `raw` 拿不到（注册表被挤掉、还没搜过）时不要硬塞空对象：空对象会让脚本
+ * 拼出一个错地址，失败得比「直接告诉原生没有」更晚。
+ */
+export function nativeChainItem(
+  track: { id: string; path?: string; duration?: number; title?: string; artist?: string; album?: string; cover?: string | null },
+  index: number,
+  quality: string,
+): NativeChainItem | null {
+  const platform = platformOfTrackId(track.id)
+  if (!platform) return null
+  const song = effectiveSong(track.id)
+  if (!song?.raw) return null
+  return {
+    index,
+    /* 原生拿它去缓存目录里找现成文件：断网时这是「还能不能接着放」的关键 */
+    id: track.id,
+    platform,
+    quality,
+    raw: JSON.stringify(song.raw),
+    duration: song.interval || track.duration || 0,
+    title: track.title ?? song.name ?? '',
+    artist: track.artist ?? song.singer?.join('/') ?? '',
+    album: track.album ?? song.albumName ?? '',
+    cover: track.cover ?? song.img ?? '',
+  }
+}

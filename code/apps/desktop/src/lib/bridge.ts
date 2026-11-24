@@ -381,8 +381,18 @@ export const bridge = {
    * 时间轴才对得上时序，否则只能靠猜。
    */
   async trace(msg: string): Promise<void> {
-    if (!isAndroid) return
-    try { await invoke('trace', { msg }) } catch { /* 日志写不进去不影响播放 */ }
+    /*
+     * iOS 也要能记：安卓落自己的 trace，Tauri 端（桌面 + iOS）落 diag_log
+     * （同一个 app.log，512KB 自动轮换）。以前 `if (!isAndroid) return` 把
+     * iOS 的 `pf plan/send=`、`auto 对齐` 全吞了——「后台只播几首就停」这类
+     * 问题在 iPhone 上完全无法取证（2026-11-24）。
+     */
+    if (isAndroid) {
+      try { await invoke('trace', { msg }) } catch { /* 日志写不进去不影响播放 */ }
+      return
+    }
+    if (!isTauri) return
+    try { await invoke('diag_log', { event: 'trace', detail: msg }) } catch { /* 日志写不进去不影响播放 */ }
   },
   async stop(): Promise<void> { return invoke('stop') },
   async seek(secs: number): Promise<void> { return invoke('seek', { positionSecs: secs }) },

@@ -974,6 +974,13 @@ pub struct PlayerSnapshot {
     pub error: Option<String>,
     /// 在线曲目已缓冲到的秒数（本地曲目恒为 0）。进度条画淡色第二层用
     pub buffered: f64,
+    /// 预告表剩余条数。安卓的快照 payload 一直带着这个字段（前端
+    /// 「pf beat 补表」靠它发现表空了）；iOS 此前没有，导致亮屏在放时
+    /// 表空了前端也看不见、永远不补（2026-11-24 后台只播几首就停的帮凶之一）。
+    pub pf: usize,
+    /// 原生自己取链接上了下一首（后台 JS 冻住时走的那条路），报它接到的下标。
+    /// 和 `auto` 的区别：`auto` 是「表里已有直链、直接接」，这个是「现场取链」。
+    pub relayed: i64,
 }
 
 /// 前端事先递过来的「接下来几首」直链。
@@ -1033,6 +1040,21 @@ pub struct Shared {
     /// 在线曲目：已取到的字节前沿（HttpRangeReader 的 Arc 把手）。
     /// load_remote 时会整体换把柄，用 Mutex 包一层（每 250ms 才读一次，锁开销可忽略）
     pub buf_fetched: Mutex<Arc<AtomicU64>>,
+    /// 原生音源宿主（内嵌 QuickJS 跑音源脚本）。启动时注入，注入不了就永远为空。
+    pub host: OnceLock<Arc<crate::srchost::ScriptHost>>,
+    /// 前端递来的「接下来能播的歌 + 取链原料 + 音源脚本清单」。
+    /// 直链表（`prefetch`）空了的兜底：原生自己现场取链。
+    pub chain: Mutex<crate::srchost::ChainPayload>,
+    /// 每次「开始加载某一首」递增。后台取链线程回来时拿它对表，
+    /// 期间用户已经点了别的歌就丢弃这次结果（不许迟到的那首把新歌顶掉）。
+    pub load_gen: AtomicU64,
+    /// 原生现场取链接上的下标（一次性，前端对齐队列用；-1 = 没有）
+    pub relayed: AtomicI64,
+    /// 后台「取链全失败 → 过一会儿再试」的重试线程是否已经在跑。
+    ///
+    /// 防重复：一次失败会从好几个地方触发重试（曲终兜底、加载失败兜底），
+    /// 不挡一下就会同时起一堆线程对着同一个平台猛打。
+    pub relay_retrying: AtomicBool,
 }
 
 impl Default for Shared {
@@ -1056,6 +1078,11 @@ impl Default for Shared {
             fx: Arc::new(FxParams::default()),
             buf_total: AtomicU64::new(0),
             buf_fetched: Mutex::new(Arc::new(AtomicU64::new(0))),
+            host: OnceLock::new(),
+            chain: Mutex::new(crate::srchost::ChainPayload::default()),
+            load_gen: AtomicU64::new(0),
+            relayed: AtomicI64::new(-1),
+            relay_retrying: AtomicBool::new(false),
         }
     }
 }
@@ -1123,6 +1150,8 @@ impl Player {
             loop {
                 match rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(Cmd::Play { src, index, duration_hint, start_at, autoplay }) => {
+                        // 这一代作废所有在飞的「后台取链」结果（见 relay_next 的 gen 校验）
+                        sh.load_gen.fetch_add(1, Ordering::SeqCst);
                         let path = src.as_str().to_string();
                         let remote = src.is_remote();
                         sh.seeking.store(false, Ordering::SeqCst);
@@ -1186,11 +1215,24 @@ impl Player {
                             Ok(Err(e)) => Some(e),
                             Err(_) => Some("解码该文件时发生异常，文件可能已损坏".to_string()),
                         };
+                        let ok = failed.is_none();
                         if let Some(msg) = failed {
                             eprintln!("播放失败 {path}: {msg}");
+                            /*
+                             * 「这一首是原生自动接的」——曲终自己接的下一首，或者后台
+                             * 取链接上的下一首。这两种情况后台没人接手，一旦加载失败就是
+                             * **彻底静音**，用户听到的是「放到某首歌突然没声了，再也不往下走」。
+                             */
+                            let auto_chain = sh.auto.load(Ordering::SeqCst) >= 0
+                                || sh.relayed.load(Ordering::SeqCst) >= 0;
                             *sh.track.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             sh.remote.store(false, Ordering::SeqCst);
-                            sh.index.store(usize::MAX, Ordering::SeqCst);
+                            /*
+                             * 自动链接失败：**下标留着**，交给下面的 relay 从这首往后接。
+                             * 用户自己点的那首失败才清成 MAX——前端会弹提示并自己重试，
+                             * 原生抢跑跳首反而会让两边的下标打架。
+                             */
+                            sh.index.store(if auto_chain { index } else { usize::MAX }, Ordering::SeqCst);
                             // 通知前端：本地文件提示后自动跳下一首；在线曲目只提示、不跳（见 PlayerProvider）
                             let text = if remote {
                                 // 这里**不能**说「暂无版权」：取链已经成功了，挂的是拉流/解码，
@@ -1200,6 +1242,24 @@ impl Player {
                                 format!("无法播放「{}」：{msg}", short_name(&path))
                             };
                             *sh.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+                            /*
+                             * 自动链上坏了就跳过这首继续（`relay_next` 从当前下标往后接）。
+                             * 接上了就把提示清掉——否则用户回来看见一条「加载失败」的红条，
+                             * 而歌其实一直好好放着。
+                             */
+                            if auto_chain && relay_next(&sh, &tx_self) {
+                                *sh.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                            }
+                        }
+                        /*
+                         * 起唱之后顺手把**下一首**的直链先取好。
+                         *
+                         * 后台 JS 被冻住时没人补表，曲终现场取链会有 1~3 秒空白；
+                         * 这首有几分钟，足够原生慢慢取。表里已经有货（前台 JS 补过）
+                         * 就什么都不做，不跟它抢配额。
+                         */
+                        if ok {
+                            spawn_ahead(&sh, &tx_self);
                         }
                     }
                     Ok(Cmd::Pause) => {
@@ -1233,6 +1293,7 @@ impl Player {
                         sh.playing.store(false, Ordering::SeqCst);
                         sh.ended.store(false, Ordering::SeqCst);
                         sh.auto.store(-1, Ordering::SeqCst);
+                        sh.relayed.store(-1, Ordering::SeqCst);
                         sh.seeking.store(false, Ordering::SeqCst);
                         sh.spectrum.clear();
                     }
@@ -1340,12 +1401,7 @@ impl Player {
                          * **先问预告表：有下一首就自己接，不交给前端。**
                          *
                          * iOS 在后台会把 WebView 的 JS 冻住，`ended` 推过去没人接，
-                         * 用户听到的就是「放完这首就停」（2026-11-24 反馈）。
-                         * 这里直接按下一条命令，走的是和「用户点歌」完全同一条
-                         * 加载路径（同一套解码 / 缓冲 / 错误处理）。
-                         *
-                         * 接不上（表空 / 那首取链失败）才退回老路：置 `ended`，
-                         * 等前端醒来自己 next。
+                         * 用户听到的就是「放完这首就停」。
                          */
                         let next = sh
                             .prefetch
@@ -1386,6 +1442,16 @@ impl Player {
                                 });
                                 continue;
                             }
+                        }
+                        /*
+                         * **表里没有下一首的直链了 —— 原生自己现场取链。**
+                         *
+                         * 这是「无限后台」的关键一步：直链表是 JS 事先算好递过来的，
+                         * 后台 JS 被冻住就不会再补；原生内嵌 QuickJS 跑同一批音源脚本，
+                         * 所以只要网络在，链条就能一直往下接。
+                         */
+                        if relay_next(&sh, &tx_self) {
+                            continue;
                         }
                         sh.ended.store(true, Ordering::SeqCst);
                     }
@@ -1440,9 +1506,25 @@ impl Player {
          * 醒来会被一个过期的下标把队列拉回去。
          */
         self.shared.auto.store(-1, Ordering::SeqCst);
+        self.shared.relayed.store(-1, Ordering::SeqCst);
         self.tx
             .send(Cmd::Play { src, index, duration_hint, start_at, autoplay })
             .map_err(|e| e.to_string())
+    }
+
+    /// 注入原生音源宿主（内嵌 QuickJS）。启动时调一次，失败就一直走前端那条路。
+    pub fn set_host(&self, host: Arc<crate::srchost::ScriptHost>) {
+        let _ = self.shared.host.set(host);
+    }
+
+    /// 换一份「接下来能播的歌 + 取链原料 + 音源脚本清单」。
+    ///
+    /// 前端在队列/音质变化时整份递过来。原生只在「直链表空了」时才用它现场取链，
+    /// 平时不碰（前台 JS 自己会补表，配额留给它）。
+    pub fn set_chain(&self, payload: crate::srchost::ChainPayload) {
+        if let Ok(mut c) = self.shared.chain.lock() {
+            *c = payload;
+        }
     }
 
     /// 换一份预告表（前端在「当前这首已经在放」之后递过来）。
@@ -1458,8 +1540,7 @@ impl Player {
 
     pub fn pause(&self) {
         let _ = self.tx.send(Cmd::Pause);
-    }
-    pub fn resume(&self) {
+    }    pub fn resume(&self) {
         let _ = self.tx.send(Cmd::Resume);
     }
     pub fn stop(&self) {
@@ -1531,8 +1612,282 @@ impl Player {
             seeking: sh.seeking.load(Ordering::SeqCst),
             error: sh.error.lock().unwrap_or_else(|e| e.into_inner()).take(),
             buffered,
+            pf: sh.prefetch.lock().map(|q| q.len()).unwrap_or(0),
+            relayed: sh.relayed.load(Ordering::SeqCst),
         }
     }
+}
+
+/// 给其他模块用的日志入口（音源宿主跑在别的线程，不该直接 println）
+pub fn log(line: &str) {
+    log_line(line);
+}
+
+/// 队列顺序里的「下一首」。
+///
+/// 约定（前端照此递过来）：`items` 按**播放顺序**排，第一项是当前这首。
+/// 当前下标不在表里（比如队列刚换、前端还没对齐）时，取第一项当下一首。
+fn next_chain_item(
+    chain: &crate::srchost::ChainPayload,
+    cur: usize,
+) -> Option<crate::srchost::ChainItem> {
+    match chain.items.iter().position(|i| i.index == cur) {
+        /*
+         * 走到窗口末尾：队列本身是循环的（`advance` 三个模式都回绕），
+         * 所以回到窗口第一项接着放。
+         *
+         * 没有这一步，后台就只有一个周期的续航：60 首 ≈ 4 小时，或者
+         * 一个 20 首的歌单 ≈ 一个半小时，放完就静音——这正是用户说的
+         * 「四个小时还是会停」。
+         */
+        Some(p) => chain.items.get(p + 1).cloned().or_else(|| {
+            if chain.looping {
+                chain.items.first().cloned()
+            } else {
+                None
+            }
+        }),
+        None => chain.items.first().cloned(),
+    }
+}
+
+/// 系统媒体卡片（锁屏 / 控制中心）换到这一首
+fn card_for(item: &crate::srchost::ChainItem) {
+    if let Some(app) = APP.get() {
+        crate::smtc::update(
+            app,
+            item.title.clone(),
+            item.artist.clone(),
+            item.album.clone(),
+            true,
+            item.cover.clone(),
+            0.0,
+            item.duration,
+        );
+    }
+}
+
+/// 取链失败后最多往后跳几首再试（连跳三首都废，就当这轮真没得放了）
+const RELAY_SKIP_MAX: usize = 3;
+/// 全失败之后自愈重试：次数与间隔（6 次 × 15 秒 ≈ 一分半的断网容错）
+const RELAY_RETRY_MAX: usize = 6;
+const RELAY_RETRY_SECS: u64 = 15;
+
+/// 曲终兜底：直链表空了，**原生自己现场取链**接下一首。
+///
+/// 返回 true = 已经安排上了（同步放本地文件，或起了取链线程），调用方不要再置
+/// `ended`；返回 false = 接不上（没有原料 / 没有宿主），退回老路等前端醒来。
+fn relay_next(sh: &Arc<Shared>, tx: &Sender<Cmd>) -> bool {
+    relay_from(sh, tx, 0)
+}
+
+/// `skip` = 跳过窗口里的前几首（取链失败后接着往后试，见下方失败分支）。
+///
+/// 为什么必须能跳：一首歌取链失败就置 `ended`，用户听到的是「放到第 N 首突然
+/// 静音，再也不往下走了」——后台连着放几小时，撞上一首坏的概率并不低。
+/// 宁可跳过那一首，也不能让整条链断掉。
+fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
+    let cur = sh.index.load(Ordering::SeqCst);
+    if cur == usize::MAX {
+        return false;
+    }
+    let (files, cookies, item) = {
+        let Ok(chain) = sh.chain.lock() else { return false };
+        let mut it = next_chain_item(&chain, cur);
+        for _ in 0..skip {
+            it = it.and_then(|i| next_chain_item(&chain, i.index));
+        }
+        let Some(item) = it else { return false };
+        (chain.files.clone(), chain.cookies.clone(), item)
+    };
+
+    // 本地文件 / 整曲缓存：不用取链，直接接
+    //
+    // 前端递过来的 `path` 只是「递表那一刻」的快照。整张歌单只递一次之后，
+    // 之后播着播着才缓存好的歌这里并不知道——所以 `path` 空的时候再问一次磁盘
+    // （`cache_lookup_any`）。断网时这一步就是「还能不能接着放」的分界线。
+    let local = item
+        .path
+        .clone()
+        /* 文件得真在：清过缓存 / 用户删了歌，这条路径就是个死地址，别拿去播 */
+        .filter(|p| !p.is_empty() && std::path::Path::new(p).is_file())
+        .or_else(|| {
+            if item.id.is_empty() {
+                return None;
+            }
+            APP.get().and_then(|app| crate::cache_lookup_any(app, &item.id))
+        });
+    if let Some(p) = local {
+        sh.relayed.store(item.index as i64, Ordering::SeqCst);
+        card_for(&item);
+        log_line(&format!("relay(local) -> idx={} \"{}\"", item.index, item.title));
+        let _ = tx.send(Cmd::Play {
+            src: TrackSrc::File(p.clone()),
+            index: item.index,
+            duration_hint: item.duration,
+            start_at: 0.0,
+            autoplay: true,
+        });
+        return true;
+    }
+
+    /*
+     * 平台原始对象存的是「原样 JSON 文本」（`RawValue`），这里只解析这一首。
+     * 整张歌单几千首要是都展开成 Value 树，内存能吃掉几十 MB。
+     */
+    let Some(raw_text) = item.raw.clone() else { return false };
+    let Ok(raw) = serde_json::from_str::<serde_json::Value>(&raw_text) else {
+        log_line(&format!("relay 原料解析失败 idx={}", item.index));
+        return false;
+    };
+    let Some(host) = sh.host.get().cloned() else { return false };
+    if files.is_empty() {
+        return false;
+    }
+
+    /*
+     * 歌名先换：锁屏卡片停留在上一首会让人以为「卡住了」。
+     * 真取不到链时这张卡片会被前端的错误处理纠正回来。
+     *
+     * **只动卡片，不动 `relayed`**：取链可能失败，失败时前端要是已经按
+     * 「原生接到了第 N+1 首」对齐过队列，就会白白跳过一首（用户看到「少了一首」）。
+     */
+    card_for(&item);
+
+    let sh2 = sh.clone();
+    let tx2 = tx.clone();
+    let gen = sh.load_gen.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let r = host.resolve(&files, &item.platform, &item.quality, &raw, &cookies, 15_000);
+        // 期间用户自己点了别的歌：这次结果作废，绝不能把新歌顶掉
+        if sh2.load_gen.load(Ordering::SeqCst) != gen {
+            return;
+        }
+        match r {
+            Ok(url) => {
+                sh2.relayed.store(item.index as i64, Ordering::SeqCst);
+                log_line(&format!("relay -> idx={} \"{}\"", item.index, item.title));
+                let _ = tx2.send(Cmd::Play {
+                    src: TrackSrc::Url(url),
+                    index: item.index,
+                    duration_hint: item.duration,
+                    start_at: 0.0,
+                    autoplay: true,
+                });
+            }
+            Err(e) => {
+                log_line(&format!("relay 失败 idx={} {e}", item.index));
+                if sh2.load_gen.load(Ordering::SeqCst) == gen {
+                    /*
+                     * 这一首废了不代表该停。往后跳一首再试（最多三首），
+                     * 全部失败才认命置 `ended` 等前端处理。
+                     * `relay_from` 里会自己换卡片、自己校验 load_gen。
+                     */
+                    if skip < RELAY_SKIP_MAX && relay_from(&sh2, &tx2, skip + 1) {
+                        return;
+                    }
+                    sh2.ended.store(true, Ordering::SeqCst);
+                    /*
+                     * 后台没有前端来救，`ended` 就是**永久静音**。
+                     * 地铁 / 电梯断网几十秒回来，用户以为播放器挂了。
+                     * 这里挂一个有限次数的自愈重试：网回来了就接着放。
+                     */
+                    relay_retry_later(sh2.clone(), tx2.clone());
+                }
+            }
+        }
+    });
+    true
+}
+
+/// 后台取链全失败之后的自愈重试。
+///
+/// 后台没人接手时 `ended` 就是永久静音。断网几十秒（地铁 / 电梯 / 切飞行模式）
+/// 回来之后，用户不会去点播放——他以为播放器本来就该接着放。
+/// 这里每隔一段时间再试一轮，接上了就继续；试满次数才真放弃。
+///
+/// 只在 `ended` 没被消费、当前也没有在播的时候试：用户自己点了别的歌
+/// （`load_gen` 变了 / 在播了）就不该再插一脚。
+fn relay_retry_later(sh: Arc<Shared>, tx: Sender<Cmd>) {
+    /* 已经有一轮在跑了：别叠成一堆线程对着同一个平台猛打 */
+    if sh.relay_retrying.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..RELAY_RETRY_MAX {
+            std::thread::sleep(Duration::from_secs(RELAY_RETRY_SECS));
+            if sh.playing.load(Ordering::SeqCst) {
+                break; /* 已经放起来了（可能是前端醒来接的） */
+            }
+            if sh.index.load(Ordering::SeqCst) == usize::MAX {
+                break; /* 用户停掉了 / 队列被清空 */
+            }
+            if relay_from(&sh, &tx, 0) {
+                break; /* 安排上了（本地文件或新一轮取链） */
+            }
+        }
+        sh.relay_retrying.store(false, Ordering::SeqCst);
+    });
+}
+
+/// 起唱之后把下一首的直链先取好（表里已经有货就不动）。
+///
+/// 后台 JS 被冻住时没人补表，曲终现场取链会有 1~3 秒空白；这首有几分钟，
+/// 足够原生慢慢取。等 6 秒起手是为了让前台 JS 的补表先跑——那份带落地校验，
+/// 质量比这里高，配额也该优先给它。
+fn spawn_ahead(sh: &Arc<Shared>, tx: &Sender<Cmd>) {
+    let Some(host) = sh.host.get().cloned() else { return };
+    let cur = sh.index.load(Ordering::SeqCst);
+    if cur == usize::MAX {
+        return;
+    }
+    let (files, cookies, item) = {
+        let Ok(chain) = sh.chain.lock() else { return };
+        let Some(item) = next_chain_item(&chain, cur) else { return };
+        (chain.files.clone(), chain.cookies.clone(), item)
+    };
+    if item.path.is_some() || item.raw.is_none() || files.is_empty() {
+        return;
+    }
+    let sh2 = sh.clone();
+    let tx2 = tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(6_000));
+        {
+            let Ok(q) = sh2.prefetch.lock() else { return };
+            if !q.is_empty() {
+                return; // 前台已经补上了，别重复取链
+            }
+        }
+        if sh2.index.load(Ordering::SeqCst) != cur {
+            return; // 换过歌，这份「下一首」已经不作数
+        }
+        let Some(raw_text) = item.raw.clone() else { return };
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(&raw_text) else { return };
+        let Ok(url) = host.resolve(&files, &item.platform, &item.quality, &raw, &cookies, 15_000) else {
+            return;
+        };
+        if sh2.index.load(Ordering::SeqCst) != cur {
+            return;
+        }
+        let Ok(mut q) = sh2.prefetch.lock() else { return };
+        if q.iter().any(|p| p.index == item.index) {
+            return;
+        }
+        log_line(&format!("ahead -> idx={} \"{}\"", item.index, item.title));
+        q.push_back(PrefetchItem {
+            index: item.index,
+            path: None,
+            url: Some(url),
+            duration: item.duration,
+            title: item.title.clone(),
+            artist: item.artist.clone(),
+            album: item.album.clone(),
+            cover: item.cover.clone(),
+        });
+        drop(q);
+        let _ = tx2; // 只借通道占位：起唱由曲终那条路负责
+    });
 }
 
 /// 取文件名（错误提示里不暴露完整路径）
@@ -1716,4 +2071,72 @@ fn load_remote_inner(
             }
         };
     attach(mixer, decoder, sh, duration)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::srchost::{ChainItem, ChainPayload};
+
+    fn item(index: usize) -> ChainItem {
+        ChainItem {
+            index,
+            id: format!("tx_{index}"),
+            platform: "tx".into(),
+            quality: "320k".into(),
+            raw: Some(serde_json::json!({ "songmid": format!("m{index}") }).to_string()),
+            duration: 200.0,
+            title: format!("t{index}"),
+            artist: String::new(),
+            album: String::new(),
+            cover: String::new(),
+            path: None,
+        }
+    }
+
+    /// 前端约定：items 按播放顺序排，第一项是当前这首。
+    #[test]
+    fn next_chain_item_follows_order() {
+        let chain = ChainPayload {
+            files: vec![],
+            cookies: Default::default(),
+            items: vec![item(5), item(6), item(7)],
+            looping: false,
+        };
+        assert_eq!(next_chain_item(&chain, 5).map(|i| i.index), Some(6));
+        assert_eq!(next_chain_item(&chain, 6).map(|i| i.index), Some(7));
+        // 不循环的窗口用完：不能再接，交给前端
+        assert_eq!(next_chain_item(&chain, 7).map(|i| i.index), None);
+        // 当前下标不在表里（队列刚换）→ 拿第一项
+        assert_eq!(next_chain_item(&chain, 99).map(|i| i.index), Some(5));
+    }
+
+    /// 首尾相接：走到窗口末尾回到第一项。**这是「后台永远不停」的关键**。
+    #[test]
+    fn next_chain_item_wraps_when_looping() {
+        let chain = ChainPayload {
+            files: vec![],
+            cookies: Default::default(),
+            items: vec![item(5), item(6), item(7)],
+            looping: true,
+        };
+        assert_eq!(next_chain_item(&chain, 5).map(|i| i.index), Some(6));
+        assert_eq!(next_chain_item(&chain, 6).map(|i| i.index), Some(7));
+        assert_eq!(next_chain_item(&chain, 7).map(|i| i.index), Some(5));
+        // 一整个周期之后还是同一套顺序，永远接得下去
+        assert_eq!(next_chain_item(&chain, 5).map(|i| i.index), Some(6));
+    }
+
+    /// 单曲循环：窗口只有一条，靠回绕无限重放同一首
+    #[test]
+    fn next_chain_item_repeat_one() {
+        let chain = ChainPayload {
+            files: vec![],
+            cookies: Default::default(),
+            items: vec![item(3)],
+            looping: true,
+        };
+        assert_eq!(next_chain_item(&chain, 3).map(|i| i.index), Some(3));
+        assert_eq!(next_chain_item(&chain, 3).map(|i| i.index), Some(3));
+    }
 }

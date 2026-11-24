@@ -20,7 +20,8 @@ import { NoPlayableSourceError, type PlatformSource } from '@shuyin/lx-provider'
 import { favRecOf, useFavs } from './favTracks'
 import { recordHistory } from './history'
 import {
-  coverForTrack, effectiveSong, ensureRegistry, forgetSubstitute, getPreferredQuality, isCacheCopyTrack, isOnlineTrack, onlineLyric, pinSongs,
+  coverForTrack, effectiveSong, ensureRegistry, forgetSubstitute, getPreferredQuality, isCacheCopyTrack, isOnlineTrack, nativeChainItem,
+  nativeCookies, nativeScriptFiles, onlineLyric, pinSongs,
   qualityDropMatters, resolvePlayUrl, setPreferredQuality, songOf, sourceManager, trackOfId,
   usableQualities,
 } from './online'
@@ -1281,8 +1282,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
          * 这里只**对齐下标**：再调一次 advance 就成跳一首了。
          * 播放相关的 refs 一起换掉，否则「试听识别」「已加载」还是上一首的。
          */
-        const auto = (p as { auto?: unknown }).auto
-        if (typeof auto === 'number' && auto >= 0) {
+        const autoRaw = (p as { auto?: unknown }).auto
+        /*
+         * `relayed` 是「直链表空了、原生自己现场取链接上的下标」（见 player.rs
+         * 的 relay_next）。两条路对前端的意义完全一样：**只对齐下标，不要再
+         * advance 一次**，否则会连跳两首。
+         */
+        const relayedRaw = (p as { relayed?: unknown }).relayed
+        const auto = Math.max(
+          typeof autoRaw === 'number' ? autoRaw : -1,
+          typeof relayedRaw === 'number' ? relayedRaw : -1,
+        )
+        if (auto >= 0) {
           const q = queueRef.current
           if (q.index !== auto) {
             const t = q.queue[auto]
@@ -1423,8 +1434,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
          * 每一帧状态都是原生 `evaluateJavascript` 推过来的，**不受定时器节流影响**，
          * 所以「表空了」这件事在任何时候都能被看见。12 秒防抖只是避免连续取链
          * 把平台打出限流（那反而会让失败率更高）。
+         *
+         * 平台守卫必须加：桌面/iOS 的快照现在也带 `pf` 字段（iOS 2026-11-24 补的），
+         * 桌面没有「后台冻 JS」这回事，表空了按队列变化那条 effect 重算就够，
+         * 这条心跳要是在桌面也跑，播放期间每 12 秒取一轮链——纯烧配额。
          */
-        if (p.playing && typeof p.pf === 'number' && p.pf <= 0 && !loadingRef.current && !pfBusy.current) {
+        if ((isAndroid || isIOS) && p.playing && typeof p.pf === 'number' && p.pf <= 0 && !loadingRef.current && !pfBusy.current) {
           const now = Date.now()
           if (now - pfBeatAt.current > pfGap.current) {
             pfBeatAt.current = now
@@ -1664,7 +1679,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 用户 2026-11-15 的原话：「顶多预加载下一首我感觉就差不多了」。
    * 取 2：下一首 + 再下一首兜底（第一首取链失败时表里还有一条，不至于断）。
    */
-  const PREFETCH_N = 2
+  /*
+   * 表深 4（2026-11-24 前是 2）：iOS 后台 JS 被冻住，没人补表——原生曲终
+   * 接完手里这几首就停在曲末。2 首意味着亮屏一次只能撑 3 首；4 首撑 5 首。
+   * 代价是多两次取链，有 sig-skip（同一份计划 2 分钟不重取）和 pf beat（只在
+   * 表空时补）两道闸兜着，配额开销可控。缓存命中（见下面的缓存优先）不花配额。
+   */
+  const PREFETCH_N = 4
   /**
    * 取链并发度。
    *
@@ -1872,6 +1893,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
            */
           await waitIdle(700)
           if (seq !== prefetchSeq.current) return
+          /*
+           * **缓存优先**：已经整曲落盘的歌直接按本地文件进表。
+           *
+           * 原生曲终接歌拿到的是本地路径的话，后台接歌就不再依赖「直链没过期 +
+           * 后台网络可用」，也完全不花平台配额。命中判定和 startLoad 那条路
+           * （见上方「先看缓存」）同一套：同一首歌不该一边走缓存播、一边进表时
+           * 又去取链。
+           */
+          const hit = await cachedAudio(
+            t.id,
+            effectiveSong(t.id)?.interval || t.duration || 0,
+            effectiveSong(t.id)?.name || t.title || '',
+          ).catch(() => null)
+          if (seq !== prefetchSeq.current) return
+          if (hit) { slots[i] = { ...head, path: hit }; continue }
           const r = await resolvePlayUrl(t, { cancel: () => seq !== prefetchSeq.current })
           slots[i] = { ...head, url: r.url, duration: r.duration || head.duration }
         } catch (e) {
@@ -1961,6 +1997,93 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     prefetchTimer.current = window.setTimeout(() => { void buildPrefetchRef.current(queueRef.current) }, 1200)
     return () => window.clearTimeout(prefetchTimer.current)
   }, [queueState.index, queueState.queue, queueState.repeat, queueState.order, snapshot.playing])
+
+  /*
+   * 把「接下来能播的歌 + 取链原料 + 启用的音源脚本」整份递给原生。
+   *
+   * 这是「无限后台」的底座：直链表是 JS 算出来的，后台 JS 一冻就没人补；
+   * 原生内嵌 QuickJS 跑同一批音源脚本（见 src-tauri/src/srchost.rs），
+   * 手里有原料就能自己一直往下接，不必等前端醒过来。
+   *
+   * **递的是整张歌单**（从当前这首走到队尾，`loop` 让原生在队尾回头），
+   * 所以依赖里**故意没有 `queueState.index`**：这张表不跟下标滚动，原生按
+   * 「当前下标在表里的位置」自己找下一首。只有队列 / 顺序 / 音质真的变了才
+   * 重推一次——否则几千首的歌单每换一首就要序列化几 MB，那才是真的卡。
+   */
+  useEffect(() => {
+    /*
+     * 只有 iOS 需要：桌面 JS 永远活着，安卓是 Kotlin 引擎自己接歌。
+     * 在安卓上白调一次只会得到「没有这条命令」，没必要。
+     */
+    if (!isIOS) return
+    let cancelled = false
+    /*
+     * 防抖：切歌单时队列会连着变好几次（先清空再填），
+     * 500ms 把这一串压成一次推送。
+     */
+    const timer = window.setTimeout(() => { void (async () => {
+      try {
+        const quality = onlineQuality ?? (await getPreferredQuality())
+        if (cancelled) return
+        const q = queueRef.current
+        /*
+         * 走一遍「从当前这首开始的一整张歌单」。
+         *
+         * `advance` 三个模式都会回绕（列表循环回到 0、随机回到 order[0]、
+         * 单曲循环原地返回同一首），所以这里按 `queue.length` 步走就够了，
+         * 不需要再判 repeat；单曲循环第一步就原地打转，直接收一条。
+         */
+        const picked: Array<{ index: number; track: LocalTrack }> = []
+        let walk = q
+        for (let k = 0; k < Math.max(q.queue.length, 1); k++) {
+          const t = walk.queue[walk.index]
+          if (!t) break
+          picked.push({ index: walk.index, track: t })
+          const next = advance(walk)
+          if (!next) break
+          /* 单曲循环：advance 原地不动，一条就够（原生靠 loop 回头重放这首） */
+          if (next.queue === walk.queue && next.index === walk.index) break
+          walk = next
+        }
+        /*
+         * 本地库里的歌直接给文件路径；在线歌曲只给「平台 + 原始对象」，
+         * **不在这里查缓存**——原生接歌时会自己去缓存目录找（`cache_lookup_any`），
+         * 而且能看到「递表之后才缓存好」的那些。在这边查一遍等于几千次 IPC，
+         * 还只能看到递表那一刻的快照。
+         */
+        const items = picked
+          .map(({ index, track }) => {
+            if (!isOnlineTrack(track)) {
+              return track.path
+                ? { index, id: track.id, platform: '', quality: '', raw: null, duration: track.duration ?? 0, title: track.title ?? '', artist: track.artist ?? '', album: track.album ?? '', cover: track.cover ?? '', path: track.path }
+                : null
+            }
+            return nativeChainItem(track, index, quality)
+          })
+          .filter(Boolean) as unknown as Array<Record<string, unknown>>
+        if (!items.length || cancelled) return
+        await bridge.invoke('native_chain', {
+          payload: {
+            files: nativeScriptFiles(),
+            cookies: nativeCookies(),
+            items,
+            /* 走到窗口末尾回到第一项：队列本来就会回绕，原生据此永远接得下去 */
+            loop: true,
+          },
+        }).catch(() => { /* 桌面端没有这条命令时静默 */ })
+      } catch {
+        /* 原料凑不齐不影响正常播放：原生接不上会退回老路 */
+      }
+    })() }, 500)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+    /*
+     * 注意这里**没有 `queueState.index`**。
+     *
+     * 这张表是整张歌单，原生自己按当前下标找位置，所以下标怎么跳都不需要
+     * 重推。加进来就等于每换一首歌序列化一张完整歌单（几千首 = 几 MB），
+     * 后台接歌还没出问题，前台先卡成幻灯片了。
+     */
+  }, [queueState.queue, queueState.repeat, queueState.order, onlineQuality])
 
   /*
    * 切后台 / 熄屏前最后一搏：`visibilitychange` 是页面彻底被冻住之前**还能跑完

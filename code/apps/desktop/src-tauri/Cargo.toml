@@ -57,6 +57,14 @@ base64 = "0.22"
 # 用系统 TLS（Windows=schannel），不额外打包根证书
 ureq = { version = "2", default-features = false, features = ["native-tls", "gzip"] }
 
+# 音源脚本宿主（迁移到 Rust）：内嵌 QuickJS 跑洛雪音源脚本。
+#
+# 为什么必须内嵌：播放地址只能由「音源脚本」给出（平台层只负责搜索/歌词/评论），
+# 而这些脚本现在跑在 WebView 的 Worker 里——iOS 切后台后 WebView 被系统挂起，
+# 拿不到下一首的地址，表现就是「放完这首就停」。脚本在原生进程里跑，
+# 后台接歌就不再依赖 WebView 是否活着。
+rquickjs = "0.9"
+
 # Windows 专属 API（注意：必须放在文件末尾——TOML 的 target 小节会吞掉
 # 其后所有依赖，之前就是被吞导致 macOS 构建缺插件权限）
 [target.'cfg(windows)'.dependencies]

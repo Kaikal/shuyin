@@ -15,6 +15,7 @@ pub mod net;
 pub mod platform_login;
 pub mod player;
 pub mod smtc;
+pub mod srchost;
 #[cfg(windows)]
 pub mod wallpaper;
 #[cfg(not(windows))]
@@ -467,6 +468,16 @@ fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
         })
         .collect();
     player.set_prefetch(list);
+}
+
+/// 原生取链上下文：接下来能播的歌 + 取链原料 + 启用的音源脚本。
+///
+/// 为什么要把「原料」交给原生：iOS 后台 WebView 的 JS 会被冻住，直链表耗完
+/// 之后没人补。原生内嵌 QuickJS 跑同一批音源脚本，就能自己往下接——
+/// 这是「无限后台」的底座。前端只在队列/音质变化时整份递一次，平时不通信。
+#[tauri::command]
+fn native_chain(player: State<'_, Player>, payload: srchost::ChainPayload) {
+    player.set_chain(payload);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1188,12 +1199,51 @@ struct CacheDirSetInfo {
 
 /// 缓存文件名：曲目 id 里可能带 `:` `/`，全部换成 `_`
 fn cache_name(key: &str, ext: &str) -> String {
-    let safe: String = key
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
+    let safe = safe_key(key);
     let ext = if ext.starts_with('.') { ext.to_string() } else { format!(".{ext}") };
     format!("{}{}", safe, ext)
+}
+
+/// 文件名里能出现的曲目 id（和 `cache_name` 同一套替换规则，改一个必须改另一个）
+fn safe_key(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// 按曲目 id **扫目录**找缓存，不要求知道扩展名。
+///
+/// 后台接歌要用：前端只在换歌单时递一次整张表，几百首之后用户恰好断网，
+/// 表里那些「递表时还没缓存、后来缓存好了」的歌要是只靠出网就全废了。
+/// 原生这边直接看磁盘，缓存过的一律按本地文件播——这是离线后台最稳的一条路。
+///
+/// 不用索引：索引在前端的内存里（`cache.audioIndex`），后台 JS 冻住读不到；
+/// 目录扫描是一次 `read_dir`，几千个文件也只有几毫秒，曲终才调一次。
+pub(crate) fn cache_lookup_any(app: &AppHandle, key: &str) -> Option<String> {
+    let safe = safe_key(key);
+    if safe.is_empty() {
+        return None;
+    }
+    let dir = cache_audio_dir(app);
+    let rd = std::fs::read_dir(&dir).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let Some((stem, _ext)) = name.rsplit_once('.') else { continue };
+        if stem != safe {
+            continue;
+        }
+        if let Ok(m) = e.metadata() {
+            if m.len() > 4096 {
+                return Some(p.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// 查缓存：命中且文件非空才返回路径，否则返回 None（前端据此决定要不要重新取链）
@@ -3254,6 +3304,14 @@ pub fn run() {
             app.manage(db);
 
             let player = crate::player::Player::new()?;
+            /*
+             * 原生音源宿主（内嵌 QuickJS）：播放地址只能由音源脚本给出，
+             * 而脚本原先跑在 WebView 的 Worker 里——iOS 切后台就被冻住。
+             * 搬到原生进程后，后台接歌不再依赖 WebView 是否活着。
+             */
+            player.set_host(std::sync::Arc::new(crate::srchost::ScriptHost::new_with_log(|l| {
+                crate::player::log(l)
+            })));
             app.manage(player);
             // 音频线程没有 AppHandle，日志路径从这儿注入（打包版 stderr 看不到）
             crate::player::set_log_path(log_path(app.handle()));
@@ -3493,6 +3551,7 @@ pub fn run() {
             hotkeys_clear,
             player_state,
             next_prefetch,
+            native_chain,
             play_file,
             play_url,
             net_request,
