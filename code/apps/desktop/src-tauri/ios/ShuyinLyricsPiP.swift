@@ -126,12 +126,16 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         if timebase == nil {
             var tb: CMTimebase?
             /*
-             * 注意调用形式：这些 CoreMedia/CoreVideo 的 C 函数在 Swift 里是
-             * **无参数标签**的（头文件没写 CF_SWIFT_NAME）。写成 allocator: 那种
-             * 会直接编译不过——CI 上就是一条 unrelated 的报错。
+             * 注意调用形式：CoreMedia 这几个 C 函数在 Swift 里是**有参数标签**的
+             * （allocator: / sourceClock: / timebaseOut: ...）。上一版按「没有
+             * CF_SWIFT_NAME 就无标签」推断，CI 直接报 missing argument labels。
+             * 与它们不同，同一批里的 CMTimebaseSetTime / SetRate 第一个参数才是
+             * 无标签的（`_ timebase:`）——只能以编译器为准，不能靠猜。
              */
             _ = CMTimebaseCreateWithSourceClock(
-                kCFAllocatorDefault, CMClockGetHostTimeClock(), &tb,
+                allocator: kCFAllocatorDefault,
+                sourceClock: CMClockGetHostTimeClock(),
+                timebaseOut: &tb,
             )
             if let tb {
                 timebase = tb
@@ -271,7 +275,9 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         /* 位图 → CMSampleBuffer（画中画的喂帧格式） */
         var fmt: CMVideoFormatDescription?
         guard CMVideoFormatDescriptionCreateForImageBuffer(
-            kCFAllocatorDefault, buf, &fmt,
+            allocator: kCFAllocatorDefault,
+            imageBuffer: buf,
+            formatDescriptionOut: &fmt,
         ) == noErr, let fmt else { return nil }
 
         /*
@@ -293,7 +299,11 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         )
         var sb: CMSampleBuffer?
         guard CMSampleBufferCreateReadyWithImageBuffer(
-            kCFAllocatorDefault, buf, fmt, &timing, &sb,
+            allocator: kCFAllocatorDefault,
+            imageBuffer: buf,
+            formatDescription: fmt,
+            sampleTiming: &timing,
+            sampleBufferOut: &sb,
         ) == noErr else { return nil }
         return sb
     }
