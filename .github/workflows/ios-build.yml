@@ -271,6 +271,13 @@ jobs:
       - name: Build for device (unsigned; export step allowed to fail)
         run: |
           mkdir -p build-logs
+          # rquickjs-sys 的 iOS 绑定要现场 bindgen（见 src-tauri/Cargo.toml 的
+          # target.'cfg(target_os="ios")' 段）。给它指明 iOS SDK，否则 clang 按
+          # 宿主 macOS 的 sysroot 解析 quickjs.h 里的 <stdint.h> 会找不到。
+          if command -v xcrun >/dev/null 2>&1; then
+            export BINDGEN_EXTRA_CLANG_ARGS="-isysroot $(xcrun --sdk iphoneos --show-sdk-path)"
+            echo "BINDGEN_EXTRA_CLANG_ARGS=$BINDGEN_EXTRA_CLANG_ARGS"
+          fi
           # 这里以前是整条 `|| true`：Rust/archive 失败也被吞掉，错误只剩下一步
           # 的一句「主包没出来」，看起来像扩展的问题（2026-11-24 就这么被带偏的）。
           # 现在只放过「导出 IPA 需要证书」那一段，但**必须真的产出 .app**，

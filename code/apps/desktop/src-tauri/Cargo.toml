@@ -65,6 +65,15 @@ ureq = { version = "2", default-features = false, features = ["native-tls", "gzi
 # 后台接歌就不再依赖 WebView 是否活着。
 rquickjs = "0.9"
 
+# iOS 没有预生成的 bindings（rquickjs-sys 0.9 只带 darwin/linux/windows），
+# 不现场 bindgen 会直接 include! 失败：
+#   couldn't find file `.../bindings/aarch64-apple-ios.rs`
+# **只在 iOS 目标下开这个 feature**：桌面开 bindgen 会要求本机装 libclang，
+# 用户那台 Windows 上没有，会把本地 NSIS 打包搞坏。edition 2021 = resolver 2，
+# feature 不跨 target 合并，所以桌面拿到的仍是预生成绑定。
+[target.'cfg(target_os = "ios")'.dependencies]
+rquickjs = { version = "0.9", features = ["bindgen"] }
+
 # Windows 专属 API（注意：必须放在文件末尾——TOML 的 target 小节会吞掉
 # 其后所有依赖，之前就是被吞导致 macOS 构建缺插件权限）
 [target.'cfg(windows)'.dependencies]
