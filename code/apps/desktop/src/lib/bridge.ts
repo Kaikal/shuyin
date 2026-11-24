@@ -224,6 +224,17 @@ export interface PlayerStateSnapshot {
   error?: string | null
   /** 在线曲目已缓冲到的秒数（本地恒 0），进度条画淡色第二层用 */
   buffered?: number
+  /**
+   * 原生自己接上了下一首，报它接到的下标（-1 / 缺省 = 没有）。
+   *
+   * `auto` 走的是前端事先递过去的直链表（`next_prefetch`）；`relayed` 是直链表
+   * 空了、原生内嵌 QuickJS 现场取链接上的。两者对前端意义一样：**只对齐下标，
+   * 不要再 advance 一次**。iOS 上这两个字段是「切后台回来封面标题不换」的解药。
+   */
+  auto?: number
+  relayed?: number
+  /** 原生手里「下一首预告表」还剩几首 */
+  pf?: number
 }
 
 export interface ScanProgressPayload {

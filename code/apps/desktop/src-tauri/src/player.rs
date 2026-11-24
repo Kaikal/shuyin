@@ -1773,7 +1773,7 @@ fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
     if cur == usize::MAX {
         return false;
     }
-    let (files, cookies, item) = {
+    let (scripts, cookies, item) = {
         let Ok(chain) = sh.chain.lock() else { return false };
         let mut it = next_chain_item(&chain, cur);
         for _ in 0..skip {
@@ -1792,7 +1792,7 @@ fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
             return false;
         };
 
-        (chain.files.clone(), chain.cookies.clone(), item)
+        (chain.scripts.clone(), chain.cookies.clone(), item)
     };
 
     // 本地文件 / 整曲缓存：不用取链，直接接
@@ -1835,7 +1835,7 @@ fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
         return false;
     };
     let Some(host) = sh.host.get().cloned() else { return false };
-    if files.is_empty() {
+    if scripts.is_empty() {
         return false;
     }
 
@@ -1852,7 +1852,7 @@ fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
     let tx2 = tx.clone();
     let gen = sh.load_gen.load(Ordering::SeqCst);
     std::thread::spawn(move || {
-        let r = host.resolve(&files, &item.platform, &item.quality, &raw, &cookies, 15_000);
+        let r = host.resolve(&scripts, &item.platform, &item.quality, &raw, &cookies, 15_000);
         // 期间用户自己点了别的歌：这次结果作废，绝不能把新歌顶掉
         if sh2.load_gen.load(Ordering::SeqCst) != gen {
             return;
@@ -1935,12 +1935,12 @@ fn spawn_ahead(sh: &Arc<Shared>, tx: &Sender<Cmd>) {
     if cur == usize::MAX {
         return;
     }
-    let (files, cookies, item) = {
+    let (scripts, cookies, item) = {
         let Ok(chain) = sh.chain.lock() else { return };
         let Some(item) = next_chain_item(&chain, cur) else { return };
-        (chain.files.clone(), chain.cookies.clone(), item)
+        (chain.scripts.clone(), chain.cookies.clone(), item)
     };
-    if item.path.is_some() || item.raw.is_none() || files.is_empty() {
+    if item.path.is_some() || item.raw.is_none() || scripts.is_empty() {
         return;
     }
     let sh2 = sh.clone();
@@ -1958,7 +1958,7 @@ fn spawn_ahead(sh: &Arc<Shared>, tx: &Sender<Cmd>) {
         }
         let Some(raw_text) = item.raw.clone() else { return };
         let Ok(raw) = serde_json::from_str::<serde_json::Value>(&raw_text) else { return };
-        let Ok(url) = host.resolve(&files, &item.platform, &item.quality, &raw, &cookies, 15_000) else {
+        let Ok(url) = host.resolve(&scripts, &item.platform, &item.quality, &raw, &cookies, 15_000) else {
             return;
         };
         if sh2.index.load(Ordering::SeqCst) != cur {
@@ -2192,7 +2192,7 @@ mod tests {
     #[test]
     fn next_chain_item_follows_order() {
         let chain = ChainPayload {
-            files: vec![],
+            scripts: vec![],
             cookies: Default::default(),
             items: vec![item(5), item(6), item(7)],
             looping: false,
@@ -2209,7 +2209,7 @@ mod tests {
     #[test]
     fn next_chain_item_wraps_when_looping() {
         let chain = ChainPayload {
-            files: vec![],
+            scripts: vec![],
             cookies: Default::default(),
             items: vec![item(5), item(6), item(7)],
             looping: true,
@@ -2225,7 +2225,7 @@ mod tests {
     #[test]
     fn next_chain_item_repeat_one() {
         let chain = ChainPayload {
-            files: vec![],
+            scripts: vec![],
             cookies: Default::default(),
             items: vec![item(3)],
             looping: true,

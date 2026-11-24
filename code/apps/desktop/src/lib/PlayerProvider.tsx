@@ -21,7 +21,7 @@ import { favRecOf, useFavs } from './favTracks'
 import { recordHistory } from './history'
 import {
   coverForTrack, effectiveSong, ensureRegistry, forgetSubstitute, getPreferredQuality, isCacheCopyTrack, isOnlineTrack, nativeChainItem,
-  nativeCookies, nativeScriptFiles, onlineLyric, pinSongs,
+  nativeCookies, nativeScripts, onlineLyric, pinSongs,
   qualityDropMatters, resolvePlayUrl, setPreferredQuality, songOf, sourceManager, trackOfId,
   usableQualities,
 } from './online'
@@ -473,6 +473,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    */
   const snapRef = useRef<PlayerSnapshot>({ playing: false, position: 0, duration: 0, volume: 0.8, buffered: 0 })
   snapRef.current = snapshot
+  /**
+   * 「原生自己接了下一首 → 把前端队列下标追上去」的唯一实现（下面 1750 行附近赋值）。
+   *
+   * 为什么要一个 ref 转一手：完整的对齐要动 `queueRef` / `curLoad` / `loadedRef`
+   * 这些 ref，它们有一部分声明在看门狗 effect **后面**（`queueRef` 在 1754）。
+   * 直接把逻辑写在 effect 里会撞上「用了还没声明的东西」，写两份又会漂移——
+   * 这里沿用 `buildPrefetchRef` 那套：渲染期把最新实现挂到 ref 上，
+   * 早声明的 effect 通过 ref 调。
+   *
+   * 为什么除事件流之外还要看门狗也调：**iOS 从后台回来时 `player://state` 事件
+   * 流可能已经断了**（WebView 被冻过、订阅那段 await 抛错）。这种情况下的表现
+   * 就是用户 2026-11-24 报的：歌在响、锁屏卡片也对，**App 里的封面标题停在
+   * 上一首**——因为只有事件流那条路会对齐下标，而它没在跑。
+   */
+  const syncNativeIndexRef = useRef<(st: { auto?: unknown; relayed?: unknown }) => void>(() => {})
   /**
    * 「我刚刚点的那一下」——播放态的操作意图。
    *
@@ -1279,51 +1294,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
          * 「切歌期间停掉、亮屏又接着播」）。现在原生手里有前端事先递过去的
          * 直链，放完自己接，并把「我现在是第几首」写进每一帧状态。
          *
-         * 这里只**对齐下标**：再调一次 advance 就成跳一首了。
-         * 播放相关的 refs 一起换掉，否则「试听识别」「已加载」还是上一首的。
+         * 对齐的实现在 `syncNativeIndexRef`（见上面那处赋值）：事件流和看门狗
+         * 共用同一份，避免两边对「怎么对齐」有不同理解。
          */
-        const autoRaw = (p as { auto?: unknown }).auto
-        /*
-         * `relayed` 是「直链表空了、原生自己现场取链接上的下标」（见 player.rs
-         * 的 relay_next）。两条路对前端的意义完全一样：**只对齐下标，不要再
-         * advance 一次**，否则会连跳两首。
-         */
-        const relayedRaw = (p as { relayed?: unknown }).relayed
-        const auto = Math.max(
-          typeof autoRaw === 'number' ? autoRaw : -1,
-          typeof relayedRaw === 'number' ? relayedRaw : -1,
-        )
-        if (auto >= 0) {
-          const q = queueRef.current
-          if (q.index !== auto) {
-            const t = q.queue[auto]
-            if (t) {
-              playWant.current = null
-              stopLoading()
-              curLoad.current = { track: t, index: auto }
-              loadedRef.current = trackKey(t)
-              loadExpect.current = t.duration || 0
-              curOnlineRef.current = isOnlineTrack(t)
-              lastPlayedIndex.current = auto
-              /*
-               * **`queueRef` 必须在这里同步写掉。**
-               *
-               * `setQueueState` 只是排一次渲染，而 `queueRef` 是由 effect 跟着渲染同步的
-               * （见下方 `useEffect(() => { queueRef.current = queueState })`）。
-               * 也就是说：这一帧对齐完下标之后，**同一个回调里**读 `queueRef.current`
-               * 拿到的还是上一首的下标。
-               *
-               * 下面那段「预告表空了就补」正好在同一个回调里、就在几行之后 —— 它拿
-               * 旧下标重新算一遍预告表，算出来的还是刚放完的那两首。原生照着这份表
-               * 接着放，于是同一对歌来回放：用户 2026-11-17 报的
-               * 「过一段时间就只有 2 首循环」。先摊平这个时序，别指望 React 的批次。
-               */
-              queueRef.current = { ...q, index: auto }
-              setQueueState(s => (s.index === auto ? s : { ...s, index: auto }))
-              void bridge.trace(`auto 对齐 idx=${auto}`)
-            }
-          }
-        }
+        syncNativeIndexRef.current(p as { auto?: unknown; relayed?: unknown })
         if (curOnlineRef.current && p.duration > 5) {
           const expect = loadExpect.current
           const here = curLoad.current
@@ -1536,6 +1510,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
             duration: st.duration > 0 ? st.duration : cur.duration,
           })
         }
+        /*
+         * 下标也要对账——**这条是 iOS 从后台回来的救命道**。
+         *
+         * `player://state` 事件流断了的时候，播放态和进度会被上面那段拉回来，
+         * 但「现在放到第几首」没人管：原生自己接了下一首（auto / relayed），
+         * 前端还停在上一首，界面就是用户 2026-11-24 报的样子——
+         * **歌在响，封面和标题一直不动**。
+         * 对齐本身幂等（下标一样就返回），每 2 秒问一次不值得省。
+         */
+        syncNativeIndexRef.current(st)
       }).catch(() => { /* 问不到就算了，下一次再试 */ })
     }, 2000)
 
@@ -1804,7 +1788,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    *   · 走到队列末尾 → `advance` 返回 null，表就短一截
    */
   const buildPrefetch = useCallback(async (base: QueueState, opts?: { force?: boolean }) => {
-    if (!isAndroid) return
+    /*
+     * 桌面（Windows）没有 `next_prefetch` 这条命令，表递过去也没人接，挡在门外。
+     *
+     * **iOS 必须放进来。** 以前这里只放安卓（`if (!isAndroid) return`），于是
+     * iPhone 上这张表从来没递过——原生 `pf` 恒为 0，曲终只能现场取链（relay）。
+     * 2026-11-24 用户日志里一条 `pf recv` 都没有、`end … pf=0 chain=292`，
+     * 就是这条守卫造成的：整张歌单递到了，直链表却是空的。
+     */
+    if (!isAndroid && !isIOS) return
     /*
      * 同一个「起点」的重算没有任何意义 —— 挡在门外。
      *
@@ -1969,6 +1961,44 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   buildPrefetchRef.current = buildPrefetch
 
   /*
+   * 原生自己接了下一首：把前端队列下标追上去。
+   *
+   * 两个来源，语义完全一样（都只**对齐**，绝不再 `advance` 一次，否则连跳两首）：
+   *   · `auto`    —— 直链表（`next_prefetch`）里有货，原生直接接
+   *   · `relayed` —— 直链表空了，原生内嵌 QuickJS 现场取链接上（见 player.rs relay_next）
+   *
+   * 调用点有两个：`player://state` 事件流（250ms 一帧）和 2 秒一次的看门狗。
+   * 后者不是冗余——iOS 从后台回来时事件流可能已经断了，只靠前者，用户看到的
+   * 就是「歌在响、封面标题不动」。
+   */
+  syncNativeIndexRef.current = (st) => {
+    const a = typeof st.auto === 'number' ? st.auto : -1
+    const r = typeof st.relayed === 'number' ? st.relayed : -1
+    const auto = Math.max(a, r)
+    if (auto < 0) return
+    const q = queueRef.current
+    if (q.index === auto) return
+    const t = q.queue[auto]
+    /* 队列刚被换掉、原生手里的下标越界：等下一次对齐，不要瞎写 index */
+    if (!t) return
+    playWant.current = null
+    stopLoading()
+    curLoad.current = { track: t, index: auto }
+    loadedRef.current = trackKey(t)
+    loadExpect.current = t.duration || 0
+    curOnlineRef.current = isOnlineTrack(t)
+    lastPlayedIndex.current = auto
+    /*
+     * `queueRef` 必须**同步**写掉，不能等渲染后那条 effect：
+     * 同一个回调里紧接着就可能有人读它（补预告表、落盘），读到旧下标就会
+     * 按上一首重新算一遍表，原生照着放 → 同一对歌来回循环。
+     */
+    queueRef.current = { ...q, index: auto }
+    setQueueState(s => (s.index === auto ? s : { ...s, index: auto }))
+    void bridge.trace(`auto 对齐 idx=${auto}`)
+  }
+
+  /*
    * 队列一变就重算预告（当前曲 / 顺序 / 循环模式都会影响「下一首是谁」）。
    *
    * **必须等当前这首真的出声（`playing`）再排。**
@@ -2064,7 +2094,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (!items.length || cancelled) return
         await bridge.invoke('native_chain', {
           payload: {
-            files: nativeScriptFiles(),
+            scripts: nativeScripts(),
             cookies: nativeCookies(),
             items,
             /* 走到窗口末尾回到第一项：队列本来就会回绕，原生据此永远接得下去 */
@@ -2089,11 +2119,27 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 切后台 / 熄屏前最后一搏：`visibilitychange` 是页面彻底被冻住之前**还能跑完
    * 的最后一个同步钩子**。这里再递一次整表，把「刚点开就锁屏」这种最常见的情况
    * 兜住；取链是异步的，能不能跑完看运气，但试一次不亏。
+   *
+   * 回到前台那一半是「对账」：原生可能已经自己往后接了两三首（后台期间 JS 冻着，
+   * 那些 `player://state` 帧要么堆着要么丢了）。立刻问一次原生现在放到第几首，
+   * 把队列下标追上去——不然用户切回来看到的就是「歌在响、封面还在上一首」，
+   * 得等下一条 2 秒看门狗才纠正。
    */
   useEffect(() => {
     if ((!isAndroid && !isIOS) || typeof document === 'undefined') return
     const onVis = () => {
-      if (document.visibilityState === 'hidden') void buildPrefetchRef.current(queueRef.current)
+      if (document.visibilityState === 'hidden') {
+        void buildPrefetchRef.current(queueRef.current)
+        return
+      }
+      void bridge.playerState().then(st => {
+        syncNativeIndexRef.current(st)
+        const cur = snapRef.current
+        /* 播放态/进度也顺手纠一次：事件流断过的话，界面会停在曲终那一刻 */
+        if (st.playing !== cur.playing) {
+          commitSnapshot({ ...cur, playing: st.playing, position: st.position > 0 ? st.position : cur.position })
+        }
+      }).catch(() => { /* 问不到就算了 */ })
     }
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)

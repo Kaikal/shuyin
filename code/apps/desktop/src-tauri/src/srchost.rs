@@ -84,13 +84,55 @@ pub struct ChainItem {
     pub path: Option<String>,
 }
 
+/// 一个可用音源：名字 + **脚本体**。
+///
+/// 为什么递正文而不是路径：音源自 v0.4.5 起就不是「一个音源一个 .js 文件」了，
+/// 全塞在 `sources.json` 清单里、code 直接内嵌。清单地址是个合成串
+/// （`…/sources.json#名字`），拿它去 `read_to_string` 必然 ENOENT。
+/// 2026-11-24 用户日志里的 `relay 失败 … 读不到脚本: No such file or directory`
+/// 就是这条：原生手里有整张歌单，却连一个音源都起不来，曲终只能停住。
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainSource {
+    /// 清单里的名字。只用于日志与缓存键，不参与取链逻辑。
+    #[serde(default)]
+    pub name: String,
+    /// 洛雪 lx 脚本源码。
+    #[serde(default)]
+    pub code: String,
+}
+
+impl ChainSource {
+    fn label(&self) -> String {
+        if self.name.is_empty() {
+            "未命名音源".to_string()
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// 缓存键：名字 + 正文指纹。
+    ///
+    /// 不能只用名字——用户重新导入同一个名字的音源（更新版本）时正文变了，
+    /// 按名字命中就会拿旧脚本取链，表现为「换了新音源还是老样子」。
+    fn key(&self) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in self.code.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{}#{h:x}", self.name)
+    }
+}
+
 /// 前端一次递过来的整份「原生取链上下文」。
 #[derive(Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainPayload {
-    /// 已启用的音源脚本（绝对路径），顺序 = 取链优先级
+    /// 已启用的音源脚本（正文随包递来），顺序 = 取链优先级
     #[serde(default)]
-    pub files: Vec<String>,
+    pub scripts: Vec<ChainSource>,
+
     /// 平台 → 登录 cookie 整串
     #[serde(default)]
     pub cookies: HashMap<String, String>,
@@ -112,7 +154,7 @@ pub struct ChainPayload {
 
 enum HostCmd {
     Resolve {
-        file: String,
+        source: ChainSource,
         platform: String,
         quality: String,
         raw: serde_json::Value,
@@ -149,29 +191,35 @@ impl ScriptHost {
     /// 按脚本优先级逐级取链：谁先给出 URL 用谁，单档 6s，总预算 `budget_ms`。
     pub fn resolve(
         &self,
-        files: &[String],
+        scripts: &[ChainSource],
         platform: &str,
         quality: &str,
         raw: &serde_json::Value,
         cookies: &HashMap<String, String>,
         budget_ms: u64,
     ) -> Result<String, String> {
-        if files.is_empty() {
+        if scripts.is_empty() {
             return Err("没有可用音源脚本".into());
         }
         let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1_500));
         let mut last = String::from("所有音源都没能取到播放地址");
-        for file in files {
+        for source in scripts {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 last = format!("{last}（已超时）");
                 break;
             }
+            // 空正文十有八九是清单损坏 / 取 code 失败。直接报出来比让它
+            // 去 QuickJS 里抛一个「语法错误」更容易定位。
+            if source.code.trim().is_empty() {
+                last = format!("{}: 脚本正文是空的", source.label());
+                continue;
+            }
             let (tx, rx) = channel();
             if self
                 .tx
                 .send(HostCmd::Resolve {
-                    file: file.clone(),
+                    source: source.clone(),
                     platform: platform.to_string(),
                     quality: quality.to_string(),
                     raw: raw.clone(),
@@ -185,21 +233,13 @@ impl ScriptHost {
             }
             match rx.recv_timeout(left + Duration::from_millis(800)) {
                 Ok(Ok(url)) if !url.is_empty() => return Ok(url),
-                Ok(Ok(_)) => last = format!("{}: 返回了空地址", short(file)),
-                Ok(Err(e)) => last = format!("{}: {e}", short(file)),
-                Err(_) => last = format!("{}: 取链超时", short(file)),
+                Ok(Ok(_)) => last = format!("{}: 返回了空地址", source.label()),
+                Ok(Err(e)) => last = format!("{}: {e}", source.label()),
+                Err(_) => last = format!("{}: 取链超时", source.label()),
             }
         }
         Err(last)
     }
-}
-
-fn short(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path)
-        .to_string()
 }
 
 /* ------------------------------------------------------------------ */
@@ -207,7 +247,9 @@ fn short(path: &str) -> String {
 /* ------------------------------------------------------------------ */
 
 struct Loaded {
-    file: String,
+    key: String,
+    /// 持有它只为「别让 runtime 提前 drop」——脚本上下文挂在它身上
+    #[allow(dead_code)]
     rt: Runtime,
     ctx: Context,
     inited: serde_json::Value,
@@ -219,8 +261,8 @@ where
     F: Fn(&str) + Send + 'static,
 {
     let mut loaded: Vec<Loaded> = Vec::new();
-    while let Ok(HostCmd::Resolve { file, platform, quality, raw, cookies, budget_ms, reply }) = rx.recv() {
-        let r = resolve_with(&mut loaded, &file, &cookies, &log, |ctx, inited| {
+    while let Ok(HostCmd::Resolve { source, platform, quality, raw, cookies, budget_ms, reply }) = rx.recv() {
+        let r = resolve_with(&mut loaded, &source, &cookies, &log, |ctx, inited| {
             resolve_in(ctx, inited, &platform, &quality, &raw, budget_ms)
         });
         let _ = reply.send(r);
@@ -230,7 +272,7 @@ where
 /// 取（必要时加载）某个脚本的上下文，然后在里面干活。
 fn resolve_with<F, L>(
     loaded: &mut Vec<Loaded>,
-    file: &str,
+    source: &ChainSource,
     cookies: &HashMap<String, String>,
     log: &L,
     f: F,
@@ -239,10 +281,11 @@ where
     F: FnOnce(&Ctx<'_>, &serde_json::Value) -> Result<String, String>,
     L: Fn(&str),
 {
-    let pos = match loaded.iter().position(|l| l.file == file) {
+    let key = source.key();
+    let pos = match loaded.iter().position(|l| l.key == key) {
         Some(i) => i,
         None => {
-            let l = load_script(file, cookies, log)?;
+            let l = load_script(source, cookies, log)?;
             loaded.push(l);
             loaded.len() - 1
         }
@@ -254,11 +297,14 @@ where
     l.ctx.with(|ctx| f(&ctx, &inited))
 }
 
-fn load_script<L>(file: &str, cookies: &HashMap<String, String>, log: &L) -> Result<Loaded, String>
+fn load_script<L>(source: &ChainSource, cookies: &HashMap<String, String>, log: &L) -> Result<Loaded, String>
 where
     L: Fn(&str),
 {
-    let code = std::fs::read_to_string(file).map_err(|e| format!("读不到脚本: {e}"))?;
+    if source.code.trim().is_empty() {
+        return Err("脚本正文是空的".into());
+    }
+    let code = &source.code;
     let rt = Runtime::new().map_err(|e| format!("QuickJS 初始化失败: {e}"))?;
     let ctx = Context::full(&rt).map_err(|e| format!("QuickJS 上下文失败: {e}"))?;
     let jar = Rc::new(RefCell::new(cookies.clone()));
@@ -277,8 +323,14 @@ where
             .map_err(|e| format!("读不到 inited: {}", js_err(&ctx, e)))?;
         Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({ "sources": {} })))
     })?;
-    log(&format!("[srchost] 已加载 {}", short(file)));
-    Ok(Loaded { file: file.to_string(), rt, ctx, inited, cookies: jar })
+    log(&format!("[srchost] 已加载 {}（{} 字）", source.label(), code.len()));
+    Ok(Loaded {
+        key: source.key(),
+        rt,
+        ctx,
+        inited,
+        cookies: jar,
+    })
 }
 
 /// 在一个脚本上下文里按音质阶梯调 `musicUrl`。
@@ -889,22 +941,12 @@ mod tests {
           })
           lx.send('inited', { sources: { tx: { name: '假源', qualitys: ['128k', '320k', 'flac'] } } })
         "#;
-        let dir = std::env::temp_dir().join("shuyin-srchost-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("fake.lxmc.js");
-        std::fs::write(&file, shim_script).unwrap();
+        let src = ChainSource { name: "假源".into(), code: shim_script.into() };
 
         let host = ScriptHost::new();
         let raw = serde_json::json!({ "songmid": "abc123" });
         let url = host
-            .resolve(
-                &[file.to_string_lossy().to_string()],
-                "tx",
-                "flac",
-                &raw,
-                &HashMap::new(),
-                5_000,
-            )
+            .resolve(std::slice::from_ref(&src), "tx", "flac", &raw, &HashMap::new(), 5_000)
             .unwrap();
         assert_eq!(url, "https://example.com/abc123.flac.mp3");
 
@@ -915,14 +957,30 @@ mod tests {
          * 真正验证「退档」的是下面那条不声明档位的脚本。
          */
         let url2 = host
-            .resolve(&[file.to_string_lossy().to_string()], "tx", "master", &raw, &HashMap::new(), 5_000)
+            .resolve(std::slice::from_ref(&src), "tx", "master", &raw, &HashMap::new(), 5_000)
             .unwrap();
         assert_eq!(url2, "https://example.com/abc123.master.mp3");
 
         // 脚本没声明的平台 → 直接失败
         assert!(host
-            .resolve(&[file.to_string_lossy().to_string()], "wy", "320k", &raw, &HashMap::new(), 3_000)
+            .resolve(std::slice::from_ref(&src), "wy", "320k", &raw, &HashMap::new(), 3_000)
             .is_err());
+    }
+
+    /// 空正文的音源不许静默跳过：必须报出「是哪个音源、空在哪」。
+    ///
+    /// 2026-11-24 那次事故里，前端把 `sources.json#名字` 当文件路径递过来，
+    /// 原生读盘 ENOENT、整条链一个音源都没起来，日志只有一句笼统的
+    /// 「读不到脚本」。这类失败必须能被一眼指认。
+    #[test]
+    fn empty_script_reports_which_source() {
+        let host = ScriptHost::new();
+        let bad = ChainSource { name: "坏源".into(), code: "  ".into() };
+        let err = host
+            .resolve(&[bad], "tx", "320k", &serde_json::json!({}), &HashMap::new(), 2_000)
+            .unwrap_err();
+        assert!(err.contains("坏源"), "错误里要带音源名：{err}");
+        assert!(err.contains("空"), "错误里要说清是正文空：{err}");
     }
 
     #[test]
@@ -937,7 +995,7 @@ mod tests {
     #[test]
     fn chain_payload_contract() {
         let json = serde_json::json!({
-            "files": ["/src/a.js"],
+            "scripts": [{ "name": "洛雪音源1", "code": "lx.on('request', () => '')" }],
             "cookies": { "tx": "a=1" },
             "items": [{
                 "index": 7,
@@ -955,7 +1013,9 @@ mod tests {
         });
         let p: ChainPayload = serde_json::from_value(json).unwrap();
         assert!(p.looping, "loop 必须映射到 looping");
-        assert_eq!(p.files.len(), 1);
+        assert_eq!(p.scripts.len(), 1);
+        assert_eq!(p.scripts[0].name, "洛雪音源1");
+        assert!(p.scripts[0].code.contains("lx.on"), "脚本体必须原样收到");
         assert_eq!(p.cookies.get("tx").map(String::as_str), Some("a=1"));
         let it = &p.items[0];
         assert_eq!(it.index, 7);
@@ -968,12 +1028,13 @@ mod tests {
         assert_eq!(back["songmid"], "m1");
         assert_eq!(back["nested"]["k"][2], 3);
 
-        // 老 payload（没有 loop / id / path）照样能读：默认值兜住
+        // 老 payload（没有 loop / id / path / scripts）照样能读：默认值兜住
         let old: ChainPayload = serde_json::from_str(
-            r#"{"files":[],"cookies":{},"items":[{"index":0,"platform":"wy","title":"x"}]}"#,
+            r#"{"cookies":{},"items":[{"index":0,"platform":"wy","title":"x"}]}"#,
         )
         .unwrap();
         assert!(!old.looping);
+        assert!(old.scripts.is_empty());
         assert_eq!(old.items[0].id, "");
         assert!(old.items[0].path.is_none());
         assert!(old.items[0].raw.is_none());

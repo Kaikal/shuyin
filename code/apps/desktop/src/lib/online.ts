@@ -1980,13 +1980,34 @@ export interface NativeChainItem {
   path?: string
 }
 
-/** 启用的音源脚本文件（原生按这个顺序试，和这边的降级链一致） */
-export function nativeScriptFiles(): string[] {
+/**
+ * 递给原生的一个音源：**名字 + 脚本体**。
+ *
+ * 为什么不是路径：音源自 v0.4.5 起就不再「一个音源一个 .js 文件」，全部收在
+ * `sources.json` 清单里、code 内嵌。清单地址是合成串 `…/sources.json#名字`，
+ * 原生拿它去 read_to_string 只会 ENOENT——2026-11-24 用户日志里
+ * `relay 失败 … 读不到脚本: No such file or directory` 就是这条，
+ * 结果「有整张歌单、曲终却接不上下一首」。
+ */
+export interface NativeChainSource {
+  name: string
+  /** 洛雪 lx 脚本源码（正文随 IPC 递一次，原生自己起 QuickJS 跑） */
+  code: string
+}
+
+/**
+ * 启用的音源脚本（原生按这个顺序试，和这边的降级链一致）。
+ *
+ * 空正文的项直接剔掉：递过去只会让原生白加载一次再报「脚本是空的」，
+ * 日志里还会多一条噪音。
+ */
+export function nativeScripts(): NativeChainSource[] {
   const enabled = new Set(sourceManager.enabledIds())
   return sourceManager
     .list()
-    .filter(s => enabled.has(s.id) && s.status !== 'error' && !!s.filePath)
-    .map(s => s.filePath)
+    .filter(s => enabled.has(s.id) && s.status !== 'error')
+    .map(s => ({ name: s.name, code: sourceManager.codeOf(s.id) }))
+    .filter(s => s.code.trim().length > 0)
 }
 
 /** 平台登录 cookie（原生按域名注入，与这边 COOKIE_HOSTS 同一张表） */

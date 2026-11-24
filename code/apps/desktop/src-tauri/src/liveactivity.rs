@@ -465,6 +465,38 @@ fn push_native_state(app: &AppHandle, playing: bool) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 自检：scheme 到底注册上没有                                          */
+/* ------------------------------------------------------------------ */
+
+/// `shuyin://live` 在本机能不能被打开。
+///
+/// 灵动岛 / 锁屏卡的 `Link` 与 `widgetURL` **只在 scheme 已注册时才有反应**：
+/// 注册失败的表现不是「打开别的 App」，也不是「打开首页」，而是**点上去完全
+/// 没反应**——所有点击事件被系统吞掉，连冷启动都不会发生。
+///
+/// 这个信息只能从 App 自己嘴里问出来（`canOpenURL`），CI 侧看不出来：
+/// 即使 patch 逻辑跑过，也可能打在了错的 Info.plist 上。启动时记一行，
+/// 下回用户回传 app.log 就能直接判死，不用再靠猜。
+#[cfg(target_os = "ios")]
+pub fn scheme_ok() -> Option<bool> {
+    use objc2::class;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use std::ffi::CString;
+
+    let c = CString::new("shuyin://live").ok()?;
+    unsafe {
+        /* 字符串/URL 全走裸 msg_send，和 smtc.rs 的 apple 模块同一套写法 */
+        let s: Retained<AnyObject> =
+            objc2::msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+        let url: Retained<AnyObject> = objc2::msg_send![class!(NSURL), URLWithString: &*s];
+        let app: Retained<AnyObject> = objc2::msg_send![class!(UIApplication), sharedApplication];
+        let ok: bool = objc2::msg_send![&*app, canOpenURL: &*url];
+        Some(ok)
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* 与 Swift 的接线                                                      */
 /* ------------------------------------------------------------------ */
 

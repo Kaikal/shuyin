@@ -433,6 +433,15 @@
 .sq-fav:focus-visible { opacity: 1; transform: none; }
 .sq-fav:hover { background: rgba(10, 12, 16, 0.72); color: #fff; }
 .sq-fav.on { opacity: 1; transform: none; color: var(--sy-accent-soft); border-color: var(--sy-accent-a42); }
+/*
+ * 已收藏 = **实心**五角星。
+ *
+ * `IconStar` 是个 `fill="none"` 的描边图标，只有换成 currentColor 填充才会「实」。
+ * 搜索页那两颗（`.sr-fav` / `.sr-favbtn`）一直带着这条规则，广场这颗漏了 ——
+ * 于是用户点完收藏：歌真的进了「收藏的歌单」，星却只是边框变色、里面还是空的
+ * （2026-11-24 反馈「点完还是不会变实心的五角星」）。
+ */
+.sq-fav.on svg { fill: currentColor; }
 
 .sq-name {
   margin-top: 8px;

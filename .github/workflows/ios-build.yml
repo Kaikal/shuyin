@@ -64,8 +64,16 @@ jobs:
 
       - name: Patch Info.plist (中文名 / 状态栏 / 后台音频 / 文件关联)
         run: |
-          PLIST=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*" | head -1)
-          echo "plist: $PLIST"
+          # 打**每一个** Info.plist，不再 `head -1` 猜一个。
+          #
+          # 之前只挑第一个，一旦 gen 目录里出现第二份 plist（不同 target 的
+          # 宿主目录、或模板结构变化），改到的就可能不是 app target 的那份：
+          # 构建照常成功、包照常能装，只有「灵动岛点了没反应」这一个症状
+          # （shuyin:// 没注册，Live Activity 的 Link 会被系统整个吞掉）。
+          PLISTS=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*")
+          echo "plists:"; echo "$PLISTS"
+          for PLIST in $PLISTS; do
+          echo "== patch $PLIST"
           python3 - "$PLIST" <<'EOF'
           import plistlib, sys
           p = sys.argv[1]
@@ -168,7 +176,9 @@ jobs:
           plistlib.dump(d, open(p, 'wb'))
           print('displayName =', d['CFBundleDisplayName'], '| region =', d['CFBundleDevelopmentRegion'])
           print('docTypes =', [x['CFBundleTypeName'] for x in d['CFBundleDocumentTypes']])
+          print('urlSchemes =', [x.get('CFBundleURLSchemes') for x in d['CFBundleURLTypes']])
           EOF
+          done
 
       - name: Inspect AppDelegate (确认 tao 是否接管 openURL)
         run: |
@@ -395,6 +405,42 @@ jobs:
             printf "%s = " "$k"
             /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null | head -3 || echo "(缺失)"
           done
+          echo "--- URL scheme（**灵动岛/锁屏卡点击的命门**）"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$APP/Info.plist" 2>/dev/null || true
+          # 兜底：前面那步是「事后 patch 源 plist」，万一打在了别的文件上，
+          # 构建照样成功、包照样能装，只有点灵动岛毫无反应（系统找不到 scheme
+          # 时会把点击整个吞掉，连冷启动都不会发生）。这里直接改**产物**里的
+          # Info.plist，IPA 是之后才压的，所以一定进包。幂等，已有就不动。
+          python3 - "$APP/Info.plist" <<'PY'
+          import plistlib, sys
+          p = sys.argv[1]
+          d = plistlib.load(open(p, 'rb'))
+          types = d.get('CFBundleURLTypes') or []
+          if not any('shuyin' in (x.get('CFBundleURLSchemes') or []) for x in types):
+              types.append({'CFBundleURLName': 'cn.shuyin.player', 'CFBundleURLSchemes': ['shuyin']})
+              d['CFBundleURLTypes'] = types
+              plistlib.dump(d, open(p, 'wb'))
+              print('产物里原本没有 → 已就地补上 shuyin')
+          else:
+              print('产物里已经有 shuyin，未改动')
+          PY
+          if ! python3 - "$APP/Info.plist" <<'PY'
+          import plistlib, sys
+          d = plistlib.load(open(sys.argv[1], 'rb'))
+          ok = any('shuyin' in (x.get('CFBundleURLSchemes') or []) for x in (d.get('CFBundleURLTypes') or []))
+          print('scheme ok' if ok else 'scheme MISSING')
+          sys.exit(0 if ok else 1)
+          PY
+          then
+            {
+              echo "### ❌ 产物 Info.plist 里没有注册 shuyin scheme"
+              echo ""
+              echo "Live Activity 的 \`Link\` / \`widgetURL\` 指向 \`shuyin://live\`。"
+              echo "这个 scheme 没进包 = 用户点灵动岛/锁屏卡时**系统整个吞掉点击**，"
+              echo "不打开任何东西、连冷启动都没有（app.log 里 \`[scheme] canOpen\` 会是 false）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           echo "--- 灵动岛扩展（没有它 = 岛上什么都看不到）"
           ls -la "$APP/PlugIns" 2>/dev/null || echo "(没有 PlugIns 目录)"
           for f in "$APP"/PlugIns/*.appex/ShuyinWidget; do

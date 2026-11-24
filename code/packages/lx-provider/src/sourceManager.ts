@@ -170,6 +170,22 @@ export class SourceManager {
     return this.sources.filter(s => this.isEnabled(s.id)).map(s => s.id)
   }
 
+  /**
+   * 音源脚本的**正文**（装进 `codes` 的那份）。
+   *
+   * 原生（Rust 里的 `srchost`）要靠它自己起一个 QuickJS 跑取链，iOS 切后台
+   * WebView 冻住之后才接得上下一首。
+   *
+   * 为什么不是给路径：音源从 v0.4.5 起就**不再是一个东西一个 .js 文件**了，
+   * 全塞在 `sources.json` 清单里、code 直接内嵌。清单地址是合成串
+   * （`…/sources.json#名字`），当文件路径去 open 必然 ENOENT——2026-11-24
+   * 用户日志里 `relay 失败 … 读不到脚本: No such file or directory` 就是它：
+   * 原生手里有整张歌单、却连一个音源都加载不起来，曲终只能停在那儿。
+   */
+  codeOf(id: string): string {
+    return this.codes.get(id) ?? ''
+  }
+
   /* ---------------- 装载 ---------------- */
 
   setDir(dir: string | string[]) {

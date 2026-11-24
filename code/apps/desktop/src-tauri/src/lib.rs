@@ -503,13 +503,26 @@ fn next_prefetch(player: State<'_, Player>, items: Vec<PrefetchIn>) {
 #[tauri::command]
 fn native_chain(player: State<'_, Player>, payload: srchost::ChainPayload) {
     /*
-     * 取证：原料包有没有递到、里面几首、几个脚本。
-     * `files=0` 说明启用的音源脚本没解析出文件路径，原生再怎么样也取不到链。
+     * 取证：原料包有没有递到、里面几首、几个脚本、每个脚本多少字。
+     *
+     * 只打个数不够——`scripts=1` 但正文是空串时，原生照样一个音源都起不来，
+     * 表现和「没递脚本」一模一样。2026-11-24 那次就是踩在这上面：前端递的是
+     * `sources.json#名字` 这种合成地址，原生当文件读全 ENOENT，日志里只有
+     * 一句笼统的「读不到脚本」。把字数打出来，下回一眼就能分清。
      */
+    let detail: Vec<String> = payload
+        .scripts
+        .iter()
+        .map(|s| {
+            let name = if s.name.is_empty() { "?" } else { s.name.as_str() };
+            format!("{name}:{}字", s.code.chars().count())
+        })
+        .collect();
     crate::player::log(&format!(
-        "chain recv items={} files={} cookies={} loop={}",
+        "chain recv items={} scripts={} [{}] cookies={} loop={}",
         payload.items.len(),
-        payload.files.len(),
+        payload.scripts.len(),
+        detail.join(" "),
         payload.cookies.len(),
         payload.looping
     ));
@@ -3359,6 +3372,19 @@ pub fn run() {
             append_log(
                 app.handle(),
                 &format!("boot v{} tag={BUILD_TAG}", env!("CARGO_PKG_VERSION")),
+            );
+            /*
+             * 灵动岛/锁屏卡「点了没反应」的唯一死因排查口。
+             *
+             * 那两处的 `Link` / `widgetURL` 全指向 `shuyin://live`，而**未注册的
+             * scheme 会让点击被系统整个吞掉**（不打开任何东西，连冷启动都没有）。
+             * 注册写在 Info.plist 的 CFBundleURLTypes 里，靠 CI 事后 patch ——
+             * patch 打歪了构建照样成功，只有 App 自己能问出来。见 liveactivity.rs。
+             */
+            #[cfg(target_os = "ios")]
+            append_log(
+                app.handle(),
+                &format!("[scheme] canOpen shuyin://live = {:?}", crate::liveactivity::scheme_ok()),
             );
             /* 曲终自动接下一首要顺手更新系统媒体卡片（锁屏/控制中心），那边要 AppHandle */
             crate::player::attach_app(app.handle().clone());
