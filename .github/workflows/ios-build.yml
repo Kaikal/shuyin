@@ -316,10 +316,12 @@ jobs:
               echo ""
               echo "</details>"
             } >> "$GITHUB_STEP_SUMMARY"
-            # 注解区是唯一能在 run 页面（不下载 artifact）直接看到的东西，
-            # 把错误行再 emit 一遍：本地看不到日志时靠这几行定位。
-            grep -nE "error(\[[^]]+\])?:|Undefined symbol|ld: |fatal error" build-logs/tauri-ios-build.log \
-              | head -12 | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-500)"; done || true
+            # 注解区是唯一能在 run 页面（不下载 artifact）直接看到的东西。
+            # 取**日志尾部**：tauri 把 xcodebuild 的包装摘要打在最后，而真正的
+            # 编译器错误在它前面几十行；head 只会抓到那些没用的摘要行。
+            grep -nE "error|Error|ERROR|failed|FAILED|warning:|note:|Undefined symbol|ld: " \
+              build-logs/tauri-ios-build.log | tail -8 \
+              | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-1200)"; done || true
             echo "主包没出来（错误已写进 step summary 与 build-logs 日志）"
             exit 1
           fi
