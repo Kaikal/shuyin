@@ -352,111 +352,41 @@ private struct LyricLine: View {
 private struct LockScreenView: View {
     let state: ShuyinActivityAttributes.ContentState
 
+    /*
+     * 锁屏只画**一行字幕**，不画封面、不画整排控制、不画进度条。
+     *
+     * 2026-11-25 用户先要求「只留系统那张卡」，但关掉自绘活动之后灵动岛就
+     * 点不开 App 了（系统媒体卡那一下的落点由 SpringBoard 管，第三方插不上手；
+     * 酷狗能点是因为它自己有实时活动）。于是这张卡必须回来——负责「点击回 App」
+     * 和岛上的信息展示。
+     *
+     * 重复感用内容解决：锁屏上它就是一条薄薄的歌词条（约 30pt 高），
+     * 跟系统那张「封面+歌名+进度+控制」的播放器卡明显不是一类东西，
+     * 看起来像桌面歌词的锁屏版，而不是第二个播放器。
+     */
     var body: some View {
-        /*
-         * 整卡可点回 App：背景层是 `ShuyinOpenIntent`（openAppWhenRun=true），
-         * 前景内容里的封面 / 控制键各自保留自己的 Button，点击照常优先。
-         *
-         * 原来这里只挂 `.widgetURL(syLiveURL)`，用户实测「点卡片空白处完全没
-         * 反应，但按钮都有反应」——iOS 18 锁屏上那条自定义 scheme 被吞了。
-         * 改走 intent 是唯一被用户实测证明可行的通道。
-         */
         OpenBackground {
-            Group {
-                if state.big { bigBody } else { compactBody }
+            HStack(spacing: 8) {
+                Image(systemName: state.playing ? "waveform" : "pause.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(state.playing ? syAccent : syText2)
+                    .frame(width: 14)
+
+                Text(state.line.isEmpty ? state.title : state.line)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(syText1)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+
+                Spacer(minLength: 4)
+
+                TimeLabel(state: state, compact: true)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, 8)
         }
         .activityBackgroundTint(syBg)
         .activitySystemActionForegroundColor(syText1)
-    }
-
-    /// 普通形态：封面 + 歌名/歌手 + 进度 + 一句词 + 整排控制
-    private var compactBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 11) {
-                ArtTap(state: state, size: 52)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(state.title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(syText1)
-                        .lineLimit(1)
-                    Text(state.artist.isEmpty ? "疏音" : state.artist)
-                        .font(.system(size: 12))
-                        .foregroundStyle(syText2)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 6)
-
-                /*
-                 * 这里不另放播放按钮：iOS 17 下面已经有整排控制键，
-                 * 再放一个就是两个播放键并排。iOS 16 没有按钮能力，
-                 * 那张卡片就纯展示——比给个点不动的假按钮诚实。
-                 */
-                Image(systemName: state.playing ? "waveform" : "pause.fill")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(syAccent)
-                    .frame(width: 22)
-            }
-
-            HStack(spacing: 8) {
-                ProgressBar(state: state)
-                TimeLabel(state: state, compact: true)
-            }
-
-            /*
-             * 歌词放在进度条**下面**：
-             * 上面那块是「封面 + 歌名 + 歌手」，一眼是「在放什么」；
-             * 下面这块是「唱到哪」，跟着进度条走更顺。
-             */
-            LyricLine(text: state.line)
-
-            if #available(iOS 17.0, *) {
-                HStack {
-                    Spacer()
-                    Controls(state: state)
-                    Spacer()
-                }
-                .padding(.top, 1)
-            }
-        }
-    }
-
-    /// 大封面形态（点封面切过来）：整块封面 + 歌名歌手 + 进度 + 控制。
-    ///
-    /// 尺寸卡在 132：锁屏上的实时活动卡片高度是系统给的，再高会被裁掉，
-    /// 裁掉的是下半截控制键——那比封面小一点糟得多。
-    /// 歌词行在这一形态里**不画**：封面已经占了视觉主体，再挤一行词就满了。
-    private var bigBody: some View {
-        VStack(spacing: 9) {
-            ArtTap(state: state, size: 132)
-
-            VStack(spacing: 2) {
-                Text(state.title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(syText1)
-                    .lineLimit(1)
-                Text(state.artist.isEmpty ? "疏音" : state.artist)
-                    .font(.system(size: 12))
-                    .foregroundStyle(syText2)
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 8) {
-                ProgressBar(state: state)
-                TimeLabel(state: state, compact: true)
-            }
-
-            if #available(iOS 17.0, *) {
-                Controls(state: state)
-                    .padding(.top, 1)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .multilineTextAlignment(.center)
     }
 }
 
@@ -519,7 +449,15 @@ struct ShuyinLiveActivityWidget: Widget {
                     .padding(.top, 8)
                 }
             } compactLeading: {
-                Artwork(art: context.state.art, size: 19)
+                /*
+                 * 紧凑态左侧的封面也做成回 App 的落点。
+                 *
+                 * `Link` 在紧凑态不生效（只有展开态才有），`.widgetURL` 那条
+                 * 自定义 scheme 又实测被系统吞——用户报「点灵动岛打不开应用」。
+                 * 唯一稳定的通道是 `Button(intent:)` + `openAppWhenRun`，
+                 * 所以在这么小的格子里也塞一个（.plain 保证不套系统蓝）。
+                 */
+                ArtLink(state: context.state, size: 19)
             } compactTrailing: {
                 /*
                  * 紧凑态右侧：**播放状态**，不是倒计时。
@@ -532,10 +470,12 @@ struct ShuyinLiveActivityWidget: Widget {
                  *     用户要的恰恰是后者（「状态和歌曲信息不匹配」）。
                  * 换成图标：在放 = waveform（强调色），暂停 = pause.fill（灰）。
                  */
-                Image(systemName: context.state.playing ? "waveform" : "pause.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(context.state.playing ? syAccent : syText2)
-                    .frame(width: 24)
+                OpenTap {
+                    Image(systemName: context.state.playing ? "waveform" : "pause.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(context.state.playing ? syAccent : syText2)
+                        .frame(width: 24)
+                }
             } minimal: {
                 // 同时挂着两三条岛时只剩这么点地方，只放封面
                 Artwork(art: context.state.art, size: 17)

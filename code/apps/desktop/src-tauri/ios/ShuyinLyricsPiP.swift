@@ -70,8 +70,15 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     /// 开关真值（持久化：用户开过一次，下次启动仍按开的来）
     private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: "shuyin.pip.lyrics")
 
-    private let W = 640
-    private let H = 190
+    /// 画布尺寸（像素）。
+    ///
+    /// 默认是一条 960×300 的窄条（3.2:1），接近桌面歌词该有的形态。
+    /// 但**不能写死**：画中画窗口的宽高比是系统给的（用户还能捏合缩放），
+    /// 固定画布 + `resizeAspect` 会在窗口里上下留黑边，字看上去忽大忽小——
+    /// 2026-11-25 用户报的「文字太大、不适配」就是这条。
+    /// `didTransitionToRenderSize` 会按窗口真实比例改写 H。
+    private var W = 960
+    private var H = 300
 
     // MARK: - 对外（C 入口调这些）
 
@@ -81,11 +88,14 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
             self.prog = max(0, min(1, prog))
             self.playing = playing
             /*
-             * 句内进度按 2% 量化：640px 宽的条上差 2% 是 13px，肉眼刚好察觉不到，
-             * 但每秒重画的次数从 5 次降到 1~2 次——画中画本身是要耗电的窗口。
-             * 内容没变也照样调 `paint()`，由它内部的 0.9s 节流补一帧保活。
+             * 句内进度按 1% 量化。
+             *
+             * 上一版是 2%（640px 宽时约 13px 一跳），配上 200ms 心跳，长句
+             * 跑马灯看起来是一顿一顿的。现在画布 960 宽 + 1% + 120ms 心跳，
+             * 滚动时约 8~10 帧/秒，读起来连续。内容没变的那一次仍然走
+             * `paint()` 内部的 0.9s 节流补帧保活，不会多耗电。
              */
-            let q = Int(self.prog * 50)
+            let q = Int(self.prog * 100)
             let key = "\(line)|\(q)|\(playing ? 1 : 0)"
             let changed = key != self.painted
             if changed { self.painted = key }
@@ -321,57 +331,145 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
               )
         else { return nil }
 
-        ctx.clear(CGRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H)))
+        let w = CGFloat(W), h = CGFloat(H)
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
 
-        /* 底板：深棕黑圆角条（跟专辑主色那层暖调接近，压得住亮壁纸） */
-        let box = CGRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H))
-        let path = CGPath(roundedRect: box, cornerWidth: 30, cornerHeight: 30, transform: nil)
+        /*
+         * 底板：接近纯黑的暖调渐变 + 大圆角 + 一圈极淡的高光边。
+         *
+         * 上一版是一条 30 圆角的纯色块，在画中画窗口（本身带圆角）里看着像
+         * 一块贴错地方的色板——用户说「丑」主要就是它。这里把圆角做到接近
+         * 窗口圆角（h*0.3），并用上深下浅的渐变让边缘不那么硬。
+         */
+        let corner = min(h * 0.30, 56)
+        let box = CGRect(x: 0, y: 0, width: w, height: h)
+        let path = CGPath(roundedRect: box, cornerWidth: corner, cornerHeight: corner, transform: nil)
+        ctx.saveGState()
         ctx.addPath(path)
-        ctx.setFillColor(UIColor(red: 0.10, green: 0.08, blue: 0.07, alpha: 0.94).cgColor)
-        ctx.fillPath()
+        ctx.clip()
+        let space = CGColorSpaceCreateDeviceRGB()
+        if let grad = CGGradient(
+            colorsSpace: space,
+            colors: [
+                UIColor(red: 0.13, green: 0.11, blue: 0.10, alpha: 0.97).cgColor,
+                UIColor(red: 0.05, green: 0.045, blue: 0.04, alpha: 0.97).cgColor,
+            ] as CFArray,
+            locations: [0, 1],
+        ) {
+            /* 未翻转坐标系：y 向上，(0,h) 是顶 */
+            ctx.drawLinearGradient(
+                grad,
+                start: CGPoint(x: 0, y: h),
+                end: CGPoint(x: 0, y: 0),
+                options: [],
+            )
+        } else {
+            /* 渐变建不出来（极不可能）时的兜底：直接填一块纯色，别留白 */
+            ctx.setFillColor(UIColor(red: 0.08, green: 0.07, blue: 0.06, alpha: 0.97).cgColor)
+            ctx.fill(box)
+        }
+        ctx.restoreGState()
+
+        /* 极淡的内描边：让边缘有一道反光，不再是一块死色 */
+        ctx.saveGState()
+        ctx.addPath(CGPath(
+            roundedRect: box.insetBy(dx: h * 0.006, dy: h * 0.006),
+            cornerWidth: corner, cornerHeight: corner, transform: nil,
+        ))
+        ctx.setStrokeColor(UIColor(white: 1, alpha: 0.07).cgColor)
+        ctx.setLineWidth(max(1, h * 0.007))
+        ctx.strokePath()
+        ctx.restoreGState()
 
         /*
          * UIKit 的文字绘制是「上到下」的坐标系，CGContext 是「下到上」。
          * 先把画布翻过来再 push，字号/换行这些交给 UIKit，省得手写 CoreText 排版。
          */
         ctx.saveGState()
-        ctx.translateBy(x: 0, y: CGFloat(H))
+        ctx.translateBy(x: 0, y: h)
         ctx.scaleBy(x: 1, y: -1)
         UIGraphicsPushContext(ctx)
 
         let text = line.isEmpty ? "疏音" : line
-        let font = UIFont.systemFont(ofSize: 54, weight: .semibold)
+        let padX = min(h * 0.34, w * 0.05)
+        let avail = w - padX * 2
+
+        /*
+         * 字号取「高度比例」与「宽度比例」的较小值。
+         *
+         * 只按高度算会翻车：画中画窗口被系统摆成 16:9 时，`didTransitionToRenderSize`
+         * 会把画布高度补到 500 多，`h*0.44` 就成 230px 的字——960 宽里只放得下
+         * 四个字。用户报的「文字太大、不适配」正是这个。按宽度封顶
+         * （7.5%，一屏约 13 个字）之后，窗口怎么变，字与窗口的相对大小都稳定。
+         */
+        var fontPt = max(20, min(h * 0.42, w * 0.075))
+        var font = UIFont.systemFont(ofSize: fontPt, weight: .semibold)
+        var textW = (text as NSString).size(withAttributes: [.font: font]).width
+
+        /*
+         * 放不下时先缩字号（最多缩到 72%，再小就糊了）。
+         * 缩完还放不下 → 走跑马灯，由句内进度驱动横向位移（见下）。
+         */
+        if textW > avail {
+            let scaled = max(fontPt * 0.72, fontPt * (avail / textW))
+            if scaled < fontPt {
+                fontPt = scaled
+                font = UIFont.systemFont(ofSize: fontPt, weight: .semibold)
+                textW = (text as NSString).size(withAttributes: [.font: font]).width
+            }
+        }
+        let overflow = max(0, textW - avail)
+        /*
+         * 超宽位移 = 溢出量 × 句内进度：唱到句末刚好把最后几个字推出来。
+         * 高亮边界因此恒在可视区里线性推进，读起来就是卡拉OK 的扫光。
+         * 上版用 `.byTruncatingTail` 直接截断，长句后半句永远看不到——
+         * 用户要的「跑马灯」就是这条。
+         */
+        let drawX = padX - overflow * CGFloat(max(0, min(1, prog)))
+
         let para = NSMutableParagraphStyle()
         para.alignment = .left
-        para.lineBreakMode = .byTruncatingTail
-        let white: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: UIColor(white: 0.96, alpha: 1),
-            .paragraphStyle: para,
-        ]
-        let gold: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: UIColor(red: 1.0, green: 0.79, blue: 0.30, alpha: 1),
-            .paragraphStyle: para,
-        ]
+        para.lineBreakMode = .byClipping
 
-        let padX: CGFloat = 30
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor(white: 0, alpha: 0.62)
+        shadow.shadowBlurRadius = max(2, h * 0.014)
+        shadow.shadowOffset = CGSize(width: 0, height: max(1, h * 0.005))
+
+        let lineH = font.lineHeight
+        /* 宽度给足：宽度不够 UIKit 会按 word wrap 折行，长句就变成两行了 */
         let rect = CGRect(
-            x: padX, y: (CGFloat(H) - 66) / 2,
-            width: CGFloat(W) - padX * 2, height: 66,
+            x: drawX, y: (h - lineH) / 2,
+            width: textW + fontPt, height: lineH,
         )
-        (text as NSString).draw(in: rect, withAttributes: white)
+        let base: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor(white: 1, alpha: line.isEmpty ? 0.34 : 0.62),
+            .paragraphStyle: para,
+            .kern: fontPt * 0.012,
+            .shadow: shadow,
+        ]
+        (text as NSString).draw(in: rect, withAttributes: base)
+
         /*
-         * 已唱部分：按整句宽度切一条竖线，把同一句再画一遍金色。
+         * 已唱部分：按整句宽度切一条竖线，把同一句再画一遍暖金。
          * 整行画两遍再裁，比按字切便宜，边界还能落在字中间。
          */
-        if prog > 0.001 {
-            let full = (text as NSString).size(withAttributes: white).width
-            let cut = padX + full * CGFloat(prog)
-            ctx.saveGState()
-            ctx.clip(to: CGRect(x: 0, y: 0, width: min(cut, CGFloat(W)), height: CGFloat(H)))
-            (text as NSString).draw(in: rect, withAttributes: gold)
-            ctx.restoreGState()
+        if prog > 0.0005, !line.isEmpty {
+            let cut = drawX + textW * CGFloat(min(1, max(0, prog)))
+            if cut > 0 {
+                let gold: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: UIColor(red: 1.0, green: 0.83, blue: 0.44, alpha: 1),
+                    .paragraphStyle: para,
+                    .kern: fontPt * 0.012,
+                    .shadow: shadow,
+                ]
+                ctx.saveGState()
+                ctx.clip(to: CGRect(x: 0, y: 0, width: min(cut, w), height: h))
+                (text as NSString).draw(in: rect, withAttributes: gold)
+                ctx.restoreGState()
+            }
         }
 
         UIGraphicsPopContext()
@@ -451,7 +549,16 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     func pictureInPictureControllerTimeRangeForPlayback(
         _ controller: AVPictureInPictureController,
     ) -> CMTimeRange {
-        /* 一条字幕没有「片长」：给一个够长的区间，别让系统画进度条 */
+        /*
+         * 一条字幕没有「片长」。
+         *
+         * 这里给一个很长但有限的区间（而不是 `.positiveInfinity`）：
+         * 正无穷会让系统在窗口上挂一个常驻的 LIVE 徽标，比进度条更扎眼；
+         * 有限时长的那条进度线只在控制条浮出来时才看得到，平时是干净的。
+         *
+         * ±10 秒那两颗键已经去掉——`skipByInterval` 是 optional 方法，
+         * 不实现系统就不画。用户明确说「上一曲下一曲不能自绘制就不要这两个按钮」。
+         */
         CMTimeRange(start: .zero, duration: CMTime(seconds: 3600, preferredTimescale: 600))
     }
 
@@ -465,19 +572,26 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         _ controller: AVPictureInPictureController,
         didTransitionToRenderSize newRenderSize: CMVideoDimensions,
     ) {
-        /* 窗口被用户缩放：按新尺寸重画一帧，字才不会糊 */
+        /*
+         * 窗口比例变了（用户捏合缩放、系统重排）。
+         *
+         * 画布必须跟着换比例：固定 960×300 丢进一个 16:9 的窗口，
+         * `resizeAspect` 会上下留黑边，字看起来忽大忽小——用户说的
+         * 「文字太大、不适配」就是这条。6% 容差是防抖：改 `layer.frame`
+         * 本身可能再触发一次本回调，没有容差会来回弹。
+         */
+        let rw = Double(newRenderSize.width), rh = Double(newRenderSize.height)
+        if rw > 0, rh > 0 {
+            let target = Int((Double(W) * (rh / rw)).rounded())
+            if abs(target - H) > Int(Double(H) * 0.06), target >= 160 {
+                H = target
+                layer.frame = CGRect(x: 0, y: 0, width: W, height: H)
+                NSLog("[shuyin] pip canvas -> %@", "\(W)×\(H)")
+            }
+        }
+        /* 尺寸变了必须重画：字和圆角都是按 H 算的 */
         painted = "\u{0}"
         paint(force: true)
-    }
-
-    func pictureInPictureController(
-        _ controller: AVPictureInPictureController,
-        skipByInterval skipInterval: CMTime,
-        completion completionHandler: @escaping () -> Void,
-    ) {
-        /* 上一首 / 下一首那颗键也会落到这里（系统把「快进」映射成 skip） */
-        send(skipInterval.seconds >= 0 ? "next" : "prev")
-        completionHandler()
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(

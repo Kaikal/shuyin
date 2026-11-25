@@ -26,19 +26,19 @@ use crate::player::Player;
 /// 没有上下文可传，只能从这里取。
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
-/// 要不要画**我们自己的**实时活动卡（锁屏那张大卡 + 岛上的紧凑态）。
+/// 要不要画**我们自己的**实时活动（灵动岛 + 锁屏那张卡）。
 ///
-/// 2026-11-25 用户拍板关掉：锁屏上「系统那张正在播放卡」和「我们自绘的卡」
-/// 同时出现，重复。只要系统那张。
+/// 2026-11-25 的反复：
+///   1. 先开着 → 用户说锁屏出现两张卡（系统那张 + 我们这张），只要系统那张；
+///   2. 关掉之后系统卡确实干净了，但**点击灵动岛打不开 App**——系统媒体会话
+///      那张卡的点击落点由 SpringBoard 管，我们没有任何可挂的入口；
+///   3. 用户对照酷狗（酷狗能点开）要求「灵动岛必须能打开应用」。
 ///
-/// **关掉不等于灵动岛消失**：任何一个设置了 `MPNowPlayingInfoCenter` 的 App，
-/// iOS 都会自己在岛上渲染「正在播放」的紧凑态，点开就是系统播放控件——正是
-/// 用户要的那张，而且它天然支持点击回 App。我们这张卡是**多出来的第二份**。
-///
-/// 关掉后 `sync` / `push_track` / 状态心跳全部空转，Swift 侧不再请求 Activity，
-/// 顺带省掉一路每秒两次的 IPC 和整段 base64 封面计算。代码原样保留：
-/// 将来要回来把这个常量改 true 即可（代价就是锁屏会再出现第二张卡）。
-pub const DRAW_OWN_CARD: bool = false;
+/// 结论：唯一能自己控制点击落点的通道就是 Live Activity 里的
+/// `Button(intent: ShuyinOpenIntent)`（`openAppWhenRun = true`，用户实测有效）。
+/// 所以这张卡必须画。锁屏那张的重复感改用**内容**解决：
+/// `LockScreenView` 压成一行字幕（高度约 30pt），不再是「第二个播放器」。
+pub const DRAW_OWN_CARD: bool = true;
 
 
 /// 一次播放状态的快照，字段名与 Swift 侧的 `ShuyinLive.Payload` 一一对应。
@@ -368,7 +368,12 @@ fn line_progress_at(pos: f64) -> (String, f64) {
 #[cfg(target_os = "ios")]
 pub fn spawn_pip_ticker() {
     std::thread::spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        /*
+         * 120ms 而不是 200ms：长句超过画布宽度时要靠这条心跳驱动跑马灯位移，
+         * 200ms 只有 5 帧/秒，滚起来一顿一顿的。120ms 约 8 帧/秒，够连续，
+         * 而且只有「开着桌面歌词」时才真正走到 IPC（上面 `on()` 的早退）。
+         */
+        std::thread::sleep(std::time::Duration::from_millis(120));
         if !crate::lyrics_pip::on() {
             continue;
         }
