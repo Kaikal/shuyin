@@ -769,7 +769,9 @@ async fn update_dmg_install(
 /// 桌面端是独立的歌词窗口。这里只在 iOS 有实体，其它平台恒 false。
 #[tauri::command]
 fn pip_lyric_toggle() -> bool {
-    crate::lyrics_pip::toggle()
+    let on = crate::lyrics_pip::toggle();
+    crate::player::log(&format!("pip.toggle -> {on}"));
+    on
 }
 
 #[tauri::command]
