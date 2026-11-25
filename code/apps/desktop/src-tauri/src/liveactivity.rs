@@ -468,16 +468,20 @@ fn handle_remote_command(cmd: &str) {
             push_last();
         }
         /*
-         * 回 App：这一支现在是**历史兼容**，Swift 侧已不再发 `open`。
+         * 回 App：2026-11-25 第四次修，这回走通了 intent。
          *
-         * 原先 widget 用 `Button(intent: ShuyinOpenIntent())` + `openAppWhenRun=true`
-         * 想借 intent 把 App 拉起来，实测无效：Apple DTS（论坛 thread/812949）
-         * 明确 `LiveActivityIntent` 只能后台跑，不会把 App 带到前台，而且
-         * Button 会吞掉点击 → 用户看到「点了完全没反应」（2026-11-25）。
-         * 现在展开态走 `Link(shuyin://live)`、紧凑/最小态走 widgetURL，
-         * 都不经过 Rust。保留这一支只为兼容还没升级的旧包。
+         * 之前这一支是空的——回 App 全靠 Link/widgetURL 的自定义 scheme，
+         * 在 iOS 18 锁屏上被吞（用户实测：按钮全有反应，点空白处没反应）。
+         * 现在 `ShuyinOpenIntent` 设了 openAppWhenRun=true，系统会先把 App 拉到
+         * 前台再执行到这里。落一个标记让前端回前台取走、展开播放页——用文件
+         * 而不是 emit，是因为 intent 执行时机早于 WebView 就绪，事件会丢。
          */
-        "open" => {}
+        "open" => {
+            if let Some(dir) = app.path().app_cache_dir().ok() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join("open_now.flag"), b"1");
+            }
+        }
         other => {
             crate::append_log(app, &format!("live.cmd unknown {other}"));
         }

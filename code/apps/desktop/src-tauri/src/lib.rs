@@ -1831,6 +1831,25 @@ fn take_open_file(app: AppHandle) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// 取走「点灵动岛 / 锁屏卡回 App」的标记（取走即删）。
+///
+/// `ShuyinOpenIntent.perform()` 在 App 进程里执行时落 `open_now.flag`
+/// （见 liveactivity.rs 的 `handle_remote_command("open")`）。前端每次回到
+/// 前台 / 启动时取一次，有就展开播放页。
+///
+/// 为什么不用 `app.emit`：intent 可能发生在 WebView 还没就绪的冷启动阶段，
+/// emit 的事件没有监听者会直接丢；文件放着不怕，等前端醒了再来取。
+#[tauri::command]
+fn take_open_now(app: AppHandle) -> bool {
+    let Some(dir) = app.path().app_cache_dir().ok() else { return false };
+    let f = dir.join("open_now.flag");
+    let ok = f.exists();
+    if ok {
+        let _ = std::fs::remove_file(&f);
+    }
+    ok
+}
+
 /// 把一张本地封面读成 `data:` URL。
 ///
 /// 只给 iOS 的 Live Activity 用：扩展进程跟主 App 各是各的沙箱，`file://`
@@ -3690,6 +3709,7 @@ pub fn run() {
             import_source_url,
             import_source_staged,
             take_open_file,
+            take_open_now,
             delete_source_script,
             pause,
             resume,

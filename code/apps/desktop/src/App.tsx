@@ -775,12 +775,32 @@ export function App() {
 
     const off = onNative('app://open-file', payload => { void ask(payload as IncomingFile) })
     void bridge.takeOpenFile().then(f => { if (f) void ask(f) })
+
     /*
-     * iOS 没有事件推送：文件是在 App 已经在后台时送进来的话，
+     * 点灵动岛 / 锁屏卡回 App：`ShuyinOpenIntent` 把 App 拉到前台后落了标记，
+     * 这里取走并展开播放页。没有它的话 App 虽然被拉起来，却停在首页，
+     * 用户仍会觉得「打不开 / 没反应」。
+     */
+    const openNowFromLive = () => {
+      if (!isIOS) return
+      void bridge.takeOpenNow().then(hit => {
+        if (!hit || !alive) return
+        flashPlayer(true)
+        openDetail(null)
+        setQueueOpen(false)
+        setNowOpen(true)
+      })
+    }
+    openNowFromLive()
+
+    /*
+     * iOS 没有事件推送：文件 / 回 App 标记都是在 App 已经在后台时送进来的话，
      * 只会在下一次回到前台才被读走。每次可见就取一次，代价是一次读文件。
      */
     const onVisible = () => {
-      if (document.visibilityState === 'visible') void bridge.takeOpenFile().then(f => { if (f) void ask(f) })
+      if (document.visibilityState !== 'visible') return
+      void bridge.takeOpenFile().then(f => { if (f) void ask(f) })
+      openNowFromLive()
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {

@@ -114,16 +114,44 @@ public struct ShuyinFavIntent: LiveActivityIntent {
 }
 
 /*
- * 「点灵动岛回 App」**没有**对应的 intent，这是刻意的：
+ * 「点灵动岛回 App」的可达性，踩了四轮才定位准（2026-11-25）：
  *
- * Apple DTS（开发者论坛 thread/812949）明确说 LiveActivityIntent 只能后台
- * 执行，「It is not possible to open an app using a LiveActivity」——
- * `openAppWhenRun = true` 也不生效。而 `Button(intent:)` 会吞掉点击，于是
- * 用户看到的就是「点了完全没反应」（2026-11-25 实测）。
+ * 之前一直走 `Link(destination: shuyin://live)` + `widgetURL`，理由是把
+ * DTS thread/812949 的「It is not possible to open an app using a
+ * LiveActivity」读成了「intent 打不开 App」。但那句话针对的是 **intent 的
+ * perform() 内部调 URL**（UIApplication.shared.open 在扩展里不可用），
+ * 不是系统级的 `openAppWhenRun` 标志。
  *
- * 回 App 走 `Link(destination: shuyin://live)`（展开态）与
- * `DynamicIsland.widgetURL`（紧凑/最小态），见 widget 里的 `OpenTap`。
+ * Apple 官方文档「Configuring the runtime behavior of your app intents」
+ * 原话：`LiveActivityIntent` 会自动把 supportedModes 配成前台运行；
+ * Apple 自己的 AlarmKit 示例就是用 `LiveActivityIntent` +
+ * `openAppWhenRun = true` 做「点按钮回 App」。
+ *
+ * 用户实测（2026-11-25）：收藏/上下曲/播放暂停/封面放大**全都有反应**
+ * （intent 通道完全正常），唯独点卡片空白处打不开 App（widgetURL 那条路
+ * 在 iOS 18 锁屏上被吞）。所以回 App 也改走 intent：
+ *   perform() 里记一个「待展开播放页」的标记，再由 `openAppWhenRun = true`
+ *   把 App 拉到前台；前端回前台取标记，直接展开播放页。
  */
+///
+/// 点卡片空白 / 歌名 / 进度 / 歌词任意位置：把 App 拉回前台并展开播放页。
+/// 只有锁屏卡与岛展开态用；紧凑/最小态仍是系统整块点击，走 `widgetURL`。
+@available(iOS 17.0, *)
+public struct ShuyinOpenIntent: LiveActivityIntent {
+    public static var title: LocalizedStringResource = "打开疏音"
+    public static var isDiscoverable: Bool = false
+    /// 关键：让系统把 App 从后台/锁屏拉到前台
+    public static var openAppWhenRun: Bool = true
+
+    public init() {}
+
+    public func perform() async throws -> some IntentResult {
+        /* 同一个转发函数：主 App 进程里有 Rust 符号，扩展里查不到就安静返回。
+         * 这里发的 open 命令会在 Rust 侧记下「回前台展开播放页」的标记。 */
+        shuyinForward("open")
+        return .result()
+    }
+}
 
 /// 点封面：锁屏卡在「大封面」和「普通卡」之间切换。
 ///

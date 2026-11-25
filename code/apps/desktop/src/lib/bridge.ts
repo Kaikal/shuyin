@@ -729,6 +729,21 @@ export const bridge = {
     }
   },
 
+  /**
+   * 取一次「点灵动岛 / 锁屏卡回 App」的标记（取走即清）。
+   *
+   * 原生 `ShuyinOpenIntent` 把 App 拉到前台时落盘一个 flag；这里读到就展开播放页。
+   * 同样用「取走即删」而不是事件——intent 执行早于 WebView 就绪，事件会丢。
+   */
+  async takeOpenNow(): Promise<boolean> {
+    if (!isNative) return false
+    try {
+      return await invoke<boolean>('take_open_now') === true
+    } catch {
+      return false
+    }
+  },
+
   /** 把暂存的音源脚本导入清单，返回最终落下的名字 */
   async importSourceStaged(path: string, name?: string): Promise<string> {
     if (!isNative) throw new Error('当前环境不能从「其他应用打开」导入')

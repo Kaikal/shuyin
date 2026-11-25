@@ -171,14 +171,19 @@ private struct ArtTap: View {
     let size: CGFloat
 
     var body: some View {
-        if #available(iOS 17.0, *) {
-            Button(intent: ShuyinToggleArtIntent()) {
+        Group {
+            if #available(iOS 17.0, *) {
+                Button(intent: ShuyinToggleArtIntent()) {
+                    Artwork(art: state.art, size: size)
+                }
+                .buttonStyle(.plain)
+            } else {
                 Artwork(art: state.art, size: size)
             }
-            .buttonStyle(.plain)
-        } else {
-            Artwork(art: state.art, size: size)
         }
+        /* 外层 OpenBackground 关掉了整块 hit testing，这里单独开回来，
+         * 保证「点封面放大」仍优先于「点卡片回 App」。 */
+        .allowsHitTesting(true)
     }
 }
 
@@ -202,22 +207,20 @@ private struct ArtLink: View {
 
 /// 「点一下回 App」的通用包装。
 ///
-/// **必须用 `Link`，不能用 `Button(intent:)`。**
+/// 2026-11-25 第四次修这个问题后的最终形态：**用 `Button(intent: ShuyinOpenIntent)`，
+/// 不用 `Link` / `widgetURL`**。
 ///
-/// Apple DTS 在开发者论坛 thread/812949 说得很直接：`LiveActivityIntent` 是
-/// 后台执行的意图——「It is not possible to open an app using a LiveActivity」，
-/// 即使 `openAppWhenRun` 设为 true 也**不会**把 App 拉到前台。而 `Button(intent:)`
-/// 恰恰会吞掉这次点击：intent 在后台跑完（Rust 收到 `open` 只记一行日志，
-/// 没有任何可见效果），用户看到的就是「点了完全没反应」——2026-11-25 实测。
-/// 上一版把 `Link` 改成 intent 就是栽在这里。
+/// 为什么 Link 不行：用户实测得很清楚——收藏/上下曲/播放暂停/封面放大全都有效
+/// （说明 intent 通道完全正常），唯独点卡片空白处打不开 App（Link/widgetURL 那条
+/// 自定义 scheme 在 iOS 18 锁屏上被系统吞了，尽管 Safari 里同一个 scheme 能打开）。
 ///
-/// `Link` 才是苹果给 Live Activity 指回 App 的官方通道，DTS 同一帖确认
-/// 「it does work in Dynamic Island expanded view」。Safari 能打开
-/// `shuyin://live` 已证明 scheme 注册没问题，缺的就是这个 `Link`。
+/// 为什么这次 intent 可以：`ShuyinOpenIntent` 设了 `openAppWhenRun = true`。
+/// Apple 官方文档明确 `LiveActivityIntent` 会按前台模式在主 App 进程执行；
+/// 之前注释说「openAppWhenRun 也不生效」是把 DTS 关于「intent 内部不能调 URL」
+/// 的话误读了。Apple 自己的 AlarmKit 示例就是这么回 App 的。
 ///
-/// 紧凑态 / 最小态不适用这里：那两态只有一个点击目标，走下面 `DynamicIsland`
-/// 上的 `.widgetURL`（iOS 26 起点紧凑态会打开 App，但系统不派发深链参数；
-/// 我们只要「回 App」，不需要参数）。
+/// 紧凑态 / 最小态不适用这里：那两态没有 region 之分、放不进 Button，
+/// 仍走下面 `DynamicIsland` 上的 `.widgetURL`。
 private struct OpenTap<Content: View>: View {
     private let content: () -> Content
 
@@ -226,7 +229,47 @@ private struct OpenTap<Content: View>: View {
     }
 
     var body: some View {
-        Link(destination: syLiveURL) { content() }
+        if #available(iOS 17.0, *) {
+            Button(intent: ShuyinOpenIntent()) {
+                content()
+            }
+            .buttonStyle(.plain)
+        } else {
+            // iOS 16.2~16.x 没有 Button(intent:)，退化成 Link（部分场景可用）
+            Link(destination: syLiveURL) { content() }
+        }
+    }
+}
+
+/// 让一整块区域可点回 App，但**不吞掉内部已有的按钮**（封面放大 / 播放控制）。
+///
+/// 做法：把可点视图铺成背景层（`Button`），真正的内容叠在上面并让内容本身
+/// 不接收点击（`allowsHitTesting(false)`），再在需要保留交互的子视图上
+/// 单独打开 hit testing。SwiftUI 里 Button 套 Button 行为未定义，
+/// 所以用「背景按钮 + 前景内容」而不是嵌套。
+private struct OpenBackground<Content: View>: View {
+    private let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        ZStack {
+            if #available(iOS 17.0, *) {
+                Button(intent: ShuyinOpenIntent()) {
+                    Color.clear
+                }
+                .buttonStyle(.plain)
+            } else {
+                Link(destination: syLiveURL) { Color.clear }
+            }
+            content()
+                /* 文字/进度/留白都透传给底下的回 App 按钮；
+                 * 内部真正要点的 Button（封面放大、播放控制）在各自视图上
+                 * 重新打开 hit testing，所以仍优先响应它们自己的 intent。 */
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -269,6 +312,9 @@ private struct Controls: View {
         // plain 是必须的：默认 Button 样式会套一层系统蓝，在岛里很脏
         .buttonStyle(.plain)
         .tint(.white)
+        /* 岛展开态的 Controls 不在 OpenBackground 内，这句只为锁屏卡
+         * 那张卡（整卡被 OpenBackground 关了 hit testing）把按钮点回来。 */
+        .allowsHitTesting(true)
     }
 }
 
@@ -307,29 +353,23 @@ private struct LockScreenView: View {
     let state: ShuyinActivityAttributes.ContentState
 
     var body: some View {
-        Group {
-            if state.big { bigBody } else { compactBody }
+        /*
+         * 整卡可点回 App：背景层是 `ShuyinOpenIntent`（openAppWhenRun=true），
+         * 前景内容里的封面 / 控制键各自保留自己的 Button，点击照常优先。
+         *
+         * 原来这里只挂 `.widgetURL(syLiveURL)`，用户实测「点卡片空白处完全没
+         * 反应，但按钮都有反应」——iOS 18 锁屏上那条自定义 scheme 被吞了。
+         * 改走 intent 是唯一被用户实测证明可行的通道。
+         */
+        OpenBackground {
+            Group {
+                if state.big { bigBody } else { compactBody }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
         .activityBackgroundTint(syBg)
         .activitySystemActionForegroundColor(syText1)
-        /*
-         * 点卡片（按钮以外的任何地方）打开疏音。
-         *
-         * 这一条是用户 2026-11-23 报的「灵动岛打不开应用，点击了没反应」：
-         * 卡片上原本没有任何 `widgetURL` / `Link`，而封面又变成了
-         * 「点一下切大图」的 Button —— 手指最容易落在封面和整排控制键上，
-         * 剩下的空白区域没有明确的行为，点下去就是什么都不发生。
-         * 显式给整卡挂上 scheme，至少「点卡片 = 回到 App」这条一定会成立。
-         *
-         * scheme 必须在主 App 的 Info.plist 里注册（CI 的 plist 补丁里有），
-         * 否则系统的 url 打不开，点下去依旧没反应。
-         *
-         * ⚠️ 全工程只有这一处 `widgetURL`（岛内用 `Link`）：
-         * Apple 说同一视图层级里出现多个 `widgetURL` 行为**未定义**。
-         */
-        .widgetURL(syLiveURL)
     }
 
     /// 普通形态：封面 + 歌名/歌手 + 进度 + 一句词 + 整排控制
