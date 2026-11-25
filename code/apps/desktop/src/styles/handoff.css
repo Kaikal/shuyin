@@ -5420,10 +5420,17 @@ html[data-shell='tablet'] .q-row:hover:not(.current),
 html[data-shell='tablet'] .cm-row:hover {
   background: transparent;
 }
-/* 队列行 hover 会把序号藏起来换成抓手：触摸上那一行会一直「缺个号」 */
-html[data-shell='phone'] .q-row:hover .idx,
+/*
+ * 队列行 hover：桌面会把序号藏起来换成抓手，所以这里在 hover 时翻回来。
+ *
+ * **手机端不能跟**：手机本来就不显示序号（见 2282 的 `.q-row .idx{display:none}`，
+ * 正在播放改用副标题的「正在播放 ·」前缀），抓手也只在排序态露。
+ * 一旦让 hover 去翻 `.idx`，触摸设备上「点过的那一行」:hover 会一直粘着不消失，
+ * 那行就永远多出一个 16px 的序号（current 行里还是 eq-mini 动画），把封面和
+ * 文字整体右推——用户看到的就是「点过某首歌再滑，那首歌缩进且不复原」。
+ * 手机端彻底不接 hover 切换，只留平板（平板有真指针，翻回来是对的）。
+ */
 html[data-shell='tablet'] .q-row:hover .idx { display: block; }
-html[data-shell='phone'] .q-row:hover .grip,
 html[data-shell='tablet'] .q-row:hover .grip { display: none; }
 
 /* 卡片：hover 只在鼠标上来时抬一下 / 放大一点，触摸上会一直翘着 */
