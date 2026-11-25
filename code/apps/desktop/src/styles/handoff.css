@@ -3702,8 +3702,31 @@ html[data-shell='phone'] .imm-mp-disc {
   position: relative;
   border-radius: 50%;
   background: #0c0d11;
-  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.58), 0 0 0 1px var(--hd-line-subtle);
+  /*
+   * 大投影不挂在盘自身了——它会被外层 .imm-mp-clip 的 overflow:hidden
+   * 裁出方边（阴影模糊 60px，昨天把 --mp-bleed 加到 56 仍看得见一圈方影）。
+   * 改由 stage 的 ::before 在 clip 之外画同尺寸的圆影，怎么裁都是圆的。
+   * 这里只保留贴着盘沿的 1px 描边。
+   */
+  box-shadow: 0 0 0 1px var(--hd-line-subtle);
 }
+/* 唱片的圆形投影：挂在 stage（clip 之外），不受竖滑轨道 overflow 裁切。
+   尺寸和盘同源 --mp-size，永远严丝合缝；唱臂 z-index:2 仍在最上层。 */
+html[data-shell='phone'] .imm-mp-stage[data-vinyl='true']::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--mp-size, clamp(190px, min(100vw - 88px, 44vh), 316px));
+  height: var(--mp-size, clamp(190px, min(100vw - 88px, 44vh), 316px));
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.58);
+  pointer-events: none;
+  z-index: 0;
+}
+/* 轨道抬到影子之上（否则 ::before 的 z-index:0 会盖住盘面内容） */
+html[data-shell='phone'] .imm-mp-clip { position: relative; z-index: 1; }
 /*
  * 手机把标签放大到 68%（桌面仍 58%）：黑胶那圈就窄了一截，封面图更大，
  * 环形频谱的跑道也跟着变短——用户原话「黑圈可以窄一些，封面图大一些，
@@ -4999,6 +5022,13 @@ html[data-shell='phone'] .app-toast.low {
     width: auto;
     height: 100%;
     aspect-ratio: 1;
+  }
+  /* 横屏盘尺寸改走 height:100%（上面那段），和 stage::before 的 --mp-size
+     不再是同一个值，影子会对不准。横屏本来整页 overflow:hidden、盘也小，
+     方影看不出来——这里退回原来「盘自带阴影」的写法，别引入新错位。 */
+  html[data-shell='phone'] .imm-mp-stage[data-vinyl='true']::before { display: none; }
+  html[data-shell='phone'] .imm-mp-disc {
+    box-shadow: 0 26px 60px rgba(0, 0, 0, 0.58), 0 0 0 1px var(--hd-line-subtle);
   }
   html[data-shell='phone'] .imm-mp-meta {
     justify-content: center;
