@@ -2002,6 +2002,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    * 就是「歌在响、封面标题不动」。
    */
   syncNativeIndexRef.current = (st) => {
+    /*
+     * 用户点歌正在取链（1~3 秒）时，**绝不能**被原生残留的 auto/relayed 对齐打断。
+     *
+     * 2026-11-25 app(3).log：点列表 idx=23（ep=9）后一直不响，而上一首 idx=24
+     * 刚 relay 接上、`relayed=24` 还挂在原生快照里。用户点 23 后、play_url 落地前
+     * 这 3 秒窗口里每 250ms 一帧的状态都带着 relayed=24，下面这段会把前端刚点的
+     * 23 强行拽回 24，还 `stopLoading()` 掐断取链——界面切回旧歌、声音没了。
+     *
+     * 用户主动点歌的意图永远优先：加载中的对齐信号一律忽略。原生那轮接歌的
+     * 下标即使是对的，用户点歌成功后 `play_url` 会清掉 auto/relayed 并给出真值；
+     * 万一这轮加载失败，失败分支会自己处理，不需要这里的对齐来兜。
+     */
+    if (loadingRef.current) return
     const a = typeof st.auto === 'number' ? st.auto : -1
     const r = typeof st.relayed === 'number' ? st.relayed : -1
     const auto = Math.max(a, r)

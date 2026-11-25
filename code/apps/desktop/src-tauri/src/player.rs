@@ -1515,6 +1515,8 @@ impl Player {
                                 _ => TrackSrc::Url(String::new()),
                             };
                             if !src.as_str().is_empty() {
+                                /* auto/relayed 互斥：走直链接歌就清掉上一轮 relay 的残留 */
+                                sh.relayed.store(-1, Ordering::SeqCst);
                                 sh.auto.store(n.index as i64, Ordering::SeqCst);
                                 /*
                                  * 系统媒体卡片（锁屏 / 控制中心）和灵动岛现在就换歌名：
@@ -1545,7 +1547,15 @@ impl Player {
                          * 这是「无限后台」的关键一步：直链表是 JS 事先算好递过来的，
                          * 后台 JS 被冻住就不会再补；原生内嵌 QuickJS 跑同一批音源脚本，
                          * 所以只要网络在，链条就能一直往下接。
+                         *
+                         * 关键：走 relay 前必须清掉 `auto`。auto/relayed 是两条互斥
+                         * 的接歌路径，前端 `Math.max(auto, relayed)` 靠「只有一个 >= 0」
+                         * 判断当前在播哪首。上一轮 auto 接歌写下的下标若残留，relay
+                         * 这轮取链还没完成时前端会拿旧的 auto 把队列拉回去——用户看到
+                         * 的就是「锁屏上歌名和正在播的对不上」（2026-11-25 app(3).log：
+                         * end idx=23 auto=22 relayed=23，auto=22 是上一轮的残留）。
                          */
+                        sh.auto.store(-1, Ordering::SeqCst);
                         if relay_next(&sh, &tx_self) {
                             continue;
                         }
