@@ -109,6 +109,49 @@ pub fn live_activity_sync(state: LiveState) -> Result<(), String> {
                 state.fav = v;
             }
         }
+        /*
+         * 同曲更新（收藏 / 换句）时，前端这一帧的 `position` 可能是**旧的**。
+         *
+         * 典型经过：App 进后台，JS 被 iOS 冻住；用户点岛上的收藏 → Rust 乐观
+         * 翻星并 push_last()（那时按锚点补到「现在」，是对的）→ 前端被事件唤醒，
+         * 拿**冻住那一刻**的 `snapshot.position` 配一个「现在」的 anchor 再推一次。
+         * widget 按 `anchor - position` 算出起点，进度条当场跳回旧位置；随后
+         * 心跳发现 drift > 6s 又拽回真值。用户看到的就是「点收藏进度条跳到
+         * 中间又立马跳回去当前播放时刻」（2026-11-25 反馈）。
+         *
+         * 进度真值只有原生知道（`current_position()` 从音频引擎现读，不依赖 JS）。
+         * 只要还是同一首歌（标题 + 专辑没变，说明这不是切歌），就用原生快照的
+         * position/duration 加当下 anchor 覆盖前端那份。切歌时标题会变，那一次
+         * 照用前端的——它带的是新曲起点，原生这一刻可能还没把队列切过去。
+         */
+        let same_track = LAST
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.as_ref().map(|s| s.title == state.title && s.album == state.album)
+            })
+            .unwrap_or(false);
+        if same_track {
+            if let Some(app) = APP.get() {
+                if let Some(p) = app.try_state::<Player>() {
+                    let (_, _, pos, dur) = p.state_lite();
+                    if let Some(app) = APP.get() {
+                        crate::append_log(
+                            app,
+                            &format!(
+                                "live.pos native {:.1s} (front {:.1s})",
+                                pos, state.position
+                            ),
+                        );
+                    }
+                    state.position = pos.max(0.0);
+                    if dur > 0.0 {
+                        state.duration = dur;
+                    }
+                    state.anchor = unix_now();
+                }
+            }
+        }
         if let Ok(mut g) = LAST.lock() {
             *g = Some(state.clone());
         }
