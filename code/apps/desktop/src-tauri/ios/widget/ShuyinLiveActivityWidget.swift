@@ -202,14 +202,22 @@ private struct ArtLink: View {
 
 /// 「点一下回 App」的通用包装。
 ///
-/// iOS 17 走 `ShuyinOpenIntent`（`openAppWhenRun = true`，在主 App 进程里跑完
-/// 就把 App 拉到前台）。**不再依赖 `Link` / `widgetURL`**：2026-11-24 实测，
-/// Safari 里输 `shuyin://live` 能跳进来（scheme 正常），但同一台机器上点岛里的
-/// 歌名/封面/倒计时全部没反应——说明 Live Activity 里「按 URL 激活 App」这条链
-/// 会被系统吞掉。同一张卡上的播放/收藏键（也是 intent）却是好的，所以回 App
-/// 也改走 intent。
+/// **必须用 `Link`，不能用 `Button(intent:)`。**
 ///
-/// iOS 16 没有 `Button(intent:)`，那边退回 `Link`（锁屏卡仍然有 `widgetURL`）。
+/// Apple DTS 在开发者论坛 thread/812949 说得很直接：`LiveActivityIntent` 是
+/// 后台执行的意图——「It is not possible to open an app using a LiveActivity」，
+/// 即使 `openAppWhenRun` 设为 true 也**不会**把 App 拉到前台。而 `Button(intent:)`
+/// 恰恰会吞掉这次点击：intent 在后台跑完（Rust 收到 `open` 只记一行日志，
+/// 没有任何可见效果），用户看到的就是「点了完全没反应」——2026-11-25 实测。
+/// 上一版把 `Link` 改成 intent 就是栽在这里。
+///
+/// `Link` 才是苹果给 Live Activity 指回 App 的官方通道，DTS 同一帖确认
+/// 「it does work in Dynamic Island expanded view」。Safari 能打开
+/// `shuyin://live` 已证明 scheme 注册没问题，缺的就是这个 `Link`。
+///
+/// 紧凑态 / 最小态不适用这里：那两态只有一个点击目标，走下面 `DynamicIsland`
+/// 上的 `.widgetURL`（iOS 26 起点紧凑态会打开 App，但系统不派发深链参数；
+/// 我们只要「回 App」，不需要参数）。
 private struct OpenTap<Content: View>: View {
     private let content: () -> Content
 
@@ -218,13 +226,7 @@ private struct OpenTap<Content: View>: View {
     }
 
     var body: some View {
-        if #available(iOS 17.0, *) {
-            Button(intent: ShuyinOpenIntent()) { content() }
-                .buttonStyle(.plain)
-                .tint(.white)
-        } else {
-            Link(destination: syLiveURL) { content() }
-        }
+        Link(destination: syLiveURL) { content() }
     }
 }
 
@@ -435,10 +437,7 @@ struct ShuyinLiveActivityWidget: Widget {
                         .padding(.leading, 2)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    /*
-                     * 歌名/歌手整块也是回 App 的落点（见 `OpenTap` 的注释：
-                     * 这里换成 intent，`Link` 在岛上不灵）。
-                     */
+                    /* 歌名/歌手整块也是回 App 的落点（用 `Link`，见 `OpenTap`） */
                     OpenTap {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(context.state.title)
@@ -508,13 +507,14 @@ struct ShuyinLiveActivityWidget: Widget {
              * 「通过此函数设置的 URL 会成为每个实时活动视图用于深度链接的默认
              * URL；如果包含 Link，Link 的优先级高于它」）。
              *
-             * 之前只在封面 / 歌名 / 倒计时三小块上挂 `Link`，岛的其余地方
-             * （展开态的空隙、紧凑态整条胶囊）**没有任何 URL**——手指落在那里
-             * 就是「点了没反应」（用户 2026-11-24 反馈「灵动岛打不开应用」）。
-             * 补上这一条之后，除了那几个按钮，点岛上任何地方都会回 App。
+             * 紧凑 / 最小态里这块是**唯一**的点击目标——那两态没有 region 之分，
+             * `Link` 只有在展开态才生效（Apple DTS 原话：「Link ... does work in
+             * Dynamic Island expanded view」），所以小胶囊全靠这条 widgetURL。
+             * 展开态则相反：`DynamicIsland` 这条 + 各 region 内的 `Link` 共存时
+             * `Link` 优先，不会互相抢。
              *
-             * 注意不能改回「给每个 region 各挂一个 widgetURL」：同一层级多个
-             * widgetURL 是未定义行为，系统只认其中一个，反而可能全都不生效。
+             * 注意不能给每个 region 各挂一个 widgetURL：同一层级多个 widgetURL
+             * 是未定义行为，系统只认其中一个，反而可能全都不生效。
              */
             .widgetURL(syLiveURL)
             .keylineTint(syAccent)

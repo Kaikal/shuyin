@@ -425,9 +425,14 @@ fn handle_remote_command(cmd: &str) {
             push_last();
         }
         /*
-         * 回 App：真正把 App 拉到前台的是 intent 自己（`openAppWhenRun = true`），
-         * 到这里只需要留一行痕——`app.log` 里没有 `live.cmd open` 就说明
-         * 那一下点击连 intent 都没跑到（跟推送、scheme 都无关）。
+         * 回 App：这一支现在是**历史兼容**，Swift 侧已不再发 `open`。
+         *
+         * 原先 widget 用 `Button(intent: ShuyinOpenIntent())` + `openAppWhenRun=true`
+         * 想借 intent 把 App 拉起来，实测无效：Apple DTS（论坛 thread/812949）
+         * 明确 `LiveActivityIntent` 只能后台跑，不会把 App 带到前台，而且
+         * Button 会吞掉点击 → 用户看到「点了完全没反应」（2026-11-25）。
+         * 现在展开态走 `Link(shuyin://live)`、紧凑/最小态走 widgetURL，
+         * 都不经过 Rust。保留这一支只为兼容还没升级的旧包。
          */
         "open" => {}
         other => {

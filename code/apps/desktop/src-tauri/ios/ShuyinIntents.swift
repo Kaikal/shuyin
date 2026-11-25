@@ -113,34 +113,17 @@ public struct ShuyinFavIntent: LiveActivityIntent {
     }
 }
 
-/// 点岛上任意位置：回 App。
-///
-/// 为什么不再用 `Link` / `widgetURL`：2026-11-24 的实测把责任分清了——
-/// 用户在 Safari 地址栏里输 `shuyin://live`，确认后**能**跳进疏音，
-/// 说明 scheme 是注册好的；可同一台手机上点岛里的歌名、封面、倒计时全都
-/// 没反应。也就是说「系统按 URL 激活 App」这条链路在 Live Activity 里不可靠
-/// （点按被系统吞掉，连冷启动都没有）。
-///
-/// 而 intent 这条路是**实测能通的**（同一张卡上的播放/收藏键都在按）。
-/// 所以回 App 也走 intent：`openAppWhenRun = true`，系统会在跑完 intent 之后
-/// 把 App 拉到前台——完全不依赖自定义 scheme 的跳转。
-///
-/// 这是六个 intent 里**唯一**把 `openAppWhenRun` 设成 true 的，别照抄到别处：
-/// 点一下播放键就弹出一整个 App 是很讨厌的。
-@available(iOS 17.0, *)
-public struct ShuyinOpenIntent: LiveActivityIntent {
-    public static var title: LocalizedStringResource = "打开疏音"
-    public static var isDiscoverable: Bool = false
-    public static var openAppWhenRun: Bool = true
-
-    public init() {}
-
-    public func perform() async throws -> some IntentResult {
-        /* 留个痕：日志里出现 `live.cmd open` 就说明这一下真的被执行了 */
-        shuyinForward("open")
-        return .result()
-    }
-}
+/*
+ * 「点灵动岛回 App」**没有**对应的 intent，这是刻意的：
+ *
+ * Apple DTS（开发者论坛 thread/812949）明确说 LiveActivityIntent 只能后台
+ * 执行，「It is not possible to open an app using a LiveActivity」——
+ * `openAppWhenRun = true` 也不生效。而 `Button(intent:)` 会吞掉点击，于是
+ * 用户看到的就是「点了完全没反应」（2026-11-25 实测）。
+ *
+ * 回 App 走 `Link(destination: shuyin://live)`（展开态）与
+ * `DynamicIsland.widgetURL`（紧凑/最小态），见 widget 里的 `OpenTap`。
+ */
 
 /// 点封面：锁屏卡在「大封面」和「普通卡」之间切换。
 ///
