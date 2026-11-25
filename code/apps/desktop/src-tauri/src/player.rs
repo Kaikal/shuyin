@@ -1161,9 +1161,11 @@ impl Player {
             let mixer = stream.mixer().clone();
             let mut sink: Option<Sink> = None;
             let mut last_tick = Instant::now();
-            /* 位置对齐诊断：SHUYIN_POS_LOG=1 时每 2s 记一行「声卡位置 vs 墙钟」，
-               用来判断歌词慢是「声卡真的落后」还是「前端渲染慢」。平时不开。 */
-            let pos_log = std::env::var("SHUYIN_POS_LOG").is_ok();
+            /* 位置对齐诊断：每 2s 记一行「声卡位置 vs 墙钟」，用来判断「进度条
+               不动」到底是声卡计数没走、被那道 5s 闸退回墙钟，还是前端没收到。
+               环境变量照旧能开；**iOS 默认开**——真机上的进度条问题从日志里
+               一眼看不出来，只能靠这两列数字（2026-11-25 那条）。 */
+            let pos_log = cfg!(target_os = "ios") || std::env::var("SHUYIN_POS_LOG").is_ok();
             let mut pos_log_at = Instant::now();
             /*
              * 卡死看门狗：声明在播、声卡位置却不动。

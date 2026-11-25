@@ -11,7 +11,7 @@ pub mod hotkeys;
 ///
 /// 每次出**诊断包**就把这里改一下。未签名 IPA 由用户自己重签安装，版本号
 /// 又长期不动，光看界面分不出手里这份是不是刚下的——上一轮就白排查了一天。
-pub const BUILD_TAG: &str = "2026-11-25.diag4";
+pub const BUILD_TAG: &str = "2026-11-25.diag5";
 /// 封面小图（原生接歌时给系统卡 / 灵动岛补封面）
 pub mod coverart;
 #[cfg(target_os = "ios")]
@@ -405,6 +405,19 @@ fn write_text_abs(path: String, text: String) -> Result<(), String> {
 #[tauri::command]
 fn player_state(player: State<'_, Player>) -> Result<PlayerSnapshot, String> {
     Ok(player.snapshot())
+}
+
+/// WebView 是不是在前台（前端 `visibilitychange` 时同步过来）。
+///
+/// 用途只有一个：`player://state` 那条 250ms 广播线程在 iOS 上要跟着停。
+/// App 进后台后 WKWebView 的 JS 是被系统冻住的，继续每 250ms `eval` 一段脚本
+/// 只会把任务堆在被挂起的 WebContent 进程里——放一晚上音乐就是十万条，
+/// 回到前台要卡着消化很久。前台才推，后台一律不动。
+pub static UI_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[tauri::command]
+fn set_ui_visible(visible: bool) {
+    UI_VISIBLE.store(visible, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -3527,20 +3540,8 @@ pub fn run() {
                 Err(e) => append_log(app.handle(), &format!("window.lock preload fail {e}")),
             }
 
-            // 状态广播线程：250ms 推送一次快照（ended 为一次性标记）
-            // 顺带在曲目/播放态变化时刷新托盘菜单文案
-            let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                loop {
-                    let snap = match handle.try_state::<Player>() {
-                        Some(p) => p.snapshot(),
-                        None => break,
-                    };
-                    let _ = handle.emit("player://state", &snap);
-
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-            });
+            // 状态广播线程见下面 `#[cfg(not(target_os = "android"))]` 那段——
+            // 它**不能**留在 desktop 段里：iOS 会因此完全没有播放态推送。
 
             // 调试钩子：SHUYIN_TRAY_DEMO="x,y" 启动后自动在指定屏幕坐标弹出托盘菜单，
             // 方便在没有真实鼠标操作的环境里核对样式（正常启动不会触发）
@@ -3563,6 +3564,44 @@ pub fn run() {
                 eprintln!("托盘图标初始化失败：{e}");
             }
             } // #[cfg(desktop)] 窗口/托盘段结束
+
+            /*
+             * 状态广播线程：250ms 推一次快照。
+             *
+             * **它曾经写在上面那个 `#[cfg(desktop)]` 块里**，于是 iOS 上一个字节
+             * 都推不出去：安卓有 Kotlin 壳自己推 `player://state`，桌面靠这条线程，
+             * iOS 两头都没有 → 前端 `onPlayerEvent` 永远收不到东西，只能靠 2 秒一次
+             * 的看门狗补。用户 2026-11-25 报的「进度条一直停着」就是这个；
+             * 更早那些「播放状态不跟手 / 歌词不出」也是同一条根。
+             *
+             * 安卓跳过：它的状态由 `PlaybackService` 直接推，这条再跑一遍纯属空转。
+             */
+            #[cfg(not(target_os = "android"))]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    /*
+                     * 界面在后台就别推了——**只在 iOS 上这么做**。
+                     *
+                     * 桌面不能跟着停：主窗口收进托盘时 `document.hidden` 也是 true，
+                     * 而桌面歌词窗 / 托盘 / 音乐桌面是**另外几个 webview**，还在等这条
+                     * 广播喂进度。拿它当统一开关会把桌面歌词一起冻住。
+                     */
+                    #[cfg(target_os = "ios")]
+                    {
+                        if !UI_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            continue;
+                        }
+                    }
+                    let snap = match handle.try_state::<Player>() {
+                        Some(p) => p.snapshot(),
+                        None => break,
+                    };
+                    let _ = handle.emit("player://state", &snap);
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                });
+            }
 
             Ok(())
         });
@@ -3677,6 +3716,7 @@ pub fn run() {
             hotkeys_apply,
             hotkeys_clear,
             player_state,
+            set_ui_visible,
             next_prefetch,
             native_chain,
             play_file,

@@ -272,6 +272,20 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         let attrs: [CFString: Any] = [
             kCVPixelBufferCGImageCompatibilityKey: true,
             kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            /*
+             * **必须带 IOSurface**。
+             *
+             * `AVSampleBufferDisplayLayer` 只显示 IOSurface 支撑的缓冲区；
+             * 普通 malloc 出来的 BGRA 缓冲区 `enqueue` 不报错、layer 也不进
+             * `.failed`，就是**什么都不显示**——画中画窗口在、里面永远是空的。
+             * 2026-11-25 用户报的「只有一个边框，没有歌词」就是这条：
+             * 上一版只给了 CGImage/CGBitmapContext 兼容位，漏了表面。
+             *
+             * Metal 兼容位一起给上：layer 内部是 Metal 合成的，缺它时
+             * 部分机型能显示但会掉帧。
+             */
+            kCVPixelBufferIOSurfacePropertiesKey: [String: Any]() as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
         ]
         guard CVPixelBufferCreate(
             kCFAllocatorDefault, W, H, kCVPixelFormatType_32BGRA,

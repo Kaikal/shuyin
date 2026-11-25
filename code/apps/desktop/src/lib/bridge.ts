@@ -321,6 +321,17 @@ export const bridge = {
     return invoke('live_activity_end')
   },
 
+  /**
+   * 告诉 Rust「界面在不在前台」。
+   *
+   * 只为一件事服务：`player://state` 那条 250ms 广播线程在 iOS 上要跟着停。
+   * App 进后台后 WebView 的 JS 被系统冻住，继续推只是把脚本堆在被挂起的
+   * WebContent 进程里。桌面/安卓也有这条命令，但那边没有副作用。
+   */
+  async setUiVisible(visible: boolean): Promise<void> {
+    return invoke('set_ui_visible', { visible })
+  },
+
   async playerState(): Promise<PlayerStateSnapshot> {
     /*
      * 字段名归一化。

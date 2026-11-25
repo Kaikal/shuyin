@@ -26,6 +26,21 @@ use crate::player::Player;
 /// 没有上下文可传，只能从这里取。
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
+/// 要不要画**我们自己的**实时活动卡（锁屏那张大卡 + 岛上的紧凑态）。
+///
+/// 2026-11-25 用户拍板关掉：锁屏上「系统那张正在播放卡」和「我们自绘的卡」
+/// 同时出现，重复。只要系统那张。
+///
+/// **关掉不等于灵动岛消失**：任何一个设置了 `MPNowPlayingInfoCenter` 的 App，
+/// iOS 都会自己在岛上渲染「正在播放」的紧凑态，点开就是系统播放控件——正是
+/// 用户要的那张，而且它天然支持点击回 App。我们这张卡是**多出来的第二份**。
+///
+/// 关掉后 `sync` / `push_track` / 状态心跳全部空转，Swift 侧不再请求 Activity，
+/// 顺带省掉一路每秒两次的 IPC 和整段 base64 封面计算。代码原样保留：
+/// 将来要回来把这个常量改 true 即可（代价就是锁屏会再出现第二张卡）。
+pub const DRAW_OWN_CARD: bool = false;
+
+
 /// 一次播放状态的快照，字段名与 Swift 侧的 `ShuyinLive.Payload` 一一对应。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LiveState {
@@ -65,13 +80,22 @@ pub fn init(app: &AppHandle) {
     #[cfg(target_os = "ios")]
     {
         /*
-         * Swift 侧是 dlsym 动态查 shuyin_remote_command，静态引用链上看不到它，
-         * 链接器的 -dead_strip 有理由认为这个符号没人用。这里取一次地址把它
-         * 「点亮」——同一个 object 文件里的引用足以让链接器整个留下。
+         * Swift 侧是 dlsym 动态查 shuyin_remote_command，静态引用链上看不到它。
+         * 取一次地址让链接器看见（`-dead_strip` 已经关了，这里当零成本保险）。
+         * **不能挪进 `if DRAW_OWN_CARD`**：CI 会校验这 8 个符号都在，
+         * 少了直接判构建失败。
          */
         let _keep = shuyin_remote_command as *const ();
         std::hint::black_box(_keep);
-        ffi::adopt();
+        if DRAW_OWN_CARD {
+            ffi::adopt();
+        } else {
+            /*
+             * 上一版装上来的用户手里可能还挂着一条实时活动（锁屏第二张卡）。
+             * 关掉之后不再有人推它，它会一直僵在那儿，所以启动时收一次摊。
+             */
+            ffi::end();
+        }
         /*
          * 桌面歌词（画中画）的 Swift C 入口没有任何静态引用链，Release 的
          * -dead_strip 会剥掉 shuyin_pip_toggle 等符号 → dlsym 恒 NULL →
@@ -79,10 +103,12 @@ pub fn init(app: &AppHandle) {
          * ShuyinLyricsPiP.swift 的 object 点亮保留（同灵动岛 adopt 机制）。
          */
         crate::lyrics_pip::adopt();
-        /* 锁屏歌词：App 进后台后 JS 会被冻住，词得由原生自己往前推 */
-        spawn_lyric_ticker();
-        /* 状态对账：换歌 / 暂停发生在 JS 冻着的时候，岛和锁屏卡得由原生自己跟上 */
-        spawn_state_ticker();
+        if DRAW_OWN_CARD {
+            /* 锁屏歌词：App 进后台后 JS 会被冻住，词得由原生自己往前推 */
+            spawn_lyric_ticker();
+            /* 状态对账：换歌 / 暂停发生在 JS 冻着的时候，岛和锁屏卡得由原生自己跟上 */
+            spawn_state_ticker();
+        }
         /* 桌面歌词（画中画）：200ms 一帧，只在用户开着的时候跑 */
         spawn_pip_ticker();
     }
@@ -93,7 +119,13 @@ pub fn init(app: &AppHandle) {
 /// 不要拿它当心跳用：进度条由系统自己走秒（`Text(timerInterval:)`），
 /// 每秒推一次只会白白消耗 Live Activity 的更新预算。
 #[tauri::command]
+#[allow(unreachable_code)]
 pub fn live_activity_sync(state: LiveState) -> Result<(), String> {
+    /* 自绘卡关着：连序列化都没必要，直接空转（见 DRAW_OWN_CARD） */
+    if !DRAW_OWN_CARD {
+        let _ = state;
+        return Ok(());
+    }
     #[cfg(not(target_os = "ios"))]
     {
         let _ = state;

@@ -1480,6 +1480,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
     window.addEventListener('online', netBack)
 
+    /*
+     * 前后台对账：Rust 那条 250ms 的 `player://state` 广播线程靠这个标志决定推不推。
+     * iOS 进后台后 WebView 的 JS 被系统冻住，继续推只会把脚本堆在挂起的进程里
+     * （放一晚上音乐就是十万条），所以后台一律停推，回前台立刻恢复。
+     */
+    const onVis = () => {
+      void bridge.setUiVisible(document.visibilityState !== 'hidden').catch(() => {})
+    }
+    document.addEventListener('visibilitychange', onVis)
+    onVis()
+
     const dog = window.setInterval(() => {
       if (!hydrated.current) return
       /*
@@ -1549,6 +1560,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     return () => {
       window.clearInterval(dog)
+      document.removeEventListener('visibilitychange', onVis)
       window.removeEventListener('online', netBack)
       unsubs.forEach(u => u())
     }
