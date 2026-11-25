@@ -139,7 +139,7 @@ pub fn live_activity_sync(state: LiveState) -> Result<(), String> {
                         crate::append_log(
                             app,
                             &format!(
-                                "live.pos native {:.1s} (front {:.1s})",
+                                "live.pos native {:.1} (front {:.1})",
                                 pos, state.position
                             ),
                         );
