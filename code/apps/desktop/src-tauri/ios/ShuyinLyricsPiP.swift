@@ -22,15 +22,21 @@ import UIKit
 ///         → 渲染成 CVPixelBuffer → CMSampleBuffer → enqueue 到 layer
 ///           → 画中画窗口自己显示
 ///
-/// 开关由 `shuyin_pip_toggle()` 控制：打开时建 controller（必须在前台），
-/// 之后 App 一进后台，系统就把这条字幕浮起来（`canStartPictureInPictureAutomaticallyFromInline`）。
+/// ## 上一版「打不开」的根因（2026-11-25）
 ///
-/// ## 两个坑
+/// `AVPictureInPictureController` 的 `sampleBufferDisplayLayer` 内容源有个
+/// 不说就会踩的前提：**那个 layer 必须真的挂在一棵视图树上**。系统靠 source
+/// view 判断「这是屏幕上的内联内容，切后台时要把它变成画中画」。上一版只是
+/// `let layer = AVSampleBufferDisplayLayer()` 然后往里喂帧，从没 `addSublayer`：
+///   · `isPictureInPicturePossible` 永远是 false；
+///   · 开关打开时没在前台 `startPictureInPicture()`；
+///   · 唯一的启动尝试放在 `didEnterBackground` 里——Apple 明确说后台调会被拒
+///     （`AVKitErrorDomain Code=-1001`，activation state 不是 foregroundActive）。
+/// 三条路全断，用户看到的就是「开关点了没反应 / 切后台也不浮」。
 ///
-/// 1. **必须给 layer 一个 timebase**：画中画按时间轴驱动显示，timebase 为 nil
-///    时窗口是黑的（不报错，只是什么都没有）。
-/// 2. **所有 AVKit 调用都回主线程**：Rust 那条心跳在音频线程旁边的普通线程上，
-///    直接调会在后台线程建 UI 对象，轻则窗口不出现，重则崩。
+/// 现在：开关打开就把 layer 挂到 keyWindow（一个 2% 透明的宿主 view）、
+/// 前台先喂一帧再主动 start；`canStart...AutomaticallyFromInline` 与
+/// `didEnterBackground` 兜底只作为「已经成功启动过一次」之后的保险。
 @available(iOS 15.0, *)
 final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
                        AVPictureInPictureSampleBufferPlaybackDelegate {
@@ -44,6 +50,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     private var ctrl: AVPictureInPictureController?
     private let layer = AVSampleBufferDisplayLayer()
     private var timebase: CMTimebase?
+    /// 把 layer 挂到视图树上的宿主 view（PiP 启动的硬性前提，见文件头）
+    private var host: UIView?
 
     /// 当前要画的句子与进度（只由 `shuyin_pip_set` 改）
     private var line = ""
@@ -51,6 +59,9 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     private var playing = false
     /// 已经画进 buffer 的那一帧的「内容指纹」，一样就不重画（省电）
     private var painted = "\u{0}"
+    /// 上次真正 enqueue 的时刻：内容没变也要定期补一帧，否则系统会把
+    /// 「长时间没有新 sample」当成播放结束，自己把画中画收掉。
+    private var lastEnqueue = Date.distantPast
     /// 后台通知只挂一次
     private var observing = false
 
@@ -68,17 +79,15 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
             self.prog = max(0, min(1, prog))
             self.playing = playing
             /*
-             * 只在**画面真的变了**的时候重画。
-             *
              * 句内进度按 2% 量化：640px 宽的条上差 2% 是 13px，肉眼刚好察觉不到，
-             * 但每秒重画的次数从 5 次降到 1~2 次——画中画本身是要耗电的窗口，
-             * 不能拿 60fps 去喂一条字幕。
+             * 但每秒重画的次数从 5 次降到 1~2 次——画中画本身是要耗电的窗口。
+             * 内容没变也照样调 `paint()`，由它内部的 0.9s 节流补一帧保活。
              */
             let q = Int(self.prog * 50)
             let key = "\(line)|\(q)|\(playing ? 1 : 0)"
-            guard key != self.painted else { return }
-            self.painted = key
-            self.paint()
+            let changed = key != self.painted
+            if changed { self.painted = key }
+            self.paint(force: changed)
         }
     }
 
@@ -96,19 +105,60 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         wanted.toggle()
         UserDefaults.standard.set(wanted, forKey: "shuyin.pip.lyrics")
         if wanted {
+            guard attachLayer() else {
+                /*
+                 * 拿不到前台 keyWindow（App 还没完成启动）：这一下没法起 PiP。
+                 * 开关状态留着，等 didBecomeActiveNotification 再补一次。
+                 */
+                NSLog("[shuyin] pip on: no foreground window, retry on active")
+                return wanted
+            }
             setupIfNeeded()
-            /* 前台先渲染一帧，画中画才有内容可显示 */
-            paint()
+            /* 前台先渲染一帧——layer 空的时候系统拒绝启动 */
+            paint(force: true)
+            /*
+             * 必须**在前台**启动。延迟 0.2s 是等第一帧真正被 layer 接收
+             * （enqueue 是异步的，紧接着 start 会拿到 isPictureInPicturePossible=false）。
+             */
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.startIfPossible(reason: "toggle")
+            }
         } else {
             ctrl?.stopPictureInPicture()
             ctrl = nil
+            host?.removeFromSuperview()
+            host = nil
             painted = "\u{0}"
+            lastEnqueue = .distantPast
         }
         NSLog("[shuyin] pip toggle -> %@", wanted ? "on" : "off")
         return wanted
     }
 
     // MARK: - 建窗口
+
+    /// 把 display layer 挂到当前前台 window。
+    ///
+    /// 宿主 view 做成 2% 透明而不是 `isHidden`/`alpha=0`：系统判断「是否有
+    /// 内联内容」时会把完全不可见的 view 当作没有，PiP 照样起不来。
+    /// 尺寸用 point（不是 640×190 像素），只需要给系统一个动画起点。
+    private func attachLayer() -> Bool {
+        if host != nil { return true }
+        guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive }),
+              let win = scene.windows.first(where: { $0.isKeyWindow }) else {
+            return false
+        }
+        let v = UIView(frame: CGRect(x: 0, y: 0, width: 48, height: 14))
+        v.backgroundColor = .clear
+        v.alpha = 0.02
+        v.isUserInteractionEnabled = false
+        win.addSubview(v)
+        v.layer.addSublayer(layer)
+        host = v
+        return true
+    }
 
     private func setupIfNeeded() {
         guard AVPictureInPictureController.isPictureInPictureSupported() else {
@@ -126,11 +176,10 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         if timebase == nil {
             var tb: CMTimebase?
             /*
-             * 注意调用形式：CoreMedia 这几个 C 函数在 Swift 里是**有参数标签**的
+             * CoreMedia 这几个 C 函数在 Swift 里是**有参数标签**的
              * （allocator: / sourceClock: / timebaseOut: ...）。上一版按「没有
              * CF_SWIFT_NAME 就无标签」推断，CI 直接报 missing argument labels。
-             * 与它们不同，同一批里的 CMTimebaseSetTime / SetRate 第一个参数才是
-             * 无标签的（`_ timebase:`）——只能以编译器为准，不能靠猜。
+             * 同批的 CMTimebaseSetTime / SetRate 第一个参数才是无标签的。
              */
             _ = CMTimebaseCreateWithSourceClock(
                 allocator: kCFAllocatorDefault,
@@ -152,42 +201,69 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         let c = AVPictureInPictureController(contentSource: source)
         c.delegate = self
         /*
-         * App 一进后台就自动浮起来——这条才是「切到别的应用还能看词」的关键。
-         * 它要求 App 声明了 audio 后台模式（Info.plist 的 UIBackgroundModes，
-         * 我们本来就有）且此刻在出声。
+         * 已经成功启动过一次之后，切后台让系统自动浮起来。
+         * 它要求 App 声明 audio 后台模式（Info.plist 已配）且此刻在出声。
          */
         c.canStartPictureInPictureAutomaticallyFromInline = true
         ctrl = c
-        /*
-         * 第二条保险：`canStart...AutomaticallyFromInline` 是「请系统在切后台时
-         * 自己起」。它在部分系统版本 / 部分机型上不灵（内容源不是 AVPlayer 时
-         * 尤其容易静默失效）。这里再接一次「即将进后台」的通知，当场 start ——
-         * 那一刻 App 还没被挂起，start 是合法的。
-         */
+
         if !observing {
             observing = true
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,
                 object: nil, queue: .main,
             ) { [weak self] _ in
-                guard let self, self.wanted, let c = self.ctrl else { return }
-                if c.isPictureInPictureActive { return }
-                c.startPictureInPicture()
-                NSLog("[shuyin] pip start on background")
+                guard let self, self.wanted else { return }
+                /* 后台不能再 start；只在已经起来过时由系统接管 */
+                self.startIfPossible(reason: "background")
+            }
+            /* 开关点得太早（没有前台 window）时，回到前台补一次 */
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification,
+                object: nil, queue: .main,
+            ) { [weak self] _ in
+                guard let self, self.wanted else { return }
+                if self.attachLayer() {
+                    self.startIfPossible(reason: "active")
+                }
             }
         }
-        NSLog("[shuyin] pip ready (auto=%d)", c.canStartPictureInPictureAutomaticallyFromInline ? 1 : 0)
+        NSLog("[shuyin] pip ready (possible=%d auto=%d)",
+              c.isPictureInPicturePossible ? 1 : 0,
+              c.canStartPictureInPictureAutomaticallyFromInline ? 1 : 0)
+    }
+
+    /// 前台启动画中画；不满足条件时把原因写进日志，便于回传定位。
+    private func startIfPossible(reason: String) {
+        guard let c = ctrl else {
+            NSLog("[shuyin] pip start skip: no controller (%@)", reason)
+            return
+        }
+        if c.isPictureInPictureActive { return }
+        guard c.isPictureInPicturePossible else {
+            NSLog("[shuyin] pip start skip: not possible (%@)", reason)
+            return
+        }
+        c.startPictureInPicture()
+        NSLog("[shuyin] pip start (%@)", reason)
     }
 
     // MARK: - 画一帧
 
-    private func paint() {
+    /// `force` = 内容真的变了（立即画）；否则只按 0.9s 节流补一帧保活。
+    private func paint(force: Bool = false) {
         guard wanted, ctrl != nil else { return }
-        guard let sb = render(line: line, prog: prog) else { return }
+        let now = Date()
+        if !force && now.timeIntervalSince(lastEnqueue) < 0.9 { return }
+        guard let sb = render(line: line, prog: prog) else {
+            NSLog("[shuyin] pip render failed")
+            return
+        }
         if layer.status == .failed {
             layer.flush()
         }
         layer.enqueue(sb)
+        lastEnqueue = now
     }
 
     /// 把「一句词 + 唱到哪儿」画成一张 BGRA 位图，再包成 CMSampleBuffer。
@@ -214,7 +290,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
               )
         else { return nil }
 
-        ctx.clear(CGRect(x: 0, y: 0, width: W, height: H))
+        ctx.clear(CGRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H)))
 
         /* 底板：深棕黑圆角条（跟专辑主色那层暖调接近，压得住亮壁纸） */
         let box = CGRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H))
@@ -256,9 +332,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         (text as NSString).draw(in: rect, withAttributes: white)
         /*
          * 已唱部分：按整句宽度切一条竖线，把同一句再画一遍金色。
-         *
-         * 和安卓那边（`LyricBoard.drawKtv`）同一个思路：整行画两遍再裁，
-         * 比按字切便宜得多，边界还能落在字中间（逐字换色会「一卡一卡地蹦」）。
+         * 整行画两遍再裁，比按字切便宜，边界还能落在字中间。
          */
         if prog > 0.001 {
             let full = (text as NSString).size(withAttributes: white).width
@@ -281,12 +355,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         ) == noErr, let fmt else { return nil }
 
         /*
-         * 时间戳必须**对齐 timebase 的当下**。
-         *
-         * 早先按「第几帧 × 0.1 秒」递增：timebase 是按真实时间走的，喂到几十帧
-         * 之后那些帧全都成了「过期帧」，系统直接丢掉——画中画窗口停在第 N 帧
-         * 再也不动（不报错，最难查的那种）。现在每帧都用宿主时钟的现在，
-         * 同时把 timebase 拨到同一个点，帧永远是「新的」。
+         * 时间戳对齐 timebase 的当下：喂进去的帧永远是「新的」，不会被系统
+         * 当过期帧丢掉（那样窗口会停在第 N 帧再也不动，且不报错）。
          */
         let pts = CMClockGetTime(CMClockGetHostTimeClock())
         if let tb = timebase {
@@ -308,7 +378,37 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         return sb
     }
 
-    // MARK: - 系统按钮
+    // MARK: - 生命周期（全部留痕，回传 app.log / 控制台可定位）
+
+    func pictureInPictureControllerWillStartPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController,
+    ) {
+        NSLog("[shuyin] pip will start")
+    }
+
+    func pictureInPictureControllerDidStartPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController,
+    ) {
+        NSLog("[shuyin] pip did start")
+    }
+
+    /// 启动失败在这里如实报出来——上一版没有这个回调，失败是完全静默的。
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error,
+    ) {
+        NSLog("[shuyin] pip FAILED: %@", error.localizedDescription)
+    }
+
+    /// 点画中画上的「回到 App」：必须回调 completionHandler，否则窗口不关。
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
+            completionHandler: @escaping (Bool) -> Void,
+    ) {
+        NSLog("[shuyin] pip restore request")
+        completionHandler(true)
+    }
 
     func pictureInPictureController(
         _ controller: AVPictureInPictureController, setPlaying playing: Bool,
@@ -336,7 +436,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     ) {
         /* 窗口被用户缩放：按新尺寸重画一帧，字才不会糊 */
         painted = "\u{0}"
-        paint()
+        paint(force: true)
     }
 
     func pictureInPictureController(
@@ -352,7 +452,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     func pictureInPictureControllerDidStopPictureInPicture(
         _ controller: AVPictureInPictureController,
     ) {
-        NSLog("[shuyin] pip stopped by system")
+        NSLog("[shuyin] pip stopped")
     }
 
     // MARK: - 反向：告诉 Rust
