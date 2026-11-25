@@ -265,34 +265,81 @@ jobs:
           PBX=$(find apps/desktop/src-tauri/gen/apple -name "project.pbxproj" | head -1)
           echo "pbxproj: $PBX"
           python3 - "$PBX" <<'EOF'
-          import sys, re
+          import re, sys
+
           p = sys.argv[1]
           s = open(p, encoding="utf-8").read()
-          # 先删掉所有已有的 DEAD_CODE_STRIPPING / STRIP_SWIFT_SYMBOLS：
-          # 注入在段首，若后面还有 `= YES` 会把我们的 NO 覆盖掉，必须先清干净。
-          #
-          # 为什么必须关 dead strip：Rust 侧靠 dlsym 运行时查 Swift 的 @_cdecl
-          # 符号（shuyin_pip_toggle / shuyin_live_sync 等）。Release 的 -dead_strip
-          # 看不到任何静态引用链，会把这些符号剥掉 → dlsym 恒 NULL →
-          # 开关打不开、灵动岛哑。实测用户日志 `pip dlsym toggle: symbol NULL`。
-          # 关掉它包会略大，用户明确说过「安装包大一点无所谓」。
-          s = re.sub(r'^\s*DEAD_CODE_STRIPPING\s*=\s*\w+;\s*\n', '', s, flags=re.M)
-          s = re.sub(r'^\s*STRIP_SWIFT_SYMBOLS\s*=\s*\w+;\s*\n', '', s, flags=re.M)
-          # 每个 buildSettings 段都注入免签 + 保符号设置：tauri CLI 透传的
-          # xcodebuild 参数到不了 archive 这步，只能改工程本体（不挑已有键的写法）
-          inject = (
-              "CODE_SIGN_IDENTITY = \"\";\n"
-              "\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n"
-              "\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n"
-              "\t\t\t\tDEVELOPMENT_TEAM = \"\";\n"
-              "\t\t\t\tDEAD_CODE_STRIPPING = NO;\n"
-              "\t\t\t\tSTRIP_SWIFT_SYMBOLS = NO;\n"
-              "\t\t\t\t"
+
+          # 先清掉旧值：同一段里出现两次 `KEY = ...;` 谁在后面谁生效，重复注入会让
+          # 我们的 NO 被后面的 YES 盖掉（2026-11-24 就这么白等了一轮）。
+          for key in ("DEAD_CODE_STRIPPING", "STRIP_SWIFT_SYMBOLS",
+                      "STRIP_INSTALLED_PRODUCT", "COPY_PHASE_STRIP"):
+              s = re.sub(r'^\s*' + key + r'\s*=\s*\w+;\s*\n', '', s, flags=re.M)
+
+          EXTRA = (
+              '\n\t\t\t\tCODE_SIGN_IDENTITY = "";'
+              "\n\t\t\t\tCODE_SIGNING_ALLOWED = NO;"
+              "\n\t\t\t\tCODE_SIGNING_REQUIRED = NO;"
+              '\n\t\t\t\tDEVELOPMENT_TEAM = "";'
+              # Rust 侧全靠 dlsym 运行时找 Swift 的 @_cdecl 入口，没有任何静态引用
+              # 链，Release 的 -dead_strip 会把整段 Swift object 剥掉
+              "\n\t\t\t\tDEAD_CODE_STRIPPING = NO;"
+              "\n\t\t\t\tSTRIP_SWIFT_SYMBOLS = NO;"
+              # 真正把符号表清空的是安装期这条 strip：实测产物里只剩 11 个定义符号
+              # （1263 个全是 imported），dlsym 因此恒 NULL
+              "\n\t\t\t\tSTRIP_INSTALLED_PRODUCT = NO;"
+              "\n\t\t\t\tCOPY_PHASE_STRIP = NO;"
           )
-          s = s.replace("buildSettings = {", "buildSettings = {\n\t\t\t\t" + inject, )
+
+          def patch_body(body):
+              # 关键：ld64 链接**可执行文件**时默认不导出全局符号（要 -export_dynamic
+              # 或 -exported_symbol 才进符号表）。这条不给，前面几条关 strip 全白费。
+              m = re.search(r'OTHER_LDFLAGS = \((.*?)\);', body, re.S)
+              if m:
+                  if "-export_dynamic" in m.group(1):
+                      return body
+                  inner = (m.group(1).rstrip()
+                           + '\n\t\t\t\t\t"-Wl,-export_dynamic",\n\t\t\t\t')
+                  return body[:m.start(1)] + inner + body[m.end(1):]
+              m = re.search(r'OTHER_LDFLAGS = "([^"]*)";', body)
+              if m:
+                  if "-export_dynamic" in m.group(1):
+                      return body
+                  return (body[:m.start(1)] + m.group(1) + " -Wl,-export_dynamic"
+                          + body[m.end(1):])
+              # 工程里本来没有：从上一级继承（tauri 的 -lapp 等都在那儿），再叠我们的
+              return ('\n\t\t\t\tOTHER_LDFLAGS = (\n'
+                      '\t\t\t\t\t"$(inherited)",\n'
+                      '\t\t\t\t\t"-Wl,-export_dynamic",\n'
+                      '\t\t\t\t);') + body
+
+          # 按花括号配对逐块定位 buildSettings = { ... }：整文件 replace 会误伤
+          # 其它段（改错段的症状是「构建照常成功，只有灵动岛/桌面歌词哑」）
+          blocks, i = [], 0
+          while True:
+              j = s.find("buildSettings = {", i)
+              if j < 0:
+                  break
+              start = j + len("buildSettings = {")
+              depth, k = 1, start
+              while k < len(s) and depth:
+                  if s[k] == '{':
+                      depth += 1
+                  elif s[k] == '}':
+                      depth -= 1
+                  k += 1
+              blocks.append((start, k - 1))
+              i = k
+
+          for start, end in reversed(blocks):
+              s = s[:start] + patch_body(EXTRA + s[start:end]) + s[end:]
+
           open(p, "w", encoding="utf-8").write(s)
-          print("patched sections:", s.count("CODE_SIGNING_ALLOWED = NO;"),
-                "dead_strip NO:", s.count("DEAD_CODE_STRIPPING = NO;"))
+          print("buildSettings 段:", len(blocks))
+          print("CODE_SIGNING_ALLOWED = NO :", s.count("CODE_SIGNING_ALLOWED = NO;"))
+          print("DEAD_CODE_STRIPPING = NO  :", s.count("DEAD_CODE_STRIPPING = NO;"))
+          print("STRIP_INSTALLED_PRODUCT=NO:", s.count("STRIP_INSTALLED_PRODUCT = NO;"))
+          print("export_dynamic            :", s.count("-Wl,-export_dynamic"))
           EOF
 
       - name: Build for device (unsigned; export step allowed to fail)
@@ -305,6 +352,12 @@ jobs:
             export BINDGEN_EXTRA_CLANG_ARGS="-isysroot $(xcrun --sdk iphoneos --show-sdk-path)"
             echo "BINDGEN_EXTRA_CLANG_ARGS=$BINDGEN_EXTRA_CLANG_ARGS"
           fi
+          # Cargo.toml 的 [profile.release] 是 strip = true，会把 Rust 侧的
+          # #[no_mangle] shuyin_remote_command 也从静态库里抹掉（Swift 用 dlsym
+          # 找它，剥了不报错、只是恒 NULL）。iOS 单独降到 debuginfo：符号表留着，
+          # 调试信息照去，包不会明显变大。
+          export CARGO_PROFILE_RELEASE_STRIP=debuginfo
+          echo "CARGO_PROFILE_RELEASE_STRIP=$CARGO_PROFILE_RELEASE_STRIP"
           # 这里以前是整条 `|| true`：Rust/archive 失败也被吞掉，错误只剩下一步
           # 的一句「主包没出来」，看起来像扩展的问题（2026-11-24 就这么被带偏的）。
           # 现在只放过「导出 IPA 需要证书」那一段，但**必须真的产出 .app**，
@@ -347,6 +400,50 @@ jobs:
             exit 1
           fi
           echo "app: $APP"
+
+      - name: Verify bridge symbols survive into the binary
+        run: |
+          # 这一步是**必须**的：这几个符号没有任何静态引用链，全靠链接参数活着。
+          # 少了它们构建一样成功、包一样能装、App 一切正常，只有灵动岛按钮和
+          # 桌面歌词开关静默失效（dlsym 返回 NULL）。发出去才发现 = 又白一轮。
+          APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -path "*Applications*" | head -1)
+          if [ -z "$APP" ]; then
+            APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
+          fi
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          BIN="$APP/$EXE"
+          echo "bin: $BIN"
+          echo "--- 定义符号总数（正常上万；只剩几十个 = 又被 strip 掉了）"
+          nm -gU "$BIN" 2>/dev/null | wc -l
+          echo "--- 桥接符号"
+          nm -gU "$BIN" 2>/dev/null | grep -E "_shuyin_" || echo "(一个都没有)"
+          MISSING=""
+          for s in shuyin_live_sync shuyin_live_end shuyin_live_adopt \
+                   shuyin_pip_adopt shuyin_pip_set shuyin_pip_toggle shuyin_pip_on \
+                   shuyin_remote_command; do
+            if nm -gU "$BIN" 2>/dev/null | grep -qE "[[:space:]]_${s}$"; then
+              echo "OK   $s"
+            else
+              echo "MISS $s"
+              MISSING="$MISSING $s"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            {
+              echo "### ❌ 原生桥接符号没进二进制：$MISSING"
+              echo ""
+              echo '这些入口只有 Rust 的 `dlsym` 用，链接器看不到引用就不会导出；'
+              echo '结果就是灵动岛按钮、桌面歌词开关**全部静默失效**（日志里'
+              echo '`pip dlsym toggle: symbol NULL`），而 App 其它功能完全正常。'
+              echo ""
+              echo '对应开关：`OTHER_LDFLAGS += -Wl,-export_dynamic`、'
+              echo '`STRIP_INSTALLED_PRODUCT = NO`、`DEAD_CODE_STRIPPING = NO`、'
+              echo '`CARGO_PROFILE_RELEASE_STRIP=debuginfo`。'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::桥接符号缺失，这个包出去灵动岛和桌面歌词必然无效"
+            exit 1
+          fi
+          echo "全部桥接符号都在。"
 
       - name: Build Live Activity widget extension and embed
         run: |
