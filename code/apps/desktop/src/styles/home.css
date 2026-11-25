@@ -593,7 +593,15 @@
  * 图裂了 `display:none` 之后占位照样露得出来。
  */
 .home-cover > .home-mosaic,
-.home-cover > .home-fav-cover {
+.home-cover > .home-fav-cover,
+/*
+ * 首页横带（本地音乐 / 播放历史）的封面走的是 `.home-band-cover`，不是
+ * `.home-cover`，上面那条选择器命中不到它。于是这两条横带里音符永远是
+ * absolute、马赛克永远在普通流——音符照样浮在封面上方（用户：
+ * 「播放历史和本地播放有歌的时候上方还挂着音乐图标」）。
+ * 同一个盖法补上即可：有图时盖住，图裂了 hidden 后音符还能露出来。
+ */
+.home-band-cover > .home-mosaic {
   position: absolute;
   inset: 0;
 }
