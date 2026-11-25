@@ -72,6 +72,13 @@ pub fn init(app: &AppHandle) {
         let _keep = shuyin_remote_command as *const ();
         std::hint::black_box(_keep);
         ffi::adopt();
+        /*
+         * 桌面歌词（画中画）的 Swift C 入口没有任何静态引用链，Release 的
+         * -dead_strip 会剥掉 shuyin_pip_toggle 等符号 → dlsym 恒 NULL →
+         * 开关永远返回 false。这里 dlsym 调一次 shuyin_pip_adopt 把整个
+         * ShuyinLyricsPiP.swift 的 object 点亮保留（同灵动岛 adopt 机制）。
+         */
+        crate::lyrics_pip::adopt();
         /* 锁屏歌词：App 进后台后 JS 会被冻住，词得由原生自己往前推 */
         spawn_lyric_ticker();
         /* 状态对账：换歌 / 暂停发生在 JS 冻着的时候，岛和锁屏卡得由原生自己跟上 */

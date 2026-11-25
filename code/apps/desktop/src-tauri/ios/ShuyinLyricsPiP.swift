@@ -469,6 +469,20 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
 /* 给 Rust 调的 C 入口                                                  */
 /* ------------------------------------------------------------------ */
 
+/// 符号锚点：App 启动时 Rust 会 dlsym 调一次这个入口。
+///
+/// `ShuyinPiP` 类在 Swift 侧没有任何静态引用链，Release 的 `-dead_strip`
+/// 会把整个 object（含下面三个 `@_cdecl` 符号）剥掉，dlsym 于是恒 NULL、
+/// 开关永远返回 false。Rust 启动时 dlsym 命中本函数 → 链接器认定这个
+/// object 可达、连同类一起保留。和灵动岛的 `shuyin_live_adopt` 同款机制。
+/// 函数体刻意引用 `ShuyinPiP.shared`，确保优化器不会把类本身也剥掉。
+@_cdecl("shuyin_pip_adopt")
+public func shuyinPiPAdopt() {
+    NSLog("[shuyin] pip adopt (symbol alive)")
+    guard #available(iOS 15.0, *) else { return }
+    _ = ShuyinPiP.shared
+}
+
 @_cdecl("shuyin_pip_set")
 public func shuyinPiPSet(_ line: UnsafePointer<CChar>?, _ prog: Double, _ playing: Bool) {
     guard #available(iOS 15.0, *) else { return }
@@ -478,8 +492,11 @@ public func shuyinPiPSet(_ line: UnsafePointer<CChar>?, _ prog: Double, _ playin
 
 @_cdecl("shuyin_pip_toggle")
 public func shuyinPiPToggle() -> Bool {
+    NSLog("[shuyin] pip C toggle called")
     guard #available(iOS 15.0, *) else { return false }
-    return ShuyinPiP.shared.toggle()
+    let r = ShuyinPiP.shared.toggle()
+    NSLog("[shuyin] pip C toggle -> %@", r ? "true" : "false")
+    return r
 }
 
 @_cdecl("shuyin_pip_on")
