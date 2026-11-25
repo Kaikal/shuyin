@@ -551,12 +551,26 @@ fn http_bridge(req: &str, jar: &HashMap<String, String>) -> String {
         }
     }
 
-    let agent = ureq::AgentBuilder::new()
+    /*
+     * 必须显式接系统 TLS：Cargo.toml 里 ureq 关了 default-features（只留 native-tls），
+     * 这种配置下 AgentBuilder 不会自带 TLS 后端，发 https 会直接报
+     * "cannot make HTTPS request because no TLS backend is configured"。
+     *
+     * net.rs 的共享出网 agent 早就做了这件事，但脚本宿主这条桥是另一条独立通道，
+     * 一直用裸 agent —— 桌面端音源跑在 WebView（fetch 有系统 TLS）所以看不出来；
+     * iOS 切后台后 WebView 被冻结，接歌全靠这里的原生 relay，
+     * 于是后面的 https 取链全失败：预取那几首放完就停。
+     */
+    let mut builder = ureq::AgentBuilder::new()
         .user_agent(UA)
         .timeout_connect(Duration::from_secs(10))
         .timeout(timeout)
-        .redirects(6)
-        .build();
+        .redirects(6);
+    match ureq::native_tls::TlsConnector::new() {
+        Ok(c) => builder = builder.tls_connector(std::sync::Arc::new(c)),
+        Err(e) => eprintln!("srchost TLS 初始化失败（音源 https 请求会不可用）：{e}"),
+    }
+    let agent = builder.build();
     let mut r = match method.as_str() {
         "POST" => agent.post(&req.url),
         "PUT" => agent.put(&req.url),
