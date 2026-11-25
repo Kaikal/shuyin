@@ -265,21 +265,34 @@ jobs:
           PBX=$(find apps/desktop/src-tauri/gen/apple -name "project.pbxproj" | head -1)
           echo "pbxproj: $PBX"
           python3 - "$PBX" <<'EOF'
-          import sys
+          import sys, re
           p = sys.argv[1]
           s = open(p, encoding="utf-8").read()
-          # 每个 buildSettings 段都注入免签设置：tauri CLI 透传的 xcodebuild
-          # 参数到不了 archive 这步，只能改工程本体（不挑已有键的写法）
+          # 先删掉所有已有的 DEAD_CODE_STRIPPING / STRIP_SWIFT_SYMBOLS：
+          # 注入在段首，若后面还有 `= YES` 会把我们的 NO 覆盖掉，必须先清干净。
+          #
+          # 为什么必须关 dead strip：Rust 侧靠 dlsym 运行时查 Swift 的 @_cdecl
+          # 符号（shuyin_pip_toggle / shuyin_live_sync 等）。Release 的 -dead_strip
+          # 看不到任何静态引用链，会把这些符号剥掉 → dlsym 恒 NULL →
+          # 开关打不开、灵动岛哑。实测用户日志 `pip dlsym toggle: symbol NULL`。
+          # 关掉它包会略大，用户明确说过「安装包大一点无所谓」。
+          s = re.sub(r'^\s*DEAD_CODE_STRIPPING\s*=\s*\w+;\s*\n', '', s, flags=re.M)
+          s = re.sub(r'^\s*STRIP_SWIFT_SYMBOLS\s*=\s*\w+;\s*\n', '', s, flags=re.M)
+          # 每个 buildSettings 段都注入免签 + 保符号设置：tauri CLI 透传的
+          # xcodebuild 参数到不了 archive 这步，只能改工程本体（不挑已有键的写法）
           inject = (
               "CODE_SIGN_IDENTITY = \"\";\n"
               "\t\t\t\tCODE_SIGNING_ALLOWED = NO;\n"
               "\t\t\t\tCODE_SIGNING_REQUIRED = NO;\n"
               "\t\t\t\tDEVELOPMENT_TEAM = \"\";\n"
+              "\t\t\t\tDEAD_CODE_STRIPPING = NO;\n"
+              "\t\t\t\tSTRIP_SWIFT_SYMBOLS = NO;\n"
               "\t\t\t\t"
           )
           s = s.replace("buildSettings = {", "buildSettings = {\n\t\t\t\t" + inject, )
           open(p, "w", encoding="utf-8").write(s)
-          print("patched sections:", s.count("CODE_SIGNING_ALLOWED = NO;"))
+          print("patched sections:", s.count("CODE_SIGNING_ALLOWED = NO;"),
+                "dead_strip NO:", s.count("DEAD_CODE_STRIPPING = NO;"))
           EOF
 
       - name: Build for device (unsigned; export step allowed to fail)
