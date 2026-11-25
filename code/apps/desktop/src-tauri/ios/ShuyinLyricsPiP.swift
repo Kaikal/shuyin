@@ -64,6 +64,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     private var lastEnqueue = Date.distantPast
     /// 后台通知只挂一次
     private var observing = false
+    /// 这次「画中画停止」是不是我们自己因为「回到 App」收的（见 didStop）
+    private var stoppingForForeground = false
 
     /// 开关真值（持久化：用户开过一次，下次启动仍按开的来）
     private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: "shuyin.pip.lyrics")
@@ -114,15 +116,18 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
                 return wanted
             }
             setupIfNeeded()
-            /* 前台先渲染一帧——layer 空的时候系统拒绝启动 */
+            /* 前台先渲染一帧——layer 空的时候系统不让它浮起来 */
             paint(force: true)
             /*
-             * 必须**在前台**启动。延迟 0.2s 是等第一帧真正被 layer 接收
-             * （enqueue 是异步的，紧接着 start 会拿到 isPictureInPicturePossible=false）。
+             * **不在这里 start**。
+             *
+             * 用户 2026-11-25 的要求是「回到本应用就不显示」：前台一按开关就弹一个
+             * 浮窗盖在播放页上，正是他不想要的。这里只把「内联内容」备好
+             * （layer 挂在窗口里、帧在往里喂），App 一进后台由系统按
+             * `canStartPictureInPictureAutomaticallyFromInline` 自己浮起来；
+             * `didEnterBackground` 里再补一次尝试兜底。
              */
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                self?.startIfPossible(reason: "toggle")
-            }
+            NSLog("[shuyin] pip armed (will show on background)")
         } else {
             ctrl?.stopPictureInPicture()
             ctrl = nil
@@ -217,14 +222,26 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
                 /* 后台不能再 start；只在已经起来过时由系统接管 */
                 self.startIfPossible(reason: "background")
             }
-            /* 开关点得太早（没有前台 window）时，回到前台补一次 */
+            /*
+             * 回到 App：把浮窗收掉（用户要的是「在应用里别挡着」）。
+             * 控制器和宿主 view 都留着，下次切后台系统会自己再浮起来。
+             * `attachLayer()` 失败过（开关点得太早，窗口还没建好）才在这里补建。
+             */
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didBecomeActiveNotification,
                 object: nil, queue: .main,
             ) { [weak self] _ in
                 guard let self, self.wanted else { return }
-                if self.attachLayer() {
-                    self.startIfPossible(reason: "active")
+                if self.ctrl?.isPictureInPictureActive == true {
+                    self.stoppingForForeground = true
+                    self.ctrl?.stopPictureInPicture()
+                    NSLog("[shuyin] pip stop (back to app)")
+                    return
+                }
+                if self.host == nil, self.attachLayer() {
+                    self.setupIfNeeded()
+                    self.paint(force: true)
+                    NSLog("[shuyin] pip re-attach (active)")
                 }
             }
         }
@@ -466,7 +483,30 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     func pictureInPictureControllerDidStopPictureInPicture(
         _ controller: AVPictureInPictureController,
     ) {
-        NSLog("[shuyin] pip stopped")
+        NSLog("[shuyin] pip stopped (fg=%d)", stoppingForForeground ? 1 : 0)
+        if stoppingForForeground {
+            /*
+             * 是我们自己「回到 App 就收起来」收的：**控制器和宿主 view 都留着**。
+             * 销毁了下次切后台就再也浮不起来（后台不允许 start），留着才能靠
+             * `canStartPictureInPictureAutomaticallyFromInline` 自动重开。
+             */
+            stoppingForForeground = false
+            return
+        }
+        /*
+         * 用户按了窗口上那颗 ×。
+         *
+         * 这就是「开关和实际显示不一致」的来源：原生单方面把窗关了，前端那份
+         * state 还是「开」。这里把真值改成关，并回传一条 `pipclosed`，
+         * 让前端把开关拨回去。
+         */
+        wanted = false
+        UserDefaults.standard.set(false, forKey: "shuyin.pip.lyrics")
+        ctrl = nil
+        host?.removeFromSuperview()
+        host = nil
+        painted = "\u{0}"
+        send("pipclosed")
     }
 
     // MARK: - 反向：告诉 Rust

@@ -37,6 +37,7 @@ import { QualitySection, SourcesDirSection, SourcesSection } from '../components
 import { HotkeySection } from '../components/HotkeySection'
 import { AccountSection } from '../components/AccountSection'
 import { StatusLyricSection } from '../components/StatusLyricSection'
+import { FloatLyricSection } from '../components/FloatLyricSection'
 import { HelpTip } from '../components/HelpTip'
 import { useDownloads } from '../lib/DownloadsProvider'
 import { audioCacheSize, clearAudioCache } from '../lib/audioCache'
@@ -592,6 +593,13 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
        * 放在播放页那张动作卡片里本来就不对路。
        */}
       {bridge.isAndroid && !isCar && <StatusLyricSection />}
+
+      {/*
+       * 桌面歌词：手机上（安卓悬浮窗 / iOS 画中画）本来只有播放页底部那颗芯片，
+       * 不播歌就找不到入口。用户 2026-11-25 要求设置页也放一颗。
+       * 车机不做（没有「别的应用」可浮）。
+       */}
+      {(bridge.isAndroid || bridge.isIOS) && !isCar && <FloatLyricSection />}
 
       {/* 音质排在「播放」页最前：它决定听到什么，比频谱样式更靠前 */}
       <QualitySection />

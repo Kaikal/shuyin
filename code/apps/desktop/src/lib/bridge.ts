@@ -283,6 +283,8 @@ export const bridge = {
   isTauri,
   isDesktop,
   isAndroid,
+  /* 设置页等地方要判「是不是 iPhone 壳」；从 bridge 上取比各处 import shellMode 少一层 */
+  isIOS,
   isMac,
   isNative,
 
@@ -669,6 +671,26 @@ export const bridge = {
     } catch (e) {
       toast(e instanceof Error ? e.message : '无法打开该路径', { bad: true })
     }
+  },
+
+  /**
+   * 订阅「桌面歌词（画中画）被原生单方面关掉」。
+   *
+   * 只有 iOS 用得上：用户在画中画窗口上按了 ×，原生把开关真值改成关并回传
+   * 一条事件，界面上的开关得跟着灭——否则就是「开关显示和实际不一致」。
+   * 安卓那条走 `float://state`（见 ImmersivePlayer）。
+   */
+  onPipState(cb: (on: boolean) => void): () => void {
+    if (!isTauri) return () => {}
+    let unlisten: (() => void) | null = null
+    let disposed = false
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      if (disposed) return
+      listen<{ on?: boolean }>('pip://state', e => cb(!!e.payload?.on)).then(u => {
+        if (disposed) u(); else unlisten = u
+      })
+    })
+    return () => { disposed = true; unlisten?.() }
   },
 
   /** 订阅播放状态事件 */

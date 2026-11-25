@@ -283,6 +283,11 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
       setFloatOn(on)
     })
   }, [])
+  /* iOS 同理：用户按了画中画窗口上的 ×，原生回传 `pip://state` → 开关跟着灭 */
+  useEffect(() => {
+    if (!isIOS) return
+    return bridge.onPipState(on => setFloatOn(on))
+  }, [])
   /*
    * 从后台回来时**补问一次真值**。
    *
