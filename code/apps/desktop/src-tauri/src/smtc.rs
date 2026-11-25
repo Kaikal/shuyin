@@ -455,22 +455,53 @@ mod apple {
                 return Err("AVAudioSession 拿不到（MediaPlayer/AVFAudio 未加载）".into());
             }
             let cat = ns("AVAudioSessionCategoryPlayback");
-            let mode = ns("AVAudioSessionModeDefault");
-            let mut err: *mut AnyObject = std::ptr::null_mut();
-            let ok: bool = objc2::msg_send![
-                sess,
-                setCategory: &*cat,
-                mode: &*mode,
-                options: 0usize,
-                error: &mut err
-            ];
-            if !ok {
-                return Err(format!("setCategory(playback) 失败{}", ns_err(err)));
+            /*
+             * 幂等：已经配成 playback 且已激活就**什么都别做**。
+             *
+             * `resume()` 每次点播放都会调到这里（为了把被系统收回的会话要回来）。
+             * 但 `setCategory` 不是无害的——重复设同一个 category 也会发
+             * `AVAudioSessionRouteChangeNotification`（reason = CategoryChange），
+             * 而这一版的路由监听会据此动作；即使不算路由监听，系统重配音频单元
+             * 也会让刚 `s.play()` 的声音顿一下。用户听到的就是
+             * 「点播放先响一下 → 又停 → 转圈 → 再从头播」（2026-11-25 反馈）。
+             *
+             * 已经对了就跳过：会话确实被收回（active=false）时仍会 setActive，
+             * category 被别处改掉时仍会重设——该救的两条路都留着，只去掉无谓的
+             * 重复 setCategory。
+             */
+            let cur: *mut AnyObject = objc2::msg_send![sess, category];
+            let active: bool = objc2::msg_send![sess, isActive];
+            /* msg_send 的返回类型单独标出来，别让 if 表达式替它推断（iOS 分支本地编不到） */
+            let same: bool = if cur.is_null() {
+                false
+            } else {
+                let s: bool = objc2::msg_send![cur, isEqualToString: &*cat];
+                s
+            };
+            let already_playback = same;
+            if already_playback && active {
+                return Ok(());
             }
-            let mut err2: *mut AnyObject = std::ptr::null_mut();
-            let ok2: bool = objc2::msg_send![sess, setActive: true, error: &mut err2];
-            if !ok2 {
-                return Err(format!("setActive 失败{}", ns_err(err2)));
+            if !already_playback {
+                let mode = ns("AVAudioSessionModeDefault");
+                let mut err: *mut AnyObject = std::ptr::null_mut();
+                let ok: bool = objc2::msg_send![
+                    sess,
+                    setCategory: &*cat,
+                    mode: &*mode,
+                    options: 0usize,
+                    error: &mut err
+                ];
+                if !ok {
+                    return Err(format!("setCategory(playback) 失败{}", ns_err(err)));
+                }
+            }
+            if !active {
+                let mut err2: *mut AnyObject = std::ptr::null_mut();
+                let ok2: bool = objc2::msg_send![sess, setActive: true, error: &mut err2];
+                if !ok2 {
+                    return Err(format!("setActive 失败{}", ns_err(err2)));
+                }
             }
         }
         Ok(())

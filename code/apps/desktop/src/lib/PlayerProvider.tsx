@@ -2948,16 +2948,28 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (live && live.playing === true) return
       const hasSrc = !!(live?.trackPath || live?.trackUrl || live?.track_path || live?.track_url)
       /*
-       * 原生说「我要播，只是还没出声」（`want === true`）：那是在准备，
-       * 不是死路。再给它一次机会——网络曲目 prepare + 首段缓冲偶尔真的超过 900ms，
-       * 这时候推倒重来反而会让进度归零、白等一轮。最多再看两次。
+       * 「还在准备，不是死路」——再给一次机会，别急着推倒重来。
+       *
+       * 以前只认 `live.want === true`（安卓 PlaybackService 会上报 wantPlay）。
+       * 但 **iOS 的 Rust PlayerSnapshot 根本没有 want 字段**：这条保护在 iPhone 上
+       * 恒假，于是点播放 900ms 后只要那一帧 `playing=false`（首段缓冲偶尔就是超过
+       * 900ms），就判定「resume 死了」→ startLoad 重新加载 → 用户听到
+       * 「先播一下、又停、转圈、又从头播」的一整串卡顿（2026-11-25 反馈）。
+       *
+       * 现在改成两个平台都成立的判据：**原生手里有这首音源**（hasSrc）就说明
+       * resume 有落脚点、Cmd::Resume 正在路上——缓冲慢不是死路。真死了
+       * （sink 被 Stop 收掉）时 `resume()` 当场返回 false，前端在那条分支里
+       * 已经直接重载了，根本走不到这里，所以这里的宽限不会掩盖真故障。
+       * 仍然最多再看两次（2.4s），不会无限等。
        */
-      if (live?.want === true && hasSrc && tries < 2) {
+      if (hasSrc && tries < 2) {
         tries += 1
         resumeGuard.current = window.setTimeout(check, 1200)
         return
       }
-      void bridge.trace(`resumefail idx=${index} at=${at.toFixed(1)} live=${live ? 1 : 0} want=${live?.want === true ? 1 : 0}`)
+      void bridge.trace(`resumefail idx=${index} at=${at.toFixed(1)} live=${live ? 1 : 0}`
+        + ` hasSrc=${hasSrc ? 1 : 0} tries=${tries}`
+        + ` play=${live?.playing === true ? 1 : 0} want=${live?.want === true ? 1 : 0}`)
       autoCancel.current = false
       lastPlayedIndex.current = index
       loadedRef.current = trackKey(track)
