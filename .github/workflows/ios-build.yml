@@ -16,6 +16,9 @@ on:
       - '.github/workflows/ios-build.yml'
       - 'code/apps/desktop/src-tauri/**'
       - 'code/apps/desktop/src/**'
+      # 平台脚本（取链/歌单/歌词都在这）打进 iOS 包，改了也要重出包，
+      # 否则会出现「修了 packages 却只有安卓/桌面端生效」的错位（2026-11-26 踩过）。
+      - 'code/packages/**'
   workflow_dispatch:
 
 jobs:
