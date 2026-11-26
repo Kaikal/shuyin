@@ -529,6 +529,7 @@ mod apple {
     #[cfg(target_os = "ios")]
     fn observe_interruptions(app: &AppHandle) {
         use std::ptr::NonNull;
+        use tauri::Manager;
         unsafe {
             let center: *mut AnyObject =
                 objc2::msg_send![class!(NSNotificationCenter), defaultCenter];
@@ -550,8 +551,13 @@ mod apple {
                     }
                     let t: usize = objc2::msg_send![v, unsignedIntegerValue];
                     match t {
-                        // Began：别跟系统抢，先自己停
-                        1 => dispatch(&app2, "pause", None),
+                        // Began：别跟系统抢，先自己停，并记下「输出流已被系统打断」
+                        1 => {
+                            if let Some(p) = app2.try_state::<crate::player::Player>() {
+                                p.mark_audio_interrupted();
+                            }
+                            dispatch(&app2, "pause", None)
+                        }
                         // Ended：重新激活会话；系统说「建议恢复」才继续播
                         2 => {
                             let _ = setup_audio_session();

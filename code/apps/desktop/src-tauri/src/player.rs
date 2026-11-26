@@ -36,6 +36,24 @@ pub fn attach_app(app: tauri::AppHandle) {
     let _ = APP.set(app);
 }
 
+/// 这条音频是不是「只有试听的片段」。
+///
+/// 酷我（及其它平台）对会员 / 无版权曲目不报错，而是回一段几十秒的音频，
+/// 里面叠一句「当前音乐仅在 XX 客户端播放」的语音——用户 2026-11-26 报的
+/// 后台语音提示就是它。文件头读出的真实时长是硬证据：比队列声明的整首短
+/// 一大截（< 60% 且至少短 30 秒），就是片段，不能喂给播放器。
+///
+/// 判据和前端 `PlayerProvider.tsx` 的试听识别（约 1336 行）保持同一套：
+/// `expect >= 90 && real < expect * 0.6 && expect - real >= 30`。
+/// 前端那道只在点播那条路、且要等出声后才生效；后台 relay / 预取走的是
+/// 原生这条路，JS 在息屏时被冻结，必须在这里自己挡住。
+///
+/// `real <= 0` 表示这个封装读不出时长（m4a 的 moov 在尾部、流媒体无 Xing），
+/// 这时**不判**——宁可放过一段正常歌，也不能把读不出时长的都当片段丢掉。
+fn is_trial_clip(real: f64, expect: f64) -> bool {
+    expect >= 90.0 && real > 0.0 && real < expect * 0.6 && expect - real >= 30.0
+}
+
 fn log_line(line: &str) {
     use std::io::Write;
     let Some(p) = LOG_PATH.get() else {
@@ -1072,6 +1090,14 @@ pub struct Shared {
     /// 防重复：一次失败会从好几个地方触发重试（曲终兜底、加载失败兜底），
     /// 不挡一下就会同时起一堆线程对着同一个平台猛打。
     pub relay_retrying: AtomicBool,
+    /// iOS：音频会话被别的 App / 来电打断过，输出流（AudioUnit）已被系统停用。
+    ///
+    /// cpal 0.16 的 iOS host 根本不监听 AVAudioSession 中断，rodio 的
+    /// `Sink.play()` 又只改内部静音标志——所以打断之后 `sink.play()` 不会
+    /// 重新启动 AudioUnit，用户看到的是「界面在播、一点声没有」，点暂停/播放
+    /// 都在同一条死的 AudioUnit 上打转，只有重启应用（重建 stream）才能恢复。
+    /// 这里记一笔，让下一次 resume 走重建输出流，而不是在死流上空转。
+    pub audio_interrupted: AtomicBool,
 }
 
 impl Default for Shared {
@@ -1102,6 +1128,7 @@ impl Default for Shared {
             relayed: AtomicI64::new(-1),
             has_sink: AtomicBool::new(false),
             relay_retrying: AtomicBool::new(false),
+            audio_interrupted: AtomicBool::new(false),
         }
     }
 }
@@ -1119,6 +1146,9 @@ enum Cmd {
     Pause,
     Resume,
     Stop,
+    /// 重建 cpal 输出流（iOS 音频被打断后 AudioUnit 失效，唯一恢复手段）。
+    /// `resume` = 重建后是否接着播；`start_at` = 从哪一秒续上（被打断时的进度）。
+    RebuildStream { resume: bool, start_at: f64 },
     Seek(f64),
     SetVolume(f32),
 }
@@ -1157,8 +1187,9 @@ impl Player {
                     c.buffer_size()
                 );
             }
-            // Mixer 是 Arc 克隆体，可以随意传给 load/load_remote
-            let mixer = stream.mixer().clone();
+            // Mixer 是 Arc 克隆体，可以随意传给 load/load_remote。
+            // mut：iOS 音频被打断后要重建 stream，mixer 随新 stream 一起换掉。
+            let mut mixer = stream.mixer().clone();
             let mut sink: Option<Sink> = None;
             let mut last_tick = Instant::now();
             /* 位置对齐诊断：每 2s 记一行「声卡位置 vs 墙钟」，用来判断「进度条
@@ -1192,6 +1223,27 @@ impl Player {
                         stall_tries = 0;
                         if let Some(s) = sink.take() {
                             s.stop();
+                        }
+                        /*
+                         * iOS：若这段时间被别的 App / 来电打断过（AudioUnit 已被
+                         * 系统停用），新 sink 连到旧 mixer 照样没声。打断发生在
+                         * 「加载中」时 resume 那条路没机会消费标记，只能在这里兜底：
+                         * 连同 stream 一起重建，再往下用新 mixer 加载。
+                         */
+                        if sh.audio_interrupted.swap(false, Ordering::SeqCst) {
+                            crate::smtc::ensure_session();
+                            match OutputStreamBuilder::open_default_stream() {
+                                Ok(ns) => {
+                                    stream = ns;
+                                    stream.log_on_drop(false);
+                                    mixer = stream.mixer().clone();
+                                    log_line("play: rebuilt dead stream after interruption");
+                                }
+                                Err(_) => {
+                                    // 新流都开不出来：放回标记，下次再试
+                                    sh.audio_interrupted.store(true, Ordering::SeqCst);
+                                }
+                            }
                         }
                         sh.playing.store(false, Ordering::SeqCst);
                         sh.ended.store(false, Ordering::SeqCst);
@@ -1314,6 +1366,113 @@ impl Player {
                             s.play();
                             *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                             sh.playing.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    Ok(Cmd::RebuildStream { resume, start_at }) => {
+                        /*
+                         * iOS 音频被别的 App / 来电打断后：系统把我们的 AudioUnit
+                         * 停了，cpal 不会自己重启，rodio 的 `sink.play()` 又只改
+                         * 静音标志——普通 resume 落在死流上，界面"在播"却没声。
+                         * 唯一恢复手段就是把整个输出流重建一遍（= 重启应用做的
+                         * 那件事），再把当前这首从打断时的进度续上。
+                         *
+                         * 顺序要紧：先把会话激活（AudioUnit 创建需要 active 的
+                         * session），再开新 stream、换 mixer，最后重新加载曲目。
+                         */
+                        sh.load_gen.fetch_add(1, Ordering::SeqCst);
+                        if let Some(s) = sink.take() {
+                            s.stop();
+                        }
+                        sh.playing.store(false, Ordering::SeqCst);
+                        sh.has_sink.store(false, Ordering::SeqCst);
+                        sh.spectrum.clear();
+                        stall_pos = -1.0;
+                        stall_at = Instant::now();
+                        stall_tries = 0;
+                        /* 会话可能仍是 deactivate 状态，先要回来 */
+                        crate::smtc::ensure_session();
+                        let rebuilt = OutputStreamBuilder::open_default_stream();
+                        match rebuilt {
+                            Ok(ns) => {
+                                stream = ns;
+                                stream.log_on_drop(false);
+                                mixer = stream.mixer().clone();
+                                /* 当前曲目：在线走 Url、本地走 File；没有就不硬造 */
+                                let cur = sh
+                                    .track
+                                    .lock()
+                                    .ok()
+                                    .and_then(|t| t.clone())
+                                    .filter(|p| !p.is_empty());
+                                let remote = sh.remote.load(Ordering::SeqCst);
+                                let dur = *sh.duration.lock().unwrap_or_else(|e| e.into_inner());
+                                let loaded = match cur {
+                                    Some(path) => {
+                                        let src = if remote {
+                                            TrackSrc::Url(path)
+                                        } else {
+                                            TrackSrc::File(path)
+                                        };
+                                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                            match &src {
+                                                TrackSrc::File(p) => load(&mixer, p, &sh, dur),
+                                                TrackSrc::Url(u) => load_remote(&mixer, u, &sh, dur),
+                                            }
+                                        }))
+                                    }
+                                    // 打断时还没加载任何曲目：流重建好即可，不 load
+                                    None => {
+                                        sh.audio_interrupted.store(false, Ordering::SeqCst);
+                                        log_line("rebuild stream: no current track, done");
+                                        continue;
+                                    }
+                                };
+                                match loaded {
+                                    Ok(Ok(s)) => {
+                                        s.pause();
+                                        let mut at = start_at.max(0.0);
+                                        if dur > 0.0 {
+                                            at = at.min((dur - 1.0).max(0.0));
+                                        }
+                                        if at > 0.5 && s.try_seek(Duration::from_secs_f64(at)).is_err() {
+                                            at = 0.0;
+                                            let _ = s.try_seek(Duration::ZERO);
+                                        }
+                                        *sh.position_base.lock().unwrap_or_else(|e| e.into_inner()) = at;
+                                        *sh.played.lock().unwrap_or_else(|e| e.into_inner()) =
+                                            (at, Instant::now());
+                                        if resume {
+                                            s.play();
+                                            *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) =
+                                                Some(Instant::now());
+                                            sh.playing.store(true, Ordering::SeqCst);
+                                        } else {
+                                            *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                            sh.playing.store(false, Ordering::SeqCst);
+                                        }
+                                        sink = Some(s);
+                                        sh.has_sink.store(true, Ordering::SeqCst);
+                                        sh.audio_interrupted.store(false, Ordering::SeqCst);
+                                        log_line(&format!(
+                                            "rebuild stream ok: resume={} at={at:.1}/{dur:.1} remote={remote}",
+                                            resume as u8
+                                        ));
+                                    }
+                                    Ok(Err(e)) => {
+                                        *sh.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.clone());
+                                        sh.audio_interrupted.store(false, Ordering::SeqCst);
+                                        log_line(&format!("rebuild stream: reload failed: {e}"));
+                                    }
+                                    Err(_) => {
+                                        sh.audio_interrupted.store(false, Ordering::SeqCst);
+                                        log_line("rebuild stream: decoder panicked");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                /* 新流都开不出来：保留标记，下次 resume 再试一次 */
+                                log_line(&format!("rebuild stream FAILED: {e}"));
+                            }
                         }
                     }
                     Ok(Cmd::Stop) => {
@@ -1657,6 +1816,14 @@ impl Player {
         let _ = self.tx.send(Cmd::Pause);
     }
 
+    /// 标记「音频会话被系统打断过」（iOS AVAudioSession 中断）。
+    ///
+    /// 由远控层的中断观察回调调用。打下这个标记后，下一次 resume 会走
+    /// `RebuildStream`——重建被系统停掉的 AudioUnit，而不是在死流上空转。
+    pub fn mark_audio_interrupted(&self) {
+        self.shared.audio_interrupted.store(true, Ordering::SeqCst);
+    }
+
     /// 恢复播放。返回值 = 「原生手里到底有没有播放器」。
     ///
     /// 为什么要回这一个 bool：音频线程里的 `sink` 被 Stop 收掉、或者上一轮加载
@@ -1667,6 +1834,20 @@ impl Player {
     pub fn resume(&self) -> bool {
         let has = self.shared.has_sink.load(Ordering::SeqCst);
         if has {
+            /*
+             * iOS 被别的 App / 来电打断过：AudioUnit 已被系统停用，普通
+             * `sink.play()` 救不回来（这正是「打断后再也播不起来、除非重启」
+             * 的根因）。这一路改走重建输出流，从打断时的进度续上。
+             */
+            if self.shared.audio_interrupted.swap(false, Ordering::SeqCst) {
+                let at = {
+                    let (p, _) = *self.shared.played.lock().unwrap_or_else(|e| e.into_inner());
+                    p
+                };
+                log_line(&format!("resume -> rebuild stream (was interrupted) at={at:.1}"));
+                let _ = self.tx.send(Cmd::RebuildStream { resume: true, start_at: at });
+                return has;
+            }
             /*
              * 暂停久了（熄屏 / 切到别的 App）iOS 会把我们的音频会话收回去。
              * `sink.play()` 自己不报错，但音频单元要重新起来——那一下就是
@@ -2049,6 +2230,20 @@ fn relay_from(sh: &Arc<Shared>, tx: &Sender<Cmd>, skip: usize) -> bool {
                  */
                 match crate::net::probe_audio(&url) {
                     Ok(p) if p.got >= 8 * 1024 => {
+                        /*
+                         * 试听片段挡在这里：探活读出的真实时长远短于队列声明的
+                         * 整首时长时，这段音频是平台塞的试听 + 语音提示，
+                         * 喂给播放器用户就会在后台听到「当前音乐仅在 XX 播放」。
+                         * 当这条路失败，往后跳一首（relay_fail），和 404 同样处理。
+                         */
+                        if is_trial_clip(p.duration, item.duration) {
+                            log_line(&format!(
+                                "relay 试听片段跳过 idx={} \"{}\" ({:.0}s/{:.0}s)",
+                                item.index, item.title, p.duration, item.duration
+                            ));
+                            relay_fail(sh2, tx2, gen, skip);
+                            return;
+                        }
                         sh2.relayed.store(item.index as i64, Ordering::SeqCst);
                         log_line(&format!(
                             "relay -> idx={} \"{}\" ({}/{})",
@@ -2194,6 +2389,14 @@ fn spawn_ahead(sh: &Arc<Shared>, tx: &Sender<Cmd>) {
          */
         let dur = match crate::net::probe_audio(&url) {
             Ok(p) if p.got >= 8 * 1024 => {
+                /* 试听片段不进预告表（后台曲终直接接它、没人再校正） */
+                if is_trial_clip(p.duration, item.duration) {
+                    log_line(&format!(
+                        "ahead 试听片段不进表 idx={} \"{}\" ({:.0}s/{:.0}s)",
+                        item.index, item.title, p.duration, item.duration
+                    ));
+                    return;
+                }
                 if p.duration > 0.0 { p.duration } else { item.duration }
             }
             _ => {

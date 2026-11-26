@@ -11,7 +11,7 @@ pub mod hotkeys;
 ///
 /// 每次出**诊断包**就把这里改一下。未签名 IPA 由用户自己重签安装，版本号
 /// 又长期不动，光看界面分不出手里这份是不是刚下的——上一轮就白排查了一天。
-pub const BUILD_TAG: &str = "2026-11-25.diag6";
+pub const BUILD_TAG: &str = "2026-11-26.diag7";
 /// 封面小图（原生接歌时给系统卡 / 灵动岛补封面）
 pub mod coverart;
 #[cfg(target_os = "ios")]
@@ -1716,6 +1716,21 @@ fn stage_open_failed(app: &AppHandle, name: &str, msg: &str) {
 /// 前端启动 / 回到前台时用 `take_open_file` 取一次，天然不漏。
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
+    /*
+     * 非 `file:` 的 URL 是「唤醒 App」用的自定义 scheme，不是「用疏音打开」。
+     *
+     * 点灵动岛 / Now Playing 卡片回 App 时，系统送进来的是 `shuyin://live`
+     * 这类 URL（热启动走 tao 的 `RunEvent::Opened`）。以前这里一律当文件处理，
+     * `to_file_path()` 失败就写一条「系统给的不是本地文件地址」的 pending，
+     * 前端于是弹「打不开 open-file」——可 App 明明已经打开了，用户看到的就是
+     * 「点顶部进 App，还报一个莫名其妙的错」（2026-11-26 反馈）。
+     *
+     * 自定义 scheme 走的是 tauri 的 deep link 通道，不需要这里做任何事，
+     * 直接返回即可；只有真正的 file: URL 才落到下面的「用疏音打开」流程。
+     */
+    if url.scheme() != "file" {
+        return;
+    }
     let Ok(src) = url.to_file_path() else {
         stage_open_failed(app, "open-file", "系统给的不是本地文件地址");
         return;

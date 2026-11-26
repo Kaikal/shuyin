@@ -32,13 +32,18 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 ///   1. 先开着 → 用户说锁屏出现两张卡（系统那张 + 我们这张），只要系统那张；
 ///   2. 关掉之后系统卡确实干净了，但**点击灵动岛打不开 App**——系统媒体会话
 ///      那张卡的点击落点由 SpringBoard 管，我们没有任何可挂的入口；
-///   3. 用户对照酷狗（酷狗能点开）要求「灵动岛必须能打开应用」。
+///   3. 用户对照酷狗（酷狗能点开）要求「灵动岛必须能打开应用」→ 改回 true；
+///   4. 2026-11-26 用户连发三张图（灵动岛并排两个、锁屏两卡、授权提示卡），
+///      明确「只要上面那个（系统播放卡），这个（自绘卡）不要」。
 ///
-/// 结论：唯一能自己控制点击落点的通道就是 Live Activity 里的
-/// `Button(intent: ShuyinOpenIntent)`（`openAppWhenRun = true`，用户实测有效）。
-/// 所以这张卡必须画。锁屏那张的重复感改用**内容**解决：
-/// `LockScreenView` 压成一行字幕（高度约 30pt），不再是「第二个播放器」。
-pub const DRAW_OWN_CARD: bool = true;
+/// 最终按用户 11-26 的明确诉求关掉：锁屏 / 灵动岛只留系统媒体会话那张卡。
+/// 代价是「点灵动岛回 App」失效（系统卡的点击由 SpringBoard 管，插不进手）——
+/// 这是 iOS 的系统限制，和酷狗的差别只在于酷狗自己画了 Live Activity。
+/// 要恢复时把这里改回 true 即可，Swift 侧全套 intent 都还在。
+///
+/// 关掉时 `init()` 会调一次 `ffi::end()` 清掉上一版遗留的卡，
+/// `live_activity_sync()` 直接空转，`spawn_*ticker()` 都不起。
+pub const DRAW_OWN_CARD: bool = false;
 
 
 /// 一次播放状态的快照，字段名与 Swift 侧的 `ShuyinLive.Payload` 一一对应。

@@ -38,8 +38,7 @@ import UIKit
 /// 前台先喂一帧再主动 start；`canStart...AutomaticallyFromInline` 与
 /// `didEnterBackground` 兜底只作为「已经成功启动过一次」之后的保险。
 @available(iOS 15.0, *)
-final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
-                       AVPictureInPictureSampleBufferPlaybackDelegate {
+final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate {
 
     static let shared = ShuyinPiP()
 
@@ -72,13 +71,14 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
 
     /// 画布尺寸（像素）。
     ///
-    /// 默认是一条 960×300 的窄条（3.2:1），接近桌面歌词该有的形态。
+    /// 默认是一条 960×180 的扁条（5.3:1），对齐酷狗桌面歌词那种横条形态——
+    /// 之前 960×300（3.2:1）偏厚，配上系统叠的播放控件成了一整块视频框。
     /// 但**不能写死**：画中画窗口的宽高比是系统给的（用户还能捏合缩放），
     /// 固定画布 + `resizeAspect` 会在窗口里上下留黑边，字看上去忽大忽小——
     /// 2026-11-25 用户报的「文字太大、不适配」就是这条。
     /// `didTransitionToRenderSize` 会按窗口真实比例改写 H。
     private var W = 960
-    private var H = 300
+    private var H = 180
 
     // MARK: - 对外（C 入口调这些）
 
@@ -209,9 +209,19 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
             }
         }
 
+        /*
+         * **不传 playbackDelegate**。
+         *
+         * 传了它，系统就把这个 PiP 当「正在播放的视频」，强制在窗口上叠一整套
+         * 播放控件：X、上一曲/播放/下一曲、进度条、LIVE 字样——用户截图里那堆
+         * 「不是我们要的」东西全来自这里。
+         *
+         * 不传则是「被动内容源」（系统文档里的监控摄像头那类）：窗口里只显示
+         * 我们喂进去的帧，没有任何播放控件。酷狗那条桌面歌词就是这个形态。
+         * 播放控制本来就交给灵动岛 / 系统 Now Playing 卡片，PiP 只负责显示歌词。
+         */
         let source = AVPictureInPictureController.ContentSource(
-            sampleBufferDisplayLayer: layer,
-            playbackDelegate: self,
+            sampleBufferDisplayLayer: layer
         )
         let c = AVPictureInPictureController(contentSource: source)
         c.delegate = self
@@ -335,50 +345,18 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
 
         /*
-         * 底板：接近纯黑的暖调渐变 + 大圆角 + 一圈极淡的高光边。
+         * 底板：一条接近纯黑的半透明圆角条，对齐酷狗那种桌面歌词。
          *
-         * 上一版是一条 30 圆角的纯色块，在画中画窗口（本身带圆角）里看着像
-         * 一块贴错地方的色板——用户说「丑」主要就是它。这里把圆角做到接近
-         * 窗口圆角（h*0.3），并用上深下浅的渐变让边缘不那么硬。
+         * 上一版叠了暖调渐变 + 高光描边 + 文字阴影，一行歌词上全是花活，
+         * 反而显脏。这里只留一层干净的深色底，靠系统窗口自己的圆角收边。
          */
-        let corner = min(h * 0.30, 56)
+        let corner = min(h * 0.22, 40)
         let box = CGRect(x: 0, y: 0, width: w, height: h)
-        let path = CGPath(roundedRect: box, cornerWidth: corner, cornerHeight: corner, transform: nil)
         ctx.saveGState()
-        ctx.addPath(path)
+        ctx.addPath(CGPath(roundedRect: box, cornerWidth: corner, cornerHeight: corner, transform: nil))
         ctx.clip()
-        let space = CGColorSpaceCreateDeviceRGB()
-        if let grad = CGGradient(
-            colorsSpace: space,
-            colors: [
-                UIColor(red: 0.13, green: 0.11, blue: 0.10, alpha: 0.97).cgColor,
-                UIColor(red: 0.05, green: 0.045, blue: 0.04, alpha: 0.97).cgColor,
-            ] as CFArray,
-            locations: [0, 1],
-        ) {
-            /* 未翻转坐标系：y 向上，(0,h) 是顶 */
-            ctx.drawLinearGradient(
-                grad,
-                start: CGPoint(x: 0, y: h),
-                end: CGPoint(x: 0, y: 0),
-                options: [],
-            )
-        } else {
-            /* 渐变建不出来（极不可能）时的兜底：直接填一块纯色，别留白 */
-            ctx.setFillColor(UIColor(red: 0.08, green: 0.07, blue: 0.06, alpha: 0.97).cgColor)
-            ctx.fill(box)
-        }
-        ctx.restoreGState()
-
-        /* 极淡的内描边：让边缘有一道反光，不再是一块死色 */
-        ctx.saveGState()
-        ctx.addPath(CGPath(
-            roundedRect: box.insetBy(dx: h * 0.006, dy: h * 0.006),
-            cornerWidth: corner, cornerHeight: corner, transform: nil,
-        ))
-        ctx.setStrokeColor(UIColor(white: 1, alpha: 0.07).cgColor)
-        ctx.setLineWidth(max(1, h * 0.007))
-        ctx.strokePath()
+        ctx.setFillColor(UIColor(white: 0.07, alpha: 0.95).cgColor)
+        ctx.fill(box)
         ctx.restoreGState()
 
         /*
@@ -402,8 +380,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
          * 四个字。用户报的「文字太大、不适配」正是这个。按宽度封顶
          * （7.5%，一屏约 13 个字）之后，窗口怎么变，字与窗口的相对大小都稳定。
          */
-        var fontPt = max(20, min(h * 0.42, w * 0.075))
-        var font = UIFont.systemFont(ofSize: fontPt, weight: .semibold)
+        var fontPt = max(18, min(h * 0.30, w * 0.058))
+        var font = UIFont.systemFont(ofSize: fontPt, weight: .medium)
         var textW = (text as NSString).size(withAttributes: [.font: font]).width
 
         /*
@@ -414,7 +392,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
             let scaled = max(fontPt * 0.72, fontPt * (avail / textW))
             if scaled < fontPt {
                 fontPt = scaled
-                font = UIFont.systemFont(ofSize: fontPt, weight: .semibold)
+                font = UIFont.systemFont(ofSize: fontPt, weight: .medium)
                 textW = (text as NSString).size(withAttributes: [.font: font]).width
             }
         }
@@ -537,54 +515,6 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     ) {
         NSLog("[shuyin] pip restore request")
         completionHandler(true)
-    }
-
-    func pictureInPictureController(
-        _ controller: AVPictureInPictureController, setPlaying playing: Bool,
-    ) {
-        self.playing = playing
-        send("playpause")
-    }
-
-    func pictureInPictureControllerTimeRangeForPlayback(
-        _ controller: AVPictureInPictureController,
-    ) -> CMTimeRange {
-        /*
-         * 一条字幕没有「片长」，这里按**直播**处理（时长正无穷）。
-         *
-         * 两个原因：
-         *   · 有限时长会在控制条上画一条「一小时只走了一点点」的假进度线；
-         *   · 只有直播语义下系统才不会摆出 ±10 秒那两颗跳转键——
-         *     用户明确说「上一曲下一曲不能自绘制就不要这两个按钮」。
-         *     给 3600 秒时它们会出现，因为系统认为「1 小时的内容可以跳 10 秒」。
-         *
-         * 代价是控制条上会有一个小的 LIVE 字样，比两颗永远用不上的跳转键干净。
-         */
-        CMTimeRange(start: .zero, duration: .positiveInfinity)
-    }
-
-    func pictureInPictureControllerIsPlaybackPaused(
-        _ controller: AVPictureInPictureController,
-    ) -> Bool {
-        !playing
-    }
-
-    /// 快进 / 快退。
-    ///
-    /// **这个方法必须留着**：`AVPictureInPictureSampleBufferPlaybackDelegate` 在
-    /// iOS 26 SDK 里把它标成了 required（旧 SDK 里是 optional），删掉会直接
-    /// `type does not conform to protocol` 编译失败——2026-11-26 那次构建就挂在这。
-    ///
-    /// 但「按钮不显示」是另一条路：`pictureInPictureControllerTimeRangeForPlayback`
-    /// 返回的是**正无穷**（直播语义），系统因此不会摆出 ±10 秒两颗键。
-    /// 万一某些系统版本仍然画出来，点下去也不会白点——映射成上一首 / 下一首。
-    func pictureInPictureController(
-        _ controller: AVPictureInPictureController,
-        skipByInterval skipInterval: CMTime,
-        completion completionHandler: @escaping () -> Void,
-    ) {
-        send(skipInterval.seconds >= 0 ? "next" : "prev")
-        completionHandler()
     }
 
     func pictureInPictureController(
