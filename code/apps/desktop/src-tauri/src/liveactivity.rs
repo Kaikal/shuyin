@@ -105,6 +105,13 @@ pub fn init(app: &AppHandle) {
          */
         let _keep = shuyin_remote_command as *const ();
         std::hint::black_box(_keep);
+        /*
+         * 启动即申请通知授权（无条件，见 ffi::notif_bootstrap 的注释）。
+         * 这是「QQ音乐从不弹实时活动弹窗」的同款做法：通知授权拿到的瞬间，
+         * 实时活动上屏就静默了。放在 init 最前面，弹窗和 QQ 音乐一样
+         * 出现在首次启动时，而不是等用户开始播放。
+         */
+        ffi::notif_bootstrap();
         if DRAW_OWN_CARD {
             ffi::adopt();
         } else {
@@ -953,6 +960,22 @@ mod ffi {
         type Fn = unsafe extern "C" fn();
         let p = lookup("shuyin_live_adopt");
         if p.is_null() {
+            return;
+        }
+        let f: Fn = unsafe { std::mem::transmute(p) };
+        unsafe { f() }
+    }
+
+    /// 启动时申请通知授权（见 Swift 侧 `shuyin_notif_bootstrap` 的注释）。
+    ///
+    /// 实时活动的显示授权挂在通知授权下面：通知已授权的 App 上岛不再弹
+    /// 「允许实时活动」。**这条必须无条件调**——不管自绘卡开没开，锁屏上
+    /// 那张系统媒体卡同属通知体系，而且 QQ 音乐正是靠这一步做到「从不弹」。
+    pub fn notif_bootstrap() {
+        type Fn = unsafe extern "C" fn();
+        let p = lookup("shuyin_notif_bootstrap");
+        if p.is_null() {
+            crate::player::log("live dlsym notif_bootstrap: symbol NULL");
             return;
         }
         let f: Fn = unsafe { std::mem::transmute(p) };

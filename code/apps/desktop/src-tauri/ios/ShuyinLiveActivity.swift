@@ -1,6 +1,7 @@
 import ActivityKit
 import Foundation
 import UIKit
+import UserNotifications
 
 /// Live Activity（灵动岛 / 锁屏实时活动）的进程内管家。
 ///
@@ -202,4 +203,27 @@ public func shuyinLiveEnd() {
 public func shuyinLiveAdopt() {
     guard #available(iOS 16.2, *) else { return }
     ShuyinLive.adopt()
+}
+
+/// 启动时申请**通知授权**——这一步就是「QQ音乐不弹实时活动弹窗」的全部秘密。
+///
+/// 苹果工程师在开发者论坛的定论：实时活动的显示授权**挂在通知授权下面**，
+/// 系统检查的是通知权限：已授权的 App 起实时活动**不再弹任何提示**；
+/// 没申请过通知的 App，第一次上岛会被挂一张「允许实时活动?」的卡，而且
+/// 用户没点按钮之前每次都可能再挂（未决状态）。QQ 音乐/酷狗在首次启动时
+/// 就弹「允许通知」，用户点完允许，实时活动从此静默——它们不是没有弹窗，
+/// 是把弹窗提前到了通知这一步。
+///
+/// 所以和 QQ 音乐对齐：启动即申请。用户在通知弹窗上点一次「允许」，
+/// 之后岛/锁屏卡再也不会有任何授权提示。
+@_cdecl("shuyin_notif_bootstrap")
+public func shuyinNotifBootstrap() {
+    DispatchQueue.main.async {
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, error in
+            NSLog("[shuyin] notif auth granted=%d err=%@",
+                  granted ? 1 : 0, error?.localizedDescription ?? "-")
+        }
+    }
 }
