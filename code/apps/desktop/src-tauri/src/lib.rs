@@ -3842,3 +3842,4 @@ pub fn run() {
 
     app.run(|app_handle, event| on_run_event(app_handle, event));
 }
+// ci rerun: retry swift-rs fetch (diag9)
