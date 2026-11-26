@@ -38,7 +38,8 @@ import UIKit
 /// 前台先喂一帧再主动 start；`canStart...AutomaticallyFromInline` 与
 /// `didEnterBackground` 兜底只作为「已经成功启动过一次」之后的保险。
 @available(iOS 15.0, *)
-final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate {
+final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
+                       AVPictureInPictureSampleBufferPlaybackDelegate {
 
     static let shared = ShuyinPiP()
 
@@ -210,18 +211,18 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate {
         }
 
         /*
-         * **不传 playbackDelegate**。
+         * playbackDelegate 必须传：iOS 26 SDK 里 `ContentSource` 只提供
+         * `init(sampleBufferDisplayLayer:playbackDelegate:)` 这一个初始化器，
+         * 不带 delegate 的重载根本不存在（2026-11-26 构建失败：
+         * "missing argument for parameter 'playbackDelegate'"）。
          *
-         * 传了它，系统就把这个 PiP 当「正在播放的视频」，强制在窗口上叠一整套
-         * 播放控件：X、上一曲/播放/下一曲、进度条、LIVE 字样——用户截图里那堆
-         * 「不是我们要的」东西全来自这里。
-         *
-         * 不传则是「被动内容源」（系统文档里的监控摄像头那类）：窗口里只显示
-         * 我们喂进去的帧，没有任何播放控件。酷狗那条桌面歌词就是这个形态。
-         * 播放控制本来就交给灵动岛 / 系统 Now Playing 卡片，PiP 只负责显示歌词。
+         * 所以「靠不传 delegate 去掉播放控件」这条路在 iOS 26 上走不通。控件
+         * 的收敛改由代理方法做：`timeRangeForPlayback` 返回正无穷（直播语义）
+         * 让系统不摆 ±10 秒那两颗跳转键，剩下的交给系统空闲自动淡出。
          */
         let source = AVPictureInPictureController.ContentSource(
-            sampleBufferDisplayLayer: layer
+            sampleBufferDisplayLayer: layer,
+            playbackDelegate: self,
         )
         let c = AVPictureInPictureController(contentSource: source)
         c.delegate = self
@@ -515,6 +516,39 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate {
     ) {
         NSLog("[shuyin] pip restore request")
         completionHandler(true)
+    }
+
+    // MARK: - SampleBufferPlaybackDelegate（iOS 26 SDK 里这 4 个都是 required）
+
+    func pictureInPictureController(
+        _ controller: AVPictureInPictureController, setPlaying playing: Bool,
+    ) {
+        self.playing = playing
+        send("playpause")
+    }
+
+    /// 一条字幕没有「片长」，按直播处理（正无穷）：系统因此不摆 ±10 秒两颗跳转键。
+    func pictureInPictureControllerTimeRangeForPlayback(
+        _ controller: AVPictureInPictureController,
+    ) -> CMTimeRange {
+        CMTimeRange(start: .zero, duration: .positiveInfinity)
+    }
+
+    func pictureInPictureControllerIsPlaybackPaused(
+        _ controller: AVPictureInPictureController,
+    ) -> Bool {
+        !playing
+    }
+
+    /// iOS 26 SDK 把这个方法标成 required，删掉直接 conformance 编译失败。
+    /// 正无穷时长下系统一般不画跳转键；万一画出来，点下去映射上一首/下一首。
+    func pictureInPictureController(
+        _ controller: AVPictureInPictureController,
+        skipByInterval skipInterval: CMTime,
+        completion completionHandler: @escaping () -> Void,
+    ) {
+        send(skipInterval.seconds >= 0 ? "next" : "prev")
+        completionHandler()
     }
 
     func pictureInPictureController(

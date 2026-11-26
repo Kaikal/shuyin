@@ -11,7 +11,7 @@ pub mod hotkeys;
 ///
 /// 每次出**诊断包**就把这里改一下。未签名 IPA 由用户自己重签安装，版本号
 /// 又长期不动，光看界面分不出手里这份是不是刚下的——上一轮就白排查了一天。
-pub const BUILD_TAG: &str = "2026-11-26.diag7";
+pub const BUILD_TAG: &str = "2026-11-26.diag8";
 /// 封面小图（原生接歌时给系统卡 / 灵动岛补封面）
 pub mod coverart;
 #[cfg(target_os = "ios")]
