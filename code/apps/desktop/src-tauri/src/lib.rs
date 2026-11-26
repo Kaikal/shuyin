@@ -194,7 +194,14 @@ pub(crate) fn append_log(app: &AppHandle, line: &str) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = writeln!(f, "[{ts}] {line}");
+        /*
+         * 整行先拼好再一次 write_all：fmt 直接往 File 上写会拆成多次
+         * write 调用，两个线程（音频线程 relay / 前端 trace）同时落日志
+         * 时会交叠成 "[[17956828601795682860] relay 失败" 这种坏行
+         * （app(4).log 实测），一行日志就这样废了。
+         */
+        let mut buf = format!("[{ts}] {line}\n").into_bytes();
+        let _ = f.write_all(&mut buf);
     }
 }
 
@@ -1978,6 +1985,21 @@ fn stop(player: State<'_, Player>) {
 #[tauri::command]
 fn seek(player: State<'_, Player>, position_secs: f64) {
     player.seek(position_secs);
+    /*
+     * 系统「正在播放」卡（iOS 锁屏 / 灵动岛）的进度得跟着走。
+     *
+     * 系统是拿「已播秒数 + 播放速率」自己走秒的，不重推一次它就沿旧锚点一直跑：
+     * 用户 2:30 拖到 0:40，锁屏还从 2:31 往前走。前端这一次只推
+     * `live_activity_sync`（自绘卡关掉后是空转），到不了 smtc 这条路。
+     *
+     * 只翻位置、元信息（含封面）沿用上一次——`reapply` 干的就是这件事，
+     * 不走 `update` 是为了不重新解码一遍封面。
+     */
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let (_, playing, _, dur) = player.state_lite();
+        crate::smtc::refresh_state(playing, position_secs.max(0.0), dur);
+    }
 }
 
 #[tauri::command]

@@ -99,7 +99,7 @@ private struct Artwork: View {
 }
 
 /* ------------------------------------------------------------------ */
-/* 进度条                                                               */
+/* 进度条 / 时间                                                        */
 /* ------------------------------------------------------------------ */
 
 private struct ProgressBar: View {
@@ -160,6 +160,64 @@ private struct TimeLabel: View {
     }
 }
 
+/// 已播时间（进度条左边那格）。系统媒体卡是「已播 —条— 剩余」的三段式。
+private struct ElapsedLabel: View {
+    let state: ShuyinActivityAttributes.ContentState
+
+    var body: some View {
+        Group {
+            if Progress.canTick(state) {
+                // countsDown: false = 从 0 往上走，正好是「已播」
+                Text(timerInterval: Progress.start(state)...Progress.end(state), countsDown: false)
+            } else {
+                Text(TimeLabel.clock(max(0, state.position)))
+            }
+        }
+        .monospacedDigit()
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(syText2)
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 声波条                                                               */
+/* ------------------------------------------------------------------ */
+
+/// 紧凑态左侧的「正在播放」声波。
+///
+/// 系统媒体胶囊的左侧就是一组高低错落的声波条（播放中）/ 暂停图标（停了），
+/// 这里照着画。Live Activity 的扩展进程里跑不了逐帧动画（WidgetKit 的时间线
+/// 不支持连续动画），所以条高是固定的错落排布——静态的，但一眼就是那个意思。
+private struct WaveformBars: View {
+    let playing: Bool
+
+    /// 播放中每根条的高度（pt）。数量别多：紧凑态左侧宽度有限。
+    private static let bars: [CGFloat] = [7, 12, 9, 14, 8, 11]
+
+    var body: some View {
+        Group {
+            if playing {
+                HStack(spacing: 2.5) {
+                    ForEach(0..<Self.bars.count, id: \.self) { i in
+                        Capsule()
+                            .fill(syAccent)
+                            .frame(width: 2.5, height: Self.bars[i])
+                    }
+                }
+            } else {
+                Image(systemName: "pause.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(syText2)
+            }
+        }
+        .frame(width: 24, height: 16, alignment: .center)
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 可点区域                                                             */
+/* ------------------------------------------------------------------ */
+
 /// 可点的封面（**只给锁屏卡用**）。
 ///
 /// 点一下在「大封面」和「普通卡」之间切换（用户参考的是酷狗那张卡：
@@ -219,7 +277,7 @@ private struct ArtLink: View {
 /// 之前注释说「openAppWhenRun 也不生效」是把 DTS 关于「intent 内部不能调 URL」
 /// 的话误读了。Apple 自己的 AlarmKit 示例就是这么回 App 的。
 ///
-/// 紧凑态 / 最小态不适用这里：那两态没有 region 之分、放不进 Button，
+/// 紧凑 / 最小态不适用这里：那两态没有 region 之分、放不进 Button，
 /// 仍走下面 `DynamicIsland` 上的 `.widgetURL`。
 private struct OpenTap<Content: View>: View {
     private let content: () -> Content
@@ -318,6 +376,23 @@ private struct Controls: View {
     }
 }
 
+/// 展开态右上角的**圆形播放/暂停**键——系统媒体展开卡的招牌元素。
+@available(iOS 17.0, *)
+private struct PlayPauseCircle: View {
+    let state: ShuyinActivityAttributes.ContentState
+
+    var body: some View {
+        Button(intent: ShuyinPlayPauseIntent()) {
+            Image(systemName: state.playing ? "pause.fill" : "play.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(Color.white.opacity(0.14)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 歌词行                                                               */
 /* ------------------------------------------------------------------ */
@@ -355,14 +430,10 @@ private struct LockScreenView: View {
     /*
      * 锁屏只画**一行字幕**，不画封面、不画整排控制、不画进度条。
      *
-     * 2026-11-25 用户先要求「只留系统那张卡」，但关掉自绘活动之后灵动岛就
-     * 点不开 App 了（系统媒体卡那一下的落点由 SpringBoard 管，第三方插不上手；
-     * 酷狗能点是因为它自己有实时活动）。于是这张卡必须回来——负责「点击回 App」
-     * 和岛上的信息展示。
-     *
-     * 重复感用内容解决：锁屏上它就是一条薄薄的歌词条（约 30pt 高），
-     * 跟系统那张「封面+歌名+进度+控制」的播放器卡明显不是一类东西，
-     * 看起来像桌面歌词的锁屏版，而不是第二个播放器。
+     * 锁屏上系统本来就会出一张「封面+歌名+进度+控制」的媒体卡（MPNowPlayingInfoCenter
+     * 那条链路），我们这张自绘卡要是也画成那样，锁屏就是两张几乎一样的播放器。
+     * 所以这张卡只做系统卡给不了的两件事：当前句歌词 + 点一下回 App，
+     * 视觉上压成一条薄薄的歌词条（约 30pt 高），像桌面歌词的锁屏版。
      */
     var body: some View {
         OpenBackground {
@@ -401,15 +472,23 @@ struct ShuyinLiveActivityWidget: Widget {
             LockScreenView(state: context.state)
         } dynamicIsland: { context in
             DynamicIsland {
+                /*
+                 * 展开态照着**系统媒体展开卡**的样子排：
+                 *   [大封面] [歌名/歌手] …… [圆形播放键]
+                 *   [歌词 / 进度条 + 已播·剩余]
+                 *   [收藏 上一首 播放 下一首]
+                 * 酷狗那张岛就是这个骨架——它也是实时活动（ActivityKit），
+                 * 「点一下进 App / 长按展开」都是 Live Activity 的标准行为。
+                 */
                 DynamicIslandExpandedRegion(.leading) {
                     /* 岛内封面 = 回 App（见 ArtLink 的注释），不是切大图 */
-                    ArtLink(state: context.state, size: 46)
+                    ArtLink(state: context.state, size: 52)
                         .padding(.leading, 2)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    /* 歌名/歌手整块也是回 App 的落点（用 `Link`，见 `OpenTap`） */
+                    /* 歌名/歌手整块也是回 App 的落点（用 `OpenTap`） */
                     OpenTap {
-                        VStack(alignment: .leading, spacing: 1) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(context.state.title)
                                 .font(.system(size: 15, weight: .semibold))
                                 .foregroundStyle(.white)
@@ -423,23 +502,33 @@ struct ShuyinLiveActivityWidget: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    /* 倒计时那格也回 App：右上角是手指第二个习惯落点 */
-                    OpenTap {
-                        TimeLabel(state: context.state)
+                    if #available(iOS 17.0, *) {
+                        PlayPauseCircle(state: context.state)
+                            .padding(.trailing, 4)
+                    } else {
+                        /* 16.x 没有 Button(intent:)：退回纯展示 */
+                        OpenTap {
+                            Image(systemName: context.state.playing ? "pause.fill" : "play.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.trailing, 4)
                     }
-                    .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 10) {
                         /*
-                         * 展开态整块居中排，歌词居中比左对齐更像「字幕」。
                          * 歌词 + 进度条这一块也包一层「回 App」：用户的手指
                          * 最容易落在这两行上，而它们原本什么都不会发生。
                          */
                         OpenTap {
-                            VStack(spacing: 10) {
+                            VStack(spacing: 8) {
                                 LyricLine(text: context.state.line, centered: true)
-                                ProgressBar(state: context.state)
+                                HStack(spacing: 6) {
+                                    ElapsedLabel(state: context.state)
+                                    ProgressBar(state: context.state)
+                                    TimeLabel(state: context.state, compact: true)
+                                }
                             }
                         }
                         if #available(iOS 17.0, *) {
@@ -450,32 +539,21 @@ struct ShuyinLiveActivityWidget: Widget {
                 }
             } compactLeading: {
                 /*
-                 * 紧凑态左侧的封面也做成回 App 的落点。
+                 * 紧凑态**左侧 = 声波**（系统媒体胶囊的招牌布局：
+                 * 左边一组声波条、右边一张封面）。
                  *
-                 * `Link` 在紧凑态不生效（只有展开态才有），`.widgetURL` 那条
-                 * 自定义 scheme 又实测被系统吞——用户报「点灵动岛打不开应用」。
-                 * 唯一稳定的通道是 `Button(intent:)` + `openAppWhenRun`，
-                 * 所以在这么小的格子里也塞一个（.plain 保证不套系统蓝）。
-                 */
-                ArtLink(state: context.state, size: 19)
-            } compactTrailing: {
-                /*
-                 * 紧凑态右侧：**播放状态**，不是倒计时。
-                 *
-                 * 原来这里是 `TimeLabel`（`Text(timerInterval:)` 塞进 34pt）。
-                 * 两个毛病（2026-11-23 用户截图里那块是空的）：
-                 *   · 岛的这一格是系统给的，`timerInterval` 那种自走秒文本在
-                 *     这个宽度里经常直接画不出来（宽度不够就整块被裁掉）；
-                 *   · 就算画出来，倒计时也说明不了「在放还是在停」——
-                 *     用户要的恰恰是后者（「状态和歌曲信息不匹配」）。
-                 * 换成图标：在放 = waveform（强调色），暂停 = pause.fill（灰）。
+                 * 点击回 App 用的还是那条被验证过的通道：
+                 * `Button(intent: ShuyinOpenIntent)` + `openAppWhenRun=true`
+                 * （`Link` 在紧凑态不生效，`.widgetURL` 的自定义 scheme 实测被吞）。
                  */
                 OpenTap {
-                    Image(systemName: context.state.playing ? "waveform" : "pause.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(context.state.playing ? syAccent : syText2)
-                        .frame(width: 24)
+                    WaveformBars(playing: context.state.playing)
                 }
+            } compactTrailing: {
+                /*
+                 * 紧凑态**右侧 = 封面**，和系统媒体胶囊同款。
+                 */
+                ArtLink(state: context.state, size: 22)
             } minimal: {
                 // 同时挂着两三条岛时只剩这么点地方，只放封面
                 Artwork(art: context.state.art, size: 17)

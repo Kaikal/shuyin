@@ -118,6 +118,20 @@ enum ShuyinLive {
             }
         }
 
+        /*
+         * 创建新活动**只许在前台**（更新已有活动不受限）。
+         *
+         * 苹果工程师在开发者论坛的定论：实时活动的「允许/不允许」授权提示
+         * 出现在系统认为活动是「非用户当面发起」的场景；QQ音乐全程在前台起
+         * 活动，所以用户永远见不到这个弹窗（新装实测只有通知授权）。我们曾
+         * 在后台（熄屏/切后台时原生接歌）第一次起活动，换来一张授权卡。
+         * 后台这里安静跳过：等用户回到 App，前端下一次 sync 自然在前台补上。
+         */
+        if !(await MainActor.run { UIApplication.shared.applicationState == .active }) {
+            NSLog("[shuyin] skip creating live activity in background (avoid auth prompt)")
+            return
+        }
+
         do {
             activity = try Activity.request(
                 attributes: ShuyinActivityAttributes(),

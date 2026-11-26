@@ -57,6 +57,16 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     private var line = ""
     private var prog: Double = 0
     private var playing = false
+    /**
+     * 当前曲时长（秒，0=未知）。Rust 心跳每帧都带。
+     *
+     * 画中画窗口上那颗键是「播放/暂停」还是「停止」，系统看的是
+     * `timeRangeForPlayback` 给的时长：正无穷（直播语义）= 停止键。
+     * 以前为了去掉 ±10 秒跳转键返回了正无穷，副作用就是暂停键变成了
+     * 停止键（2026-11-26 用户实报）。现在传真实时长换回播放/暂停，
+     * ±10 秒键会回来，但它们被映射成上一首/下一首，反而有用。
+     */
+    private var duration: Double = 0
     /// 已经画进 buffer 的那一帧的「内容指纹」，一样就不重画（省电）
     private var painted = "\u{0}"
     /// 上次真正 enqueue 的时刻：内容没变也要定期补一帧，否则系统会把
@@ -66,33 +76,51 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     private var observing = false
     /// 这次「画中画停止」是不是我们自己因为「回到 App」收的（见 didStop）
     private var stoppingForForeground = false
+    /**
+     * 画中画正在收尾（按 × / 回 App / 系统收起都会经过 willStop）。
+     *
+     * Apple 文档原话：「By default, this action **terminates playback** when
+     * control returns to the app」——用户按 × 关掉画中画时，AVKit 会调一次
+     * `setPlaying(false)` 把「画中画里的播放」终止掉。对 sample-buffer 内容源
+     * 来说这句到达 delegate 时就变成了字面意思：我们的处理把它翻译成
+     * `playpause` 发给 Rust，正在放的音乐跟着被暂停（2026-11-26 用户报的
+     * 「关闭桌面歌词时，歌曲也会停止」的根因）。
+     *
+     * 这一旗在 willStop 立起、didStop 放下：收尾途中来的 setPlaying 一律
+     * 只记账不转发。用户的播放/暂停按钮只在窗口活着时出现，二者不会撞。
+     */
+    private var stopping = false
 
     /// 开关真值（持久化：用户开过一次，下次启动仍按开的来）
     private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: "shuyin.pip.lyrics")
 
     /// 画布尺寸（像素）。
     ///
-    /// 默认是一条 960×180 的扁条（5.3:1），对齐酷狗桌面歌词那种横条形态——
-    /// 之前 960×300（3.2:1）偏厚，配上系统叠的播放控件成了一整块视频框。
+    /// 一条 1280×160 的扁条（8:1），对齐酷狗桌面歌词：窗口矮、字不大、
+    /// 悬浮在屏幕上只占一条缝。画中画窗口的**高度占比由内容宽高比决定**
+    /// ——画布越扁，系统给的窗口越矮，「占用空间」就小；字号也跟着按宽度
+    /// 比例调小（见 render 里 fontPt 的取值）。
+    ///
     /// 但**不能写死**：画中画窗口的宽高比是系统给的（用户还能捏合缩放），
     /// 固定画布 + `resizeAspect` 会在窗口里上下留黑边，字看上去忽大忽小——
     /// 2026-11-25 用户报的「文字太大、不适配」就是这条。
     /// `didTransitionToRenderSize` 会按窗口真实比例改写 H。
-    private var W = 960
-    private var H = 180
+    private var W = 1280
+    private var H = 160
 
     // MARK: - 对外（C 入口调这些）
 
-    func set(line: String, prog: Double, playing: Bool) {
+    func set(line: String, prog: Double, playing: Bool, duration: Double) {
         DispatchQueue.main.async {
             self.line = line
             self.prog = max(0, min(1, prog))
             self.playing = playing
+            if duration > 0 { self.duration = duration }
             /*
              * 句内进度按 1% 量化。
              *
              * 上一版是 2%（640px 宽时约 13px 一跳），配上 200ms 心跳，长句
-             * 跑马灯看起来是一顿一顿的。现在画布 960 宽 + 1% + 120ms 心跳，
+             * 跑马灯看起来是一顿一顿的。现在画布 1280 宽 + 1% + 120ms 心跳，
              * 滚动时约 8~10 帧/秒，读起来连续。内容没变的那一次仍然走
              * `paint()` 内部的 0.9s 节流补帧保活，不会多耗电。
              */
@@ -118,6 +146,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         wanted.toggle()
         UserDefaults.standard.set(wanted, forKey: "shuyin.pip.lyrics")
         if wanted {
+            stopping = false
             guard attachLayer() else {
                 /*
                  * 拿不到前台 keyWindow（App 还没完成启动）：这一下没法起 PiP。
@@ -377,11 +406,13 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
          * 字号取「高度比例」与「宽度比例」的较小值。
          *
          * 只按高度算会翻车：画中画窗口被系统摆成 16:9 时，`didTransitionToRenderSize`
-         * 会把画布高度补到 500 多，`h*0.44` 就成 230px 的字——960 宽里只放得下
-         * 四个字。用户报的「文字太大、不适配」正是这个。按宽度封顶
-         * （7.5%，一屏约 13 个字）之后，窗口怎么变，字与窗口的相对大小都稳定。
+         * 会把画布高度补高，`h*0.44` 那种系数直接放出 200px 的大字。
+         * 2026-11-26 用户对照酷狗再报「字体还是太大、图标也很大」：
+         * 系数从 (h*0.30, w*0.058) 压到 (h*0.26, w*0.042)——按窗口宽度算，
+         * 一屏能放约 24 个字，字高只占画布高度 26%，配合 8:1 的扁画布，
+         * 整条窗口在屏上就是一条细缝。
          */
-        var fontPt = max(18, min(h * 0.30, w * 0.058))
+        var fontPt = max(14, min(h * 0.26, w * 0.042))
         var font = UIFont.systemFont(ofSize: fontPt, weight: .medium)
         var textW = (text as NSString).size(withAttributes: [.font: font]).width
 
@@ -508,6 +539,16 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         NSLog("[shuyin] pip FAILED: %@", error.localizedDescription)
     }
 
+    /// 停止流程的入口（按 ×、回 App、in-app 关开关都会先到这里）：
+    /// 立起收尾旗，让收尾途中 AVKit 补发的那次 `setPlaying(false)`
+    /// （「终止画中画播放」）不会把正在放的音乐暂停掉。
+    func pictureInPictureControllerWillStopPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController,
+    ) {
+        stopping = true
+        NSLog("[shuyin] pip will stop")
+    }
+
     /// 点画中画上的「回到 App」：必须回调 completionHandler，否则窗口不关。
     func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
@@ -521,17 +562,37 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     // MARK: - SampleBufferPlaybackDelegate（iOS 26 SDK 里这 4 个都是 required）
 
     func pictureInPictureController(
-        _ controller: AVPictureInPictureController, setPlaying playing: Bool,
+        _ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool,
     ) {
+        /*
+         * 收尾途中的 setPlaying 是 AVKit 在「终止画中画里的播放」（见 stopping
+         * 的注释），说的是窗口里那条视频，不是正在放的音乐——只记账，不转发。
+         * 没有这道闸，按 × 关窗口 = 音乐跟着暂停，2026-11-26 实报。
+         */
+        if stopping {
+            self.playing = playing
+            NSLog("[shuyin] pip setPlaying(%d) swallowed (stopping)", playing ? 1 : 0)
+            return
+        }
+        /*
+         * 回声挡板：系统偶尔会把当前状态原样再报一遍。跟播放器真值一致就
+         * 什么都不做——以前无条件转发 playpause（toggle 语义），系统回声和
+         * 200ms 心跳真值之间一来一回，会出现「点了暂停又自己播起来」。
+         */
+        let wasPlaying = self.playing
         self.playing = playing
+        if playing == wasPlaying { return }
         send("playpause")
     }
 
-    /// 一条字幕没有「片长」，按直播处理（正无穷）：系统因此不摆 ±10 秒两颗跳转键。
+    /// 时长有限（VOD 语义）系统才画「播放/暂停」键；正无穷=直播=停止键。
+    /// 时长未知（0）时兜底 1 小时，保证按键形态不漂移；画布本身不显示进度条，
+    /// 这个值只影响系统按键的形态与 ±10 秒键（已映射成上一首/下一首）。
     func pictureInPictureControllerTimeRangeForPlayback(
         _ controller: AVPictureInPictureController,
     ) -> CMTimeRange {
-        CMTimeRange(start: .zero, duration: .positiveInfinity)
+        let dur = duration > 0 ? duration : 3_600
+        return CMTimeRange(start: .zero, duration: CMTime(seconds: dur, preferredTimescale: 1))
     }
 
     func pictureInPictureControllerIsPlaybackPaused(
@@ -580,6 +641,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     func pictureInPictureControllerDidStopPictureInPicture(
         _ controller: AVPictureInPictureController,
     ) {
+        stopping = false
         NSLog("[shuyin] pip stopped (fg=%d)", stoppingForForeground ? 1 : 0)
         if stoppingForForeground {
             /*
@@ -635,10 +697,12 @@ public func shuyinPiPAdopt() {
 }
 
 @_cdecl("shuyin_pip_set")
-public func shuyinPiPSet(_ line: UnsafePointer<CChar>?, _ prog: Double, _ playing: Bool) {
+public func shuyinPiPSet(
+    _ line: UnsafePointer<CChar>?, _ prog: Double, _ playing: Bool, _ duration: Double,
+) {
     guard #available(iOS 15.0, *) else { return }
     let text = line.map { String(cString: $0) } ?? ""
-    ShuyinPiP.shared.set(line: text, prog: prog, playing: playing)
+    ShuyinPiP.shared.set(line: text, prog: prog, playing: playing, duration: duration)
 }
 
 @_cdecl("shuyin_pip_toggle")

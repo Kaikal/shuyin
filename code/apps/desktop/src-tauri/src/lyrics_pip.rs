@@ -40,10 +40,10 @@ mod ffi {
         unsafe { dlsym(RTLD_DEFAULT, c.as_ptr()) }
     }
 
-    type SetFn = unsafe extern "C" fn(*const c_char, f64, bool);
+    type SetFn = unsafe extern "C" fn(*const c_char, f64, bool, f64);
     type GetFn = unsafe extern "C" fn() -> bool;
 
-    pub fn set(line: &str, prog: f64, playing: bool) {
+    pub fn set(line: &str, prog: f64, playing: bool, dur: f64) {
         let p = lookup("shuyin_pip_set");
         if p.is_null() {
             crate::player::log("pip dlsym set: symbol NULL");
@@ -51,7 +51,7 @@ mod ffi {
         }
         let f: SetFn = unsafe { std::mem::transmute(p) };
         if let Ok(c) = CString::new(line) {
-            unsafe { f(c.as_ptr(), prog, playing) };
+            unsafe { f(c.as_ptr(), prog, playing, dur) };
         }
     }
 
@@ -98,14 +98,14 @@ pub fn adopt() {
 #[cfg(not(target_os = "ios"))]
 pub fn adopt() {}
 
-/// 推一帧：当前句 + 句内进度（0~1）+ 是否在播。
+/// 推一帧：当前句 + 句内进度（0~1）+ 是否在播 + 当前曲时长（秒，0=未知）。
 #[cfg(target_os = "ios")]
-pub fn update(line: &str, prog: f64, playing: bool) {
-    ffi::set(line, prog, playing);
+pub fn update(line: &str, prog: f64, playing: bool, dur: f64) {
+    ffi::set(line, prog, playing, dur);
 }
 
 #[cfg(not(target_os = "ios"))]
-pub fn update(_line: &str, _prog: f64, _playing: bool) {}
+pub fn update(_line: &str, _prog: f64, _playing: bool, _dur: f64) {}
 
 /// 开/关，返回关完之后应该显示的状态。非 iOS 恒 false。
 #[cfg(target_os = "ios")]

@@ -1,9 +1,10 @@
-//! iOS 灵动岛 / 锁屏实时活动（Live Activity）。
+//! iOS 灵动岛 / 锁屏：**自绘 Live Activity（酷狗同款机制）+ 系统 Now Playing 卡共存**。
 //!
-//! 分工：
-//!   · 这里只管**两头接线**——把前端推来的播放状态转成 JSON 交给 Swift，
-//!     把灵动岛按钮的点击转成播放器动作；
-//!   · 真正的 ActivityKit 调用在 `src-tauri/ios/ShuyinLiveActivity.swift`。
+//! 自绘卡开着（`DRAW_OWN_CARD = true`）时本模块管两头接线：
+//!   · 把前端推来的播放状态转成 JSON 交给 Swift（`src-tauri/ios/ShuyinLiveActivity.swift`），
+//!     再落到 widget 扩展画出灵动岛 / 锁屏卡（样式照系统媒体卡重画过，2026-11-26）；
+//!   · 把灵动岛按钮的点击转成播放器动作。
+//! 系统 Now Playing 卡（`smtc::apple`）**同时存在**，负责耳机键 / 控制中心 / CarPlay。
 //!
 //! 为什么中间要过一层 Rust 而不是让前端直连 Swift：
 //!   Tauri 的 iOS 侧没有「JS → 任意 Swift 函数」的通道，要么写一个完整的
@@ -12,6 +13,13 @@
 //!
 //! 非 iOS 平台整个模块是空转的：命令照常存在（前端不用分平台判断），
 //! 只是什么都不做。
+
+/*
+ * `DRAW_OWN_CARD` 是**编译期常量**，所以「关掉自绘」的那些 `if` 分支在 rustc
+ * 眼里就是「条件恒假」——不开这条 allow 会刷一串 `unreachable_code`。
+ * 这是刻意的：两套实现留在一个文件里，靠一个常量切换。
+ */
+#![allow(unreachable_code)]
 
 use std::sync::OnceLock;
 use tauri::AppHandle;
@@ -26,25 +34,30 @@ use crate::player::Player;
 /// 没有上下文可传，只能从这里取。
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
-/// 要不要画**我们自己的**实时活动（灵动岛 + 锁屏那张卡）。
+/// 要不要画**我们自己的**实时活动（灵动岛 + 锁屏那张自绘卡）。
 ///
-/// 2026-11-25~26 的反复（记下来免得再翻烧饼）：
-///   1. 先开着 → 用户嫌锁屏两张卡（系统那张 + 我们这张）；
-///   2. 关掉 → **灵动岛点不开 App** 了。这是关键：ActivityKit 的
-///      `ActivityConfiguration` 一个 Activity 同时出「锁屏视图」和「灵动岛视图」，
-///      关掉 = 两个一起没。系统媒体会话那张卡的点击由 SpringBoard 管，
-///      第三方挂不上入口，酷狗能点开正是因为它自己有 Live Activity；
-///   3. 11-26 用户连发图要求「只要系统卡」→ 又关掉；
-///   4. 11-26 当天实测后明确：「之前都弄好的——点一下打开应用、长按展开灵动岛」，
-///      即灵动岛交互必须保留 → **最终恢复 true**。
+/// 2026-11-26 晚**最终定案 = true**。当天下午先把自绘关掉出了一版「只留系统卡」
+/// 的包去验证，用户随即拍板回来自绘——原话：「别人能实现，肯定是可以实现的，
+/// 重新写一个灵动岛功能」。查证结果也支持这个方向：
 ///
-/// 结论：**必须画**。灵动岛的「点击回 App / 长按展开」全靠这里的
-/// `Button(intent: ShuyinOpenIntent)`（`openAppWhenRun=true`），关掉就全哑。
-/// 锁屏那张的重复感改用内容解决：`LockScreenView` 压成一行约 30pt 的歌词条，
-/// 跟系统那张「封面+进度+控制」播放器卡明显不是一类东西。
-/// 关掉只会换来灵动岛全哑，不要再关。
+///   · **酷狗上的就是实时活动（ActivityKit Live Activity）**——设置里它出现在
+///     「实时活动」名单里，网上的玩机教程全都是这么教的。所以「点一下进 App、
+///     长按展开」本来就是 Live Activity 的标准行为，不是系统卡给的；
+///   · **系统那张 Now Playing 胶囊的点击归 SpringBoard 管**：点一下只会展开，
+///     第三方没有任何 API 能把「进 App」挂上去。只留系统卡的版本做不到
+///     「点一下进应用」，这条路是死的；
+///   · 用户嘴里的「系统卡片」指的是**长得像系统媒体卡**——所以答案不是换机制，
+///     而是**把自绘卡的 UI 重画成系统媒体卡的样子**（岛：紧凑态左声波+右封面、
+///     展开态大封面+歌名+进度+圆形播放键；见 widget/ShuyinLiveActivityWidget.swift）。
+///
+/// 11-25~26 来回翻了五次烧饼，教训就一条：**把两张卡混成一张**。
+///   ① 自绘 Live Activity（本模块 + widget 扩展）：能自定义内容、能挂点击 intent，
+///      代价是锁屏多一张卡（已压成一行歌词条弱化）；
+///   ② 系统 Now Playing 卡（`smtc::apple`，MPNowPlayingInfoCenter）：永远在，
+///      但内容和点击都不可定制。
+/// 两者长期共存：②负责耳机键/控制中心/CarPlay，①负责灵动岛展示与交互。
+/// **不要再把 DRAW_OWN_CARD 关掉**——关掉 = 岛上点不开 App（系统卡替代不了）。
 pub const DRAW_OWN_CARD: bool = true;
-
 
 /// 一次播放状态的快照，字段名与 Swift 侧的 `ShuyinLive.Payload` 一一对应。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -111,9 +124,17 @@ pub fn init(app: &AppHandle) {
         if DRAW_OWN_CARD {
             /* 锁屏歌词：App 进后台后 JS 会被冻住，词得由原生自己往前推 */
             spawn_lyric_ticker();
-            /* 状态对账：换歌 / 暂停发生在 JS 冻着的时候，岛和锁屏卡得由原生自己跟上 */
-            spawn_state_ticker();
         }
+        /*
+         * 状态对账**永远要跑**（不只是自绘卡的时候）。
+         *
+         * 自绘卡关了，系统那张「正在播放」卡照样要知道「歌到底了 / 被暂停了」：
+         *   · 原生接下一首 → `player::card_for` 已经自己推了 smtc，不劳这条；
+         *   · 但 `Cmd::Stop`、曲终接不上、`ended` 这些只改 `playing` 标志、
+         *     没有任何一条推 smtc。不跑对账，锁屏就一直是「在播 + 进度条走到头」。
+         * 700ms 一次只读原子量，状态没变就 continue，代价可以忽略。
+         */
+        spawn_state_ticker();
         /* 桌面歌词（画中画）：200ms 一帧，只在用户开着的时候跑 */
         spawn_pip_ticker();
     }
@@ -384,9 +405,18 @@ pub fn spawn_pip_ticker() {
         }
         let Some(app) = APP.get() else { continue };
         let Some(p) = app.try_state::<Player>() else { continue };
-        let (playing, pos) = p.playing_and_pos();
+        /*
+         * state_lite（不消费一次性标记）多带一个时长：画中画窗口上系统那颗
+         * 播放键是「播放/暂停」还是「停止」，取决于 timeRangeForPlayback 给的
+         * 时长是不是有限值——正无穷（直播语义）= 停止键，用户 2026-11-26 报的
+         * 「暂停按钮变成停止按钮」就是它。把真实时长递过去就能画对。
+         */
+        let (playing, pos, dur) = {
+            let (_, playing, pos, dur) = p.state_lite();
+            (playing, pos, dur)
+        };
         let (line, prog) = line_progress_at(pos);
-        crate::lyrics_pip::update(&line, prog, playing);
+        crate::lyrics_pip::update(&line, prog, playing, dur);
     });
 }
 
@@ -624,14 +654,17 @@ pub fn push_track(
     }
 }
 
-/// 状态对账线程：**原生自己发现「换歌了 / 暂停了」就直接推一次**。
+/// 状态对账线程：**原生自己发现「暂停了 / 歌到底了」就直接推一次系统卡**。
 ///
-/// 为什么不能只靠前端推：iOS 后台会把 WebView 的 JS 冻住，而原生接歌、系统
-/// 中断、耳机线控这些动作都发生在 JS 冻着的时候。前端那一推要等用户打开 App
-/// 才来——在这之前灵动岛和锁屏卡全是旧的（用户看到的就是「岛上的播放键不跟
-/// App 联动」「倒计时走完了歌还在放」）。
+/// 为什么不能只靠前端推：iOS 后台会把 WebView 的 JS 冻住，而曲终、`Cmd::Stop`、
+/// 系统中断、耳机线控这些动作都发生在 JS 冻着的时候。前端那一推要等用户打开 App
+/// 才来——在这之前锁屏就是「倒计时走完了歌还在放」。
 ///
-/// 700ms 是「够快」和「别烧更新预算」的折中：只在**状态真的变了**（下标 /
+/// 自绘卡关掉（`DRAW_OWN_CARD = false`）之后这条**照样要跑**：它落到的是
+/// `smtc::refresh_state`，也就是系统那张「正在播放」卡。换歌那一步已经由
+/// `player::card_for` 推过 smtc，这里只管播放态和时长。
+///
+/// 700ms 是「够快」和「别烧预算」的折中：只在**状态真的变了**（下标 /
 /// 播放态 / 时长）时才推，正常播一首歌期间一次都不推（进度由系统自己走秒）。
 #[cfg(target_os = "ios")]
 pub fn spawn_state_ticker() {
@@ -650,6 +683,18 @@ pub fn spawn_state_ticker() {
                 continue;
             }
             if idx != last_idx {
+                /*
+                 * 不自绘卡：换歌这条**已经由 `player::card_for` 推过了**——它是
+                 * 原生接歌的唯一收口，本地接的、现场取链接的都走它，里面
+                 * `smtc::update` 带的就是新曲的真值。这里再走一遍只会把封面
+                 * 白拉两次（card_for 一次、这里一次），还要和它抢 LAST。
+                 */
+                if !DRAW_OWN_CARD {
+                    last_idx = idx;
+                    last_playing = playing;
+                    last_dur = dur;
+                    continue;
+                }
                 /*
                  * 元信息得先拿到：`meta_of` 查的是原料链 / 直链表，启动那一两秒
                  * 里可能还没递到。拿不到就**不动 last_idx**，下一轮再试。
@@ -779,20 +824,27 @@ fn push_native_state(app: &AppHandle, playing: bool) {
     /* 走 `state_lite`：`snapshot()` 会把「曲终」这个一次性标记读走 */
     let (_, _, pos, dur) = p.state_lite();
     let now = unix_now();
-    {
-        /* guard 必须圈在这个块里：push_last() 还要再锁一次（Mutex 不可重入） */
-        let Ok(mut g) = LAST.lock() else { return };
-        let Some(last) = g.as_mut() else { return };
-        last.playing = playing;
-        last.position = pos.max(0.0);
-        if dur > 0.0 {
-            last.duration = dur;
+    /*
+     * LAST 可能压根不存在（不自绘卡的版本：`live_activity_sync` 直接空转，
+     * 没人往里写）。所以这一段**不能**用 `else { return }` 掉出去——
+     * 下面那行推系统卡的动作跟 LAST 没关系，必须照跑。
+     */
+    if let Ok(mut g) = LAST.lock() {
+        if let Some(last) = g.as_mut() {
+            last.playing = playing;
+            last.position = pos.max(0.0);
+            if dur > 0.0 {
+                last.duration = dur;
+            }
+            last.anchor = now;
         }
-        last.anchor = now;
     }
     /* 锁屏那张系统卡（Now Playing）也一起翻：它不经过 liveactivity 这条链路 */
     crate::smtc::refresh_state(playing, pos.max(0.0), dur);
-    push_last();
+    /* 自绘卡关着就没有可推的载荷，别白序列化一份 JSON */
+    if DRAW_OWN_CARD {
+        push_last();
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -867,6 +919,15 @@ mod ffi {
     }
 
     pub fn sync(json: &str) {
+        /*
+         * 最后一道闸：`shuyin_live_sync` 落到 Swift 之后，没有活着的 activity 时
+         * **会自己 `Activity.request` 一条新的**（见 `ShuyinLive.apply`）。
+         * 也就是说漏推一次就等于把自绘卡又造回来——用户要的「只要系统卡」当场作废。
+         * 所以不自绘的版本在这里直接掐掉，别依赖上游每条路径都记得早退。
+         */
+        if !super::DRAW_OWN_CARD {
+            return;
+        }
         type Fn = unsafe extern "C" fn(*const c_char);
         let p = lookup("shuyin_live_sync");
         if p.is_null() {

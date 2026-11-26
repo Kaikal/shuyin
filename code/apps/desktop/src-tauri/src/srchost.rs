@@ -201,18 +201,27 @@ impl ScriptHost {
         if scripts.is_empty() {
             return Err("没有可用音源脚本".into());
         }
-        let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1_500));
-        let mut last = String::from("所有音源都没能取到播放地址");
+        /*
+         * 预算语义（2026-11-26「后台播放几首就停」的根因，app(4).log 定案）：
+         *
+         * 以前 budget_ms 是**整条脚本链共享的总预算**：排在第一的 K×H测试
+         * 上游搜索 hang 住，15 秒被它吃光，循环走到第二条脚本时
+         * `left.is_zero()` 直接 break——**长青SVIP 一毫秒都没分到**。表现：
+         * 后台 relay 永远只能用第一条脚本，它一挂就是全链「取链超时」→
+         * 曲终接不上 → 静音停播。日志里连续 20+ 次 "K×H测试: 取链超时"
+         * 没有一条试过第二条脚本。前台没事，因为 JS 三级兜底是逐条给时间的。
+         *
+         * 现在改成**每条脚本一份自己的预算**：上一条超时不吃下一条的份额。
+         * 全链最坏 n × budget——relay/ahead 的调用方都是后台兜底（曲终接歌、
+         * 预取下一首），多花十几秒换「接得上」是划算的；前台 JS 路径不走这里。
+         */
+        let per = Duration::from_millis(budget_ms.max(1_500));
+        let mut errs: Vec<String> = Vec::new();
         for source in scripts {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                last = format!("{last}（已超时）");
-                break;
-            }
             // 空正文十有八九是清单损坏 / 取 code 失败。直接报出来比让它
             // 去 QuickJS 里抛一个「语法错误」更容易定位。
             if source.code.trim().is_empty() {
-                last = format!("{}: 脚本正文是空的", source.label());
+                errs.push(format!("{}: 脚本正文是空的", source.label()));
                 continue;
             }
             let (tx, rx) = channel();
@@ -224,21 +233,26 @@ impl ScriptHost {
                     quality: quality.to_string(),
                     raw: raw.clone(),
                     cookies: cookies.clone(),
-                    budget_ms: left.as_millis() as u64,
+                    budget_ms: per.as_millis() as u64,
                     reply: tx,
                 })
                 .is_err()
             {
                 return Err("音源宿主已退出".into());
             }
-            match rx.recv_timeout(left + Duration::from_millis(800)) {
+            match rx.recv_timeout(per + Duration::from_millis(800)) {
                 Ok(Ok(url)) if !url.is_empty() => return Ok(url),
-                Ok(Ok(_)) => last = format!("{}: 返回了空地址", source.label()),
-                Ok(Err(e)) => last = format!("{}: {e}", source.label()),
-                Err(_) => last = format!("{}: 取链超时", source.label()),
+                Ok(Ok(_)) => errs.push(format!("{}: 返回了空地址", source.label())),
+                Ok(Err(e)) => errs.push(format!("{}: {e}", source.label())),
+                Err(_) => errs.push(format!("{}: 取链超时", source.label())),
             }
         }
-        Err(last)
+        /*
+         * 失败要**报全**：以前只留最后一条，relay 日志里只剩
+         * "K×H测试: 取链超时（已超时）"，第二条到底试没试过、为什么死，
+         * 日志完全看不出来——2026-11-26 那轮排查就是这么被带偏的。
+         */
+        Err(errs.join("；"))
     }
 }
 
