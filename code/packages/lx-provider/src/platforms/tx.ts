@@ -608,13 +608,27 @@ export function createTxApi(client: HttpClient): PlatformApi {
       // 一次给全量（歌单最多几千首，这一个接口就能拿完）
       // 注意：musicu 的 `PlaylistInfoServer.GetDetail` 匿名态一律 code 500003，只有这个老 fcg 能用；
       // 私有/已删歌单会回 `{code:0, subcode:4000, msg:'check privacy error!'}`，必须抛出来而不是当空歌单。
+      //
+      // 2026-11-26 实测：**登录用户自己的歌单匿名打开也一律回 privacy error**——
+      // QQ 收紧了这个老接口的匿名访问（列歌单那条 `fcg_user_created_diss` 一直
+      // 是带票据的，所以列表能看到、点开全报私密）。修法和网页版 y.qq.com 对齐：
+      // 有登录态就带 `loginUin=<uin>` + 票据算出的 `g_tk`（cookie 由宿主按域名
+      // 自动附上）；没登录保持匿名参数，只能开公开歌单。
+      const a = authOf(client)
+      const authQ = a
+        ? `&g_tk=${gtkOf(a.key)}&loginUin=${a.uin}&hostUin=0`
+        : `&g_tk=5381&loginUin=0&hostUin=0`
       const j = await getJson(client,
         `https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0`
-        + `&disstid=${encodeURIComponent(id)}&format=json&g_tk=5381&loginUin=0&hostUin=0`
+        + `&disstid=${encodeURIComponent(id)}&format=json${authQ}`
         + `&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0`,
         { headers: HEADERS })
       const cd = j?.cdlist?.[0]
-      if (!cd) throw new Error(j?.msg === 'check privacy error!' ? '该歌单已被设为私密' : `歌单不存在或已下架（${j?.code ?? '?'}）`)
+      if (!cd) {
+        throw new Error(j?.msg === 'check privacy error!'
+          ? (a ? '该歌单已被设为私密' : '该歌单已被设为私密（登录 QQ 音乐账号后可打开自己的歌单）')
+          : `歌单不存在或已下架（${j?.code ?? '?'}）`)
+      }
       const songs: SearchSong[] = (cd.songlist ?? []).map(normalize)
       return {
         id: String(cd.disstid ?? id),
