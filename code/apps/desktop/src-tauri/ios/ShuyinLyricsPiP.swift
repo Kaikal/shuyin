@@ -442,14 +442,14 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
             x: drawX, y: (h - lineH) / 2,
             width: textW + fontPt, height: lineH,
         )
-        let base: [NSAttributedString.Key: Any] = [
+        let textAttrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: UIColor(white: 1, alpha: line.isEmpty ? 0.34 : 0.62),
             .paragraphStyle: para,
             .kern: fontPt * 0.012,
             .shadow: shadow,
         ]
-        (text as NSString).draw(in: rect, withAttributes: base)
+        (text as NSString).draw(in: rect, withAttributes: textAttrs)
 
         /*
          * 已唱部分：按整句宽度切一条竖线，把同一句再画一遍暖金。
@@ -550,22 +550,41 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         _ controller: AVPictureInPictureController,
     ) -> CMTimeRange {
         /*
-         * 一条字幕没有「片长」。
+         * 一条字幕没有「片长」，这里按**直播**处理（时长正无穷）。
          *
-         * 这里给一个很长但有限的区间（而不是 `.positiveInfinity`）：
-         * 正无穷会让系统在窗口上挂一个常驻的 LIVE 徽标，比进度条更扎眼；
-         * 有限时长的那条进度线只在控制条浮出来时才看得到，平时是干净的。
+         * 两个原因：
+         *   · 有限时长会在控制条上画一条「一小时只走了一点点」的假进度线；
+         *   · 只有直播语义下系统才不会摆出 ±10 秒那两颗跳转键——
+         *     用户明确说「上一曲下一曲不能自绘制就不要这两个按钮」。
+         *     给 3600 秒时它们会出现，因为系统认为「1 小时的内容可以跳 10 秒」。
          *
-         * ±10 秒那两颗键已经去掉——`skipByInterval` 是 optional 方法，
-         * 不实现系统就不画。用户明确说「上一曲下一曲不能自绘制就不要这两个按钮」。
+         * 代价是控制条上会有一个小的 LIVE 字样，比两颗永远用不上的跳转键干净。
          */
-        CMTimeRange(start: .zero, duration: CMTime(seconds: 3600, preferredTimescale: 600))
+        CMTimeRange(start: .zero, duration: .positiveInfinity)
     }
 
     func pictureInPictureControllerIsPlaybackPaused(
         _ controller: AVPictureInPictureController,
     ) -> Bool {
         !playing
+    }
+
+    /// 快进 / 快退。
+    ///
+    /// **这个方法必须留着**：`AVPictureInPictureSampleBufferPlaybackDelegate` 在
+    /// iOS 26 SDK 里把它标成了 required（旧 SDK 里是 optional），删掉会直接
+    /// `type does not conform to protocol` 编译失败——2026-11-26 那次构建就挂在这。
+    ///
+    /// 但「按钮不显示」是另一条路：`pictureInPictureControllerTimeRangeForPlayback`
+    /// 返回的是**正无穷**（直播语义），系统因此不会摆出 ±10 秒两颗键。
+    /// 万一某些系统版本仍然画出来，点下去也不会白点——映射成上一首 / 下一首。
+    func pictureInPictureController(
+        _ controller: AVPictureInPictureController,
+        skipByInterval skipInterval: CMTime,
+        completion completionHandler: @escaping () -> Void,
+    ) {
+        send(skipInterval.seconds >= 0 ? "next" : "prev")
+        completionHandler()
     }
 
     func pictureInPictureController(
