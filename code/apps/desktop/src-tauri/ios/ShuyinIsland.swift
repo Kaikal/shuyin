@@ -326,3 +326,15 @@ public func shuyinIslandOn() -> Bool {
     DispatchQueue.main.sync { out = ShuyinIsland.shared.wanted }
     return out
 }
+
+/// 系统有没有允许实时活动（设置 → 疏音 → 实时活动）。
+/// 关了的话 Activity.request 起不来，灵动岛永远不出现——设置页把这个状态
+/// 透出去，别让用户对着系统「正在播放」卡以为是我们的灵动岛坏了。
+@_cdecl("shuyin_island_enabled")
+public func shuyinIslandEnabled() -> Bool {
+    guard #available(iOS 16.2, *) else { return false }
+    if Thread.isMainThread { return ActivityAuthorizationInfo().areActivitiesEnabled }
+    var out = false
+    DispatchQueue.main.sync { out = ActivityAuthorizationInfo().areActivitiesEnabled }
+    return out
+}

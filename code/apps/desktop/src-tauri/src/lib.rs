@@ -812,9 +812,14 @@ fn island_toggle() -> bool {
     on
 }
 
+/// iOS 返回 {on, enabled}：enabled=false = 系统设置没允许实时活动，
+/// 我们的 Live Activity 起不来、岛上只会挂着系统「正在播放」卡（点按不会开 App）。
 #[tauri::command]
-fn island_state() -> bool {
-    crate::island::on()
+fn island_state() -> serde_json::Value {
+    serde_json::json!({
+        "on": crate::island::on(),
+        "enabled": crate::island::enabled(),
+    })
 }
 
 #[tauri::command]

@@ -22,21 +22,26 @@ interface IslandState {
   shown?: boolean
   /** 「显示在其他应用上层」给没给（仅安卓需要；缺了窗挂不起来） */
   saw?: boolean
+  /** 系统设置里「实时活动」允许了没有（仅 iOS；false = Live Activity 起不来） */
+  enabled?: boolean
 }
 
 export function DynamicIslandSection() {
   const [on, setOn] = useState(false)
   /** 缺哪项权限（null = 旧包问不出来）；iOS 永远不需要 */
   const [saw, setSaw] = useState<boolean | null>(isAndroid ? null : true)
+  /** iOS 系统级实时活动授权（null = 旧包问不出来） */
+  const [enabled, setEnabled] = useState<boolean | null>(isIOS ? null : true)
 
   const read = useCallback(() => {
     void bridge.invoke<IslandState>('island_state')
       .then(r => {
-        /* iOS 的命令返回布尔值，安卓返回对象——两种都要接 */
+        /* iOS 的命令返回布尔值（旧包）或对象 {on,enabled}，安卓返回对象——都要接 */
         if (typeof r === 'boolean') { setOn(r); return }
         if (!r) return
         setOn(!!r.on)
         if (typeof r.saw === 'boolean') setSaw(r.saw)
+        if (typeof r.enabled === 'boolean') setEnabled(r.enabled)
       })
       .catch(() => { /* 旧包没有这条命令：保持原样 */ })
   }, [])
@@ -73,6 +78,14 @@ export function DynamicIslandSection() {
           toast(isIOS
             ? '灵动岛已开启：播放时胶囊出现在灵动岛上，点一下回到疏音，长按展开'
             : '灵动岛已开启：播放时贴在摄像头挖孔上，点一下回疏音，长按展开')
+          /* 开了开关但系统没允许实时活动：岛上只会挂系统「正在播放」卡 */
+          void bridge.invoke<IslandState>('island_state')
+            .then(s => {
+              if (s && typeof s === 'object' && s.enabled === false) {
+                toast('系统设置 → 疏音 → 实时活动 未允许，灵动岛不会出现')
+              }
+            })
+            .catch(() => {})
         }
       })
       .catch(() => { read() })
@@ -102,6 +115,14 @@ export function DynamicIslandSection() {
             >
               去设置
             </button>
+          </span>
+        </div>
+      )}
+      {isIOS && enabled === false && (
+        <div className="set-row">
+          <span className="set-label">系统未允许实时活动，灵动岛不会出现</span>
+          <span className="set-ctl">
+            <span className="set-sub">系统设置 → 疏音 → 实时活动</span>
           </span>
         </div>
       )}

@@ -79,6 +79,17 @@ mod ffi {
         unsafe { f() }
     }
 
+    /// 系统设置里「实时活动」允许了没有（false = 我们的 activity 根本起不来）。
+    pub fn enabled() -> bool {
+        let p = lookup("shuyin_island_enabled");
+        if p.is_null() {
+            crate::player::log("island dlsym enabled: symbol NULL");
+            return false;
+        }
+        let f: GetFn = unsafe { std::mem::transmute(p) };
+        unsafe { f() }
+    }
+
     /// App 启动时调一次：点亮 ShuyinIsland.swift 的整个 object，
     /// 防 -dead_strip 剥掉 `shuyin_island_set` 等符号（开关会静默失效）。
     pub fn adopt() {
@@ -133,4 +144,15 @@ pub fn on() -> bool {
 #[cfg(not(target_os = "ios"))]
 pub fn on() -> bool {
     false
+}
+
+/// 系统允许实时活动了没有。非 iOS 恒 true（安卓没有这个概念）。
+#[cfg(target_os = "ios")]
+pub fn enabled() -> bool {
+    ffi::enabled()
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn enabled() -> bool {
+    true
 }
