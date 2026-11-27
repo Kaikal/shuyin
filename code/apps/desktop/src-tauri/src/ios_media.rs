@@ -163,11 +163,43 @@ pub fn spawn_island_ticker() {
         let Some(p) = app.try_state::<Player>() else { continue };
         let (idx, playing, pos, dur) = p.state_lite();
         if idx < 0 {
-            crate::island::update("", "", pos, false, dur);
+            crate::island::update("", "", pos, false, dur, &[]);
             continue;
         }
         let (title, artist) = crate::smtc::last_meta();
-        crate::island::update(&title, &artist, pos, playing, dur);
+
+        /*
+         * 封面：系统卡那份 cover（网址→coverart 落盘文件）只在**换歌**时读一次
+         * 字节过 FFI，其余心跳传空切片（Swift 沿用上一张）。每 500ms 拖几百 KB
+         * 过 dlsym 纯属浪费，而且 ContentState 塞大图也吃 update 配额。
+         */
+        static LAST_ART: std::sync::Mutex<(String, Vec<u8>)> =
+            std::sync::Mutex::new((String::new(), Vec::new()));
+        let cover = crate::smtc::last_cover();
+        let mut art: Vec<u8> = Vec::new();
+        let changed = LAST_ART.lock().map(|g| g.0 != cover).unwrap_or(false);
+        if !cover.is_empty() && changed {
+            let local = if cover.contains("://") {
+                crate::coverart::lookup(&cover).map(|c| c.path)
+            } else {
+                Some(cover.clone())
+            };
+            if let Some(path) = local {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if !bytes.is_empty() && bytes.len() < 4 * 1024 * 1024 {
+                        art = bytes;
+                    }
+                }
+            }
+            /* 没读到也记下网址：别每 500ms 重试一次文件 IO */
+            if let Ok(mut g) = LAST_ART.lock() {
+                g.0 = cover.clone();
+                if !art.is_empty() {
+                    g.1 = art.clone();
+                }
+            }
+        }
+        crate::island::update(&title, &artist, pos, playing, dur, &art);
     });
 }
 

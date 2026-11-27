@@ -806,9 +806,20 @@ fn pip_lyric_state() -> bool {
 /// 挖孔）上，点一下打开疏音、长按展开，展开态由 Widget 扩展渲染。安卓那条
 /// 走 Kotlin `DynamicIsland`（`island_toggle` 命令同名不同实现）。
 #[tauri::command]
-fn island_toggle() -> bool {
+fn island_toggle(_app: AppHandle) -> bool {
     let on = crate::island::toggle();
     crate::player::log(&format!("island.toggle -> {on}"));
+    /*
+     * 系统卡与灵动岛互斥（岛上挤一颗 minimal 小黑点，2026-11-27 实测）：
+     * 开 → 立刻撤系统卡；关 → 立刻按当前播放态重发系统卡，锁屏别空着。
+     */
+    #[cfg(target_os = "ios")]
+    if on {
+        crate::smtc::suppress_now_playing();
+    } else if let Some(p) = _app.try_state::<crate::player::Player>() {
+        let (_, playing, pos, dur) = p.state_lite();
+        crate::smtc::refresh_state(playing, pos, dur);
+    }
     on
 }
 

@@ -20,6 +20,9 @@ struct IslandAttributes: ActivityAttributes {
         var pos: Double
         /// 当前曲时长（秒，0=未知）。
         var dur: Double
+        /// 专辑封面（JPEG 字节，已由主 App 压到 ≤256px）。nil=没有/沿用旧的。
+        /// Codable 跨进程直传，几百 KB 换一次歌可以接受。
+        var art: Data?
     }
     /// 主题色（hex，系统画胶囊装饰用）。activity 的固定属性，起来后不能改。
     var theme: String

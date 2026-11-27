@@ -301,6 +301,17 @@ pub fn refresh_state(playing: bool, pos: f64, dur: f64) {
     apple::reapply(playing, pos, dur);
 }
 
+/// 灵动岛开关打开后的即时对账：立刻撤系统「正在播放」卡（岛上小黑点的根源）。
+/// 关闭方向不用这里管——`apply` 在下一次切歌/暂停恢复时看到开关已关就自动
+/// 重发系统卡（state ticker 也在兜底）。
+#[cfg(target_os = "ios")]
+pub fn suppress_now_playing() {
+    apple::suppress_now_playing();
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn suppress_now_playing() {}
+
 /// 把音频会话重新要回来（iOS）。resume 之前调一次。
 ///
 /// 为什么需要：暂停得久了（尤其熄屏、切到别的 App），iOS 会把我们的
@@ -341,6 +352,12 @@ pub fn clear_route_intent() {}
 #[cfg(target_os = "ios")]
 pub fn last_meta() -> (String, String) {
     apple::last_meta()
+}
+
+/// 系统卡当前用的封面（灵动岛心跳换封面字节用）。
+#[cfg(target_os = "ios")]
+pub fn last_cover() -> String {
+    apple::last_cover()
 }
 
 /* ------------------------------------------------------------------ */
@@ -760,6 +777,30 @@ mod apple {
             .unwrap_or_else(|| (String::new(), String::new()))
     }
 
+    /// 当前系统卡用的封面（网址或本地路径）。灵动岛心跳拿它换封面字节。
+    pub fn last_cover() -> String {
+        let Ok(g) = LAST.lock() else { return String::new() };
+        g.as_ref().map(|x| x.cover.clone()).unwrap_or_default()
+    }
+
+    /// 灵动岛开关刚打开时的即时撤卡：别等下一次 apply（切歌/暂停恢复才触发），
+    /// 用户一开开关，岛旁边那颗 minimal 小黑点就该消失。
+    /// 开关没开时是空操作（幂等，乱调无副作用）。
+    pub fn suppress_now_playing() {
+        if !crate::island::on() {
+            return;
+        }
+        unsafe {
+            if let Some(np_cls) = cls("MPNowPlayingInfoCenter") {
+                let center: *mut AnyObject = objc2::msg_send![np_cls, defaultCenter];
+                if !center.is_null() {
+                    let _: () = objc2::msg_send![center, setNowPlayingInfo: nil];
+                }
+            }
+        }
+        crate::player::log("smtc: now playing suppressed (island on)");
+    }
+
     /// ♥ 的实心/空心（`likeCommand.isActive`）。类或命令拿不到时静默跳过。
     pub fn set_like(on: bool) {
         unsafe {
@@ -1098,33 +1139,46 @@ mod apple {
                 return;
             };
             let center: Retained<AnyObject> = objc2::msg_send![np_cls, defaultCenter];
-            let _: () = objc2::msg_send![&center, setNowPlayingInfo: &*info];
             /*
-             * 显式告诉系统「现在是在播还是暂停」。
-             *
-             * 只给 PlaybackRate 是不够的：锁屏/控制中心那颗键画 ⏸ 还是 ▶，
-             * 认的是 `playbackState`（1=playing 2=paused）。缺了它，系统只在
-             * 自己认为合适的时候才按速率改图标，实测就是「声音在放，锁屏还画 ▶」。
+             * 灵动岛（Live Activity）开着时压掉系统「正在播放」卡：
+             * nowPlayingInfo 只要挂着，系统就把它当一条**系统级实时活动**占一个
+             * 岛位——我们的胶囊 compact 旁边挤一颗 minimal 小黑点（2026-11-27
+             * 用户实测截图），而且没有公开 API 只从岛上摘。压掉它，岛上只剩
+             * 我们的胶囊；锁屏/控制中心由 Live Activity 的锁屏卡接管（大封面
+             * + 进度 + 播控，IslandWidget 按系统排版画的）。
+             * LAST 照常记：灵动岛心跳的 last_meta/last_cover 还靠它。
              */
-            let st: isize = if playing { 1 } else { 2 };
-            let _: () = objc2::msg_send![&center, setPlaybackState: st];
+            if crate::island::on() {
+                let _: () = objc2::msg_send![&center, setNowPlayingInfo: nil];
+            } else {
+                let _: () = objc2::msg_send![&center, setNowPlayingInfo: &*info];
+                /*
+                 * 显式告诉系统「现在是在播还是暂停」。
+                 *
+                 * 只给 PlaybackRate 是不够的：锁屏/控制中心那颗键画 ⏸ 还是 ▶，
+                 * 认的是 `playbackState`（1=playing 2=paused）。缺了它，系统只在
+                 * 自己认为合适的时候才按速率改图标，实测就是「声音在放，锁屏还画 ▶」。
+                 */
+                let st: isize = if playing { 1 } else { 2 };
+                let _: () = objc2::msg_send![&center, setPlaybackState: st];
 
-            /*
-             * ♥ 的实心/空心。
-             *
-             * 系统只认 `likeCommand.isActive`，卡片字典里写什么都没有这一格
-             * （`MPNowPlayingInfoPropertyIsLiveStream` 那些是别的东西）。
-             * 这一句缺了就是「收藏成功，心还是空心」——Android 那边是自绘通知，
-             * 换个图标就行，iOS 只能靠这条。
-             */
-            /*
-             * 注意：`likeCommand` 是 **MPRemoteCommandCenter** 的方法，不是
-             * MPNowPlayingInfoCenter 的（`center` 上面那个正是后者）。向错的
-             * 类发这个选择器不是编译错——裸 msg_send 在编译期不校验——而是
-             * 运行时 `unrecognized selector` 直接崩。这里回到 `set_like`，
-             * 它自己去拿正确的单例。
-             */
-            set_like(fav);
+                /*
+                 * ♥ 的实心/空心。
+                 *
+                 * 系统只认 `likeCommand.isActive`，卡片字典里写什么都没有这一格
+                 * （`MPNowPlayingInfoPropertyIsLiveStream` 那些是别的东西）。
+                 * 这一句缺了就是「收藏成功，心还是空心」——Android 那边是自绘通知，
+                 * 换个图标就行，iOS 只能靠这条。
+                 */
+                /*
+                 * 注意：`likeCommand` 是 **MPRemoteCommandCenter** 的方法，不是
+                 * MPNowPlayingInfoCenter 的（`center` 上面那个正是后者）。向错的
+                 * 类发这个选择器不是编译错——裸 msg_send 在编译期不校验——而是
+                 * 运行时 `unrecognized selector` 直接崩。这里回到 `set_like`，
+                 * 它自己去拿正确的单例。
+                 */
+                set_like(fav);
+            }
 
             /* 记下元信息：锁屏按键后要在原地重推状态（见 reapply） */
             if let Ok(mut g) = LAST.lock() {

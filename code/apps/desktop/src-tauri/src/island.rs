@@ -46,11 +46,21 @@ mod ffi {
         unsafe { dlsym(RTLD_DEFAULT, c.as_ptr()) }
     }
 
-    /// (title, artist, pos, playing, dur)
-    type SetFn = unsafe extern "C" fn(*const c_char, *const c_char, f64, bool, f64);
+    /// (title, artist, pos, playing, dur, art_ptr, art_len)
+    /// art 是封面原图字节（JPEG/PNG 都行，Swift 侧自己压），只在换歌时传一次，
+    /// 其余心跳传空切片——Swift 保留上一张，避免每 500ms 拖几十 KB 过 FFI。
+    type SetFn = unsafe extern "C" fn(
+        *const c_char, // title
+        *const c_char, // artist
+        f64,           // pos
+        bool,          // playing
+        f64,           // dur
+        *const u8,     // art bytes
+        usize,         // art len
+    );
     type GetFn = unsafe extern "C" fn() -> bool;
 
-    pub fn set(title: &str, artist: &str, pos: f64, playing: bool, dur: f64) {
+    pub fn set(title: &str, artist: &str, pos: f64, playing: bool, dur: f64, art: &[u8]) {
         let p = lookup("shuyin_island_set");
         if p.is_null() {
             crate::player::log("island dlsym set: symbol NULL");
@@ -59,7 +69,12 @@ mod ffi {
         let f: SetFn = unsafe { std::mem::transmute(p) };
         let Ok(t) = CString::new(title) else { return };
         let Ok(a) = CString::new(artist) else { return };
-        unsafe { f(t.as_ptr(), a.as_ptr(), pos, playing, dur) };
+        let art_ptr = if art.is_empty() {
+            std::ptr::null::<u8>()
+        } else {
+            art.as_ptr()
+        };
+        unsafe { f(t.as_ptr(), a.as_ptr(), pos, playing, dur, art_ptr, art.len()) };
     }
 
     pub fn toggle() -> bool {
@@ -114,15 +129,16 @@ pub fn adopt() {
 #[cfg(not(target_os = "ios"))]
 pub fn adopt() {}
 
-/// 推一帧：歌名 / 歌手 / 播放位置（秒）/ 是否在播 / 当前曲时长（秒）。
+/// 推一帧：歌名 / 歌手 / 播放位置（秒）/ 是否在播 / 当前曲时长（秒）/
+/// 封面字节（只在换歌时给，其余传 `&[]` 表示沿用上一张）。
 /// Swift 侧自己做节流：内容没变不 update（Live Activity 的 update 有系统配额）。
 #[cfg(target_os = "ios")]
-pub fn update(title: &str, artist: &str, pos: f64, playing: bool, dur: f64) {
-    ffi::set(title, artist, pos, playing, dur);
+pub fn update(title: &str, artist: &str, pos: f64, playing: bool, dur: f64, art: &[u8]) {
+    ffi::set(title, artist, pos, playing, dur, art);
 }
 
 #[cfg(not(target_os = "ios"))]
-pub fn update(_title: &str, _artist: &str, _pos: f64, _playing: bool, _dur: f64) {}
+pub fn update(_title: &str, _artist: &str, _pos: f64, _playing: bool, _dur: f64, _art: &[u8]) {}
 
 /// 开/关，返回关完之后应该显示的状态。非 iOS 恒 false。
 #[cfg(target_os = "ios")]

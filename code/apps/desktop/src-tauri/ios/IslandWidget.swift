@@ -2,6 +2,7 @@ import ActivityKit
 import AppIntents
 import CoreFoundation
 import SwiftUI
+import UIKit
 import WidgetKit
 
 /// 灵动岛 Live Activity 的 Widget 扩展侧。
@@ -47,16 +48,15 @@ struct ShuyinIslandWidgets: WidgetBundle {
 struct ShuyinIslandLive: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: IslandAttributes.self) { context in
-            /* 锁屏上的卡片（Live Activity 同时出现在灵动岛和锁屏，共用一份 state） */
+            /* 锁屏上的卡片：照系统媒体卡排版画（大封面 + 歌名 + 进度） */
             IslandLockView(s: context.state)
         } dynamicIsland: { context in
             DynamicIsland {
                 let s = context.state
+                /* 展开：大封面在左，歌名/歌手在右——系统 Now Playing 的排版 */
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: "music.note")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(islandAccent)
-                        .padding(.leading, 4)
+                    islandArt(s, side: 44, corner: 10)
+                        .padding(.leading, 2)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -82,18 +82,37 @@ struct ShuyinIslandLive: Widget {
                     .padding(.top, 2)
                 }
             } compactLeading: {
-                Image(systemName: "waveform")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(islandAccent)
+                /* 封面缩略图：跟系统卡一样的形态（点击打开 App 是系统默认） */
+                islandArt(context.state, side: 22, corner: 6)
             } compactTrailing: {
                 Image(systemName: context.state.playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(islandAccent)
             } minimal: {
-                Image(systemName: "waveform")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(islandAccent)
+                islandArt(context.state, side: 18, corner: 5)
             }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 封面                                                                */
+/* ------------------------------------------------------------------ */
+
+/// 专辑封面缩略图；没有封面时退回波形图标（金色，跟主题色走）。
+private func islandArt(_ s: IslandAttributes.ContentState, side: CGFloat, corner: CGFloat) -> some View {
+    Group {
+        if let d = s.art, let img = UIImage(data: d) {
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFill()
+                .frame(width: side, height: side)
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        } else {
+            Image(systemName: "waveform")
+                .font(.system(size: side * 0.6, weight: .semibold))
+                .foregroundColor(islandAccent)
+                .frame(width: side, height: side)
         }
     }
 }
@@ -173,22 +192,21 @@ private struct IslandLockView: View {
     let s: IslandAttributes.ContentState
 
     var body: some View {
+        /* 照系统锁屏媒体卡的排版：左封面、右歌名/歌手，底下一条进度 */
         HStack(spacing: 12) {
-            Image(systemName: "music.note")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundColor(islandAccent)
-            VStack(alignment: .leading, spacing: 2) {
+            islandArt(s, side: 52, corner: 10)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(s.title.isEmpty ? "疏音" : s.title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                     .lineLimit(1)
                 Text(s.artist.isEmpty ? " " : s.artist)
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
+                IslandProgress(s: s)
+                    .padding(.top, 4)
             }
-            Spacer()
-            IslandProgress(s: s)
-                .frame(maxWidth: 120)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

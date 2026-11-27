@@ -1,6 +1,7 @@
 import ActivityKit
 import Darwin
 import Foundation
+import UIKit
 
 /// iOS「灵动岛」：ActivityKit Live Activity 的主 App 侧管理器。
 ///
@@ -62,11 +63,20 @@ final class ShuyinIsland {
     private var pos: Double = 0
     private var playing = false
     private var dur: Double = 0
+    /// 专辑封面（已压成 ≤256px JPEG）。换歌时由 Rust 传一次原图字节，压好存这里。
+    private var art: Data?
 
     /// 上次真 update 的内容指纹，一样就不推（省系统配额）。
     private var lastKey = "\u{0}"
     /// 上次推送时的位置：播放中但 |Δpos|>4s = 用户拖了进度条，必须真推。
     private var lastPos: Double = 0
+    /// 上次 update 的墙钟。播放中每 KEEPALIVE_SECS 强推一帧：Live Activity 的
+    /// 「岛上常驻权」靠持续活跃撑着——酷狗逐句推歌词就是这个效果。推得少，
+    /// 系统就把岛轮换给系统「正在播放」卡，用户看到两个胶囊来回切（2026-11-27）。
+    private var lastPushAt: TimeInterval = 0
+    /// 强推周期。5s 一次 = 720 次/小时，ProgressView(timerInterval:) 的起点
+    /// 重算即进度纠偏，不会跳条；配额实测量级可承受（酷狗更密）。
+    private static let keepaliveSecs: TimeInterval = 5
 
     /// 暂停后的撤场任务（恢复播放要 cancel）。
     private var endWork: DispatchWorkItem?
@@ -76,11 +86,12 @@ final class ShuyinIsland {
 
     // MARK: - 对外（C 入口调这些）
 
-    func set(title: String, artist: String, pos: Double, playing: Bool, dur: Double) {
+    func set(title: String, artist: String, pos: Double, playing: Bool, dur: Double, art: Data?) {
         DispatchQueue.main.async {
             self.performSet(
                 title: title, artist: artist,
                 pos: pos, playing: playing, dur: dur,
+                art: art,
             )
         }
     }
@@ -97,12 +108,16 @@ final class ShuyinIsland {
 
     // MARK: - 内部
 
-    private func performSet(title: String, artist: String, pos: Double, playing: Bool, dur: Double) {
+    private func performSet(title: String, artist: String, pos: Double, playing: Bool, dur: Double, art: Data?) {
         self.title = title.isEmpty ? "疏音" : title
         self.artist = artist
         self.pos = max(0, pos)
         self.playing = playing
         if dur > 0 { self.dur = dur }
+        /* 空字节 = 沿用上一张；新封面先压小（ContentState 塞大图吃 update 配额） */
+        if let d = art, !d.isEmpty, let img = UIImage(data: d) {
+            self.art = Self.shrunkJpeg(img)
+        }
 
         if playing {
             cancelEnd()
@@ -114,6 +129,18 @@ final class ShuyinIsland {
             pushIfNeeded()
             scheduleEnd()
         }
+    }
+
+    /// 封面压到 ≤256px JPEG（~30KB）。锁屏卡上画得出来就够了。
+    private static func shrunkJpeg(_ img: UIImage) -> Data? {
+        let side: CGFloat = 256
+        let w = img.size.width, h = img.size.height
+        guard w > 0, h > 0 else { return img.jpegData(compressionQuality: 0.7) }
+        let scale = min(side / w, side / h, 1)
+        let size = CGSize(width: w * scale, height: h * scale)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let small = renderer.image { _ in img.draw(in: CGRect(origin: .zero, size: size)) }
+        return small.jpegData(compressionQuality: 0.7)
     }
 
     private func performToggle() -> Bool {
@@ -174,18 +201,23 @@ final class ShuyinIsland {
             playing: playing,
             pos: max(0, pos),
             dur: dur,
+            art: art,
         )
     }
 
-    /// 节流推一帧。指纹：歌名|歌手|播放态|时长|（暂停时的位置 / 播放中的 seek 检测）。
+    /// 节流推一帧。指纹：歌名|歌手|播放态|时长|封面|（暂停时的位置 / 播放中的 seek 检测）。
+    /// 播放中另有 keepalive 强推：内容没变也推，撑住「岛上常驻权」（见 lastPushAt）。
     private func pushIfNeeded() {
         guard let act = activity, wanted else { return }
+        let now = Date().timeIntervalSince1970
+        let keepalive = playing && now - lastPushAt >= ShuyinIsland.keepaliveSecs
         let seeked = playing && abs(pos - lastPos) > 4
-        let key = "\(title)|\(artist)|\(playing ? 1 : 0)|\(Int(dur))|"
+        let key = "\(title)|\(artist)|\(playing ? 1 : 0)|\(Int(dur))|\(art?.count ?? 0)|"
             + (playing ? (seeked ? "seek\(Int(pos))" : "playing") : "paused@\(Int(pos))")
-        guard key != lastKey else { return }
+        guard key != lastKey || keepalive else { return }
         lastKey = key
         lastPos = pos
+        lastPushAt = now
         let state = contentState()
         Task { @MainActor in
             try? await act.update(using: state)
@@ -301,12 +333,19 @@ public func shuyinIslandSet(
     _ pos: Double,
     _ playing: Bool,
     _ dur: Double,
+    _ artPtr: UnsafePointer<UInt8>?,
+    _ artLen: Int,
 ) {
     guard #available(iOS 16.2, *) else { return }
+    let art: Data? = {
+        guard let p = artPtr, artLen > 0 else { return nil }
+        return Data(bytes: p, count: artLen)
+    }()
     ShuyinIsland.shared.set(
         title: title.map { String(cString: $0) } ?? "",
         artist: artist.map { String(cString: $0) } ?? "",
         pos: pos, playing: playing, dur: dur,
+        art: art,
     )
 }
 
