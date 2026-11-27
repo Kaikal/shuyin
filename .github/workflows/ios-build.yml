@@ -72,7 +72,9 @@ jobs:
           # 之前只挑第一个，一旦 gen 目录里出现第二份 plist（不同 target 的
           # 宿主目录、或模板结构变化），改到的就可能不是 app target 的那份：
           # 构建照常成功、包照常能装，只有中文名 / 后台音频等配置不生效。
-          PLISTS=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*")
+          # IslandWidget/ 是灵动岛扩展 target 的 plist——补丁里的键全是主 App
+          # 专属（URL schemes / 后台音频 / 文件关联），灌给扩展没意义还会 KeyError
+          PLISTS=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*" -not -path "*/IslandWidget/*")
           echo "plists:"; echo "$PLISTS"
           for PLIST in $PLISTS; do
           echo "== patch $PLIST"
@@ -168,7 +170,7 @@ jobs:
           plistlib.dump(d, open(p, 'wb'))
           print('displayName =', d['CFBundleDisplayName'], '| region =', d['CFBundleDevelopmentRegion'])
           print('docTypes =', [x['CFBundleTypeName'] for x in d['CFBundleDocumentTypes']])
-          print('urlSchemes =', [x.get('CFBundleURLSchemes') for x in d['CFBundleURLTypes']])
+          print('urlSchemes =', [x.get('CFBundleURLSchemes') for x in d.get('CFBundleURLTypes', [])])
           EOF
           done
 
