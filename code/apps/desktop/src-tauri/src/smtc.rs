@@ -794,6 +794,7 @@ mod apple {
             if let Some(np_cls) = cls("MPNowPlayingInfoCenter") {
                 let center: *mut AnyObject = objc2::msg_send![np_cls, defaultCenter];
                 if !center.is_null() {
+                    let nil: *mut AnyObject = std::ptr::null_mut();
                     let _: () = objc2::msg_send![center, setNowPlayingInfo: nil];
                 }
             }
@@ -1149,6 +1150,7 @@ mod apple {
              * LAST 照常记：灵动岛心跳的 last_meta/last_cover 还靠它。
              */
             if crate::island::on() {
+                let nil: *mut AnyObject = std::ptr::null_mut();
                 let _: () = objc2::msg_send![&center, setNowPlayingInfo: nil];
             } else {
                 let _: () = objc2::msg_send![&center, setNowPlayingInfo: &*info];
