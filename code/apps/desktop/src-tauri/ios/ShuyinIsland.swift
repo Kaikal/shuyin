@@ -151,11 +151,18 @@ final class ShuyinIsland {
          * 用 16.1 的 `contentState:` 版 request（同步、不抛、永不移除，17 起只是
          * 弃用警告）：iOS 17 的 `content:` 版签名有变动，跨 SDK 编译求稳取旧 API。
          */
-        let act = Activity<IslandAttributes>.request(
+        /*
+         * 新 SDK 里 request 是 throws 的（旧 contentState: 版也被标了 throws），
+         * 用 try? 兜成 nil；request 失败多半是系统限制，NSLog 留痕。
+         */
+        guard let act = try? Activity<IslandAttributes>.request(
             attributes: attrs,
             contentState: contentState(),
             pushType: nil,
-        )
+        ) else {
+            NSLog("[shuyin] island request FAILED")
+            return
+        }
         activity = act
         NSLog("[shuyin] island requested: %@", act.id)
     }
@@ -181,7 +188,7 @@ final class ShuyinIsland {
         lastPos = pos
         let state = contentState()
         Task { @MainActor in
-            try? await act.update(state)
+            try? await act.update(using: state)
             NSLog("[shuyin] island update (%@)", key)
         }
     }
@@ -214,7 +221,10 @@ final class ShuyinIsland {
         }
         Task { @MainActor in
             for a in acts {
-                try? await a.end(contentState(), dismissalPolicy: .immediate)
+                try? await a.end(
+                    ActivityContent(state: contentState(), staleDate: nil),
+                    dismissalPolicy: .immediate,
+                )
             }
             NSLog("[shuyin] island ended \(acts.count) \(reason)")
         }
@@ -237,13 +247,14 @@ final class ShuyinIsland {
         ]
         let cb: CFNotificationCallback = { _, _, name, _, _ in
             guard let name else { return }
-            let raw = name.pointee.rawValue as String
+            /* 回调拿到的是 CFNotificationName 结构体，rawValue 才是 CFString */
+            let raw = name.rawValue as String
             guard raw.hasPrefix("cn.shuyin.island.cmd.") else { return }
             let cmd = String(raw.dropFirst("cn.shuyin.island.cmd.".count))
             ShuyinIsland.forward(cmd: cmd)
         }
         for n in names {
-            CFNotificationCenterAddObserver(center, nil, cb, CFNotificationName(n), nil, .deliverImmediately)
+            CFNotificationCenterAddObserver(center, nil, cb, n, nil, .deliverImmediately)
         }
         NSLog("[shuyin] island observers registered \(names.count)")
     }
