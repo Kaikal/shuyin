@@ -164,7 +164,14 @@ puts "[swift] app target: #{app.name}"
 if project.targets.any? { |t| t.name == EXT_NAME }
   puts "[swift] 扩展 #{EXT_NAME} 已存在，跳过创建"
 else
-  ext = project.new_target('com.apple.product-type.app-extension', EXT_NAME, :ios, EXT_DEPLOYMENT_TARGET)
+  # 注意：new_target 的 type 必须传符号(:app_extension)，xcodeproj 内部按
+  # Constants::PRODUCT_TYPE_UTI[type] 查表——传字符串查不到、product_type 落成
+  # nil，Xcode 16 构建服务加载 PIF 时报 "productTypeIdentifier is missing"。
+  ext = project.new_target(:app_extension, EXT_NAME, :ios, EXT_DEPLOYMENT_TARGET)
+  if ext.product_type.to_s.empty?
+    ext.product_type = 'com.apple.product-type.app-extension'
+  end
+  abort("[swift] 扩展 target product_type 未设上（#{EXT_NAME}）") if ext.product_type.to_s.empty?
 
   bundle_id = app.build_configurations
                   .map { |bc| bc.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] }
