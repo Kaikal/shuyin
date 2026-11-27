@@ -135,7 +135,7 @@ File.write(File.join(ext_dir, 'Info.plist'), <<~PLIST)
       <key>CFBundleName</key>
       <string>$(PRODUCT_NAME)</string>
       <key>CFBundlePackageType</key>
-      <string>$(PRODUCT_TYPE)</string>
+      <string>XPC!</string>
       <key>CFBundleShortVersionString</key>
       <string>1.0</string>
       <key>CFBundleVersion</key>
