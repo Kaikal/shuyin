@@ -550,6 +550,7 @@ class PlaybackService : Service() {
                 metaCover = intent.getStringExtra("cover")
                 metaFav = intent.getBooleanExtra("fav", false)
                 FloatingLyrics.setMeta(metaTitle)
+                DynamicIsland.setMeta(metaTitle, metaArtist)
                 syncSessionMeta()
                 loadArtAsync()
                 LockScreen.trace("meta <- \"$metaTitle\" idx=$index")
@@ -853,6 +854,7 @@ class PlaybackService : Service() {
         metaCover = p.cover
         metaFav = p.fav
         FloatingLyrics.setMeta(metaTitle)
+        DynamicIsland.setMeta(metaTitle, metaArtist)
         syncSessionMeta()
         loadArtAsync()
         autoAdvanced = p.index
@@ -2221,6 +2223,8 @@ class PlaybackService : Service() {
          * 同一处顺手推一下，图标就成了播放器状态的直接映射。
          */
         FloatingLyrics.setPlaying(playing)
+        /* 灵动岛：播放期间常驻、暂停宽限后撤窗（真值同样以播放器为准） */
+        DynamicIsland.onPlaying(this, playing)
         val n = buildNotification(playing)
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(1, n)
@@ -2552,6 +2556,7 @@ class PlaybackService : Service() {
         netCb?.let { cb -> try { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(cb) } catch (_: Exception) { /* 已经注销 */ } }
         netCb = null
         FloatingLyrics.onShownChanged = null
+        DynamicIsland.shutdown()
         if (instance === this) instance = null
         safe { mp?.tap?.shutdown() }
         safe { mp?.release() }

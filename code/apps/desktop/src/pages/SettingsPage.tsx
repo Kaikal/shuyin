@@ -38,6 +38,7 @@ import { HotkeySection } from '../components/HotkeySection'
 import { AccountSection } from '../components/AccountSection'
 import { StatusLyricSection } from '../components/StatusLyricSection'
 import { FloatLyricSection } from '../components/FloatLyricSection'
+import { DynamicIslandSection } from '../components/DynamicIslandSection'
 import { HelpTip } from '../components/HelpTip'
 import { useDownloads } from '../lib/DownloadsProvider'
 import { audioCacheSize, clearAudioCache } from '../lib/audioCache'
@@ -586,6 +587,13 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
           )}
         </section>
       )}
+
+      {/*
+       * 灵动岛（2026-11-27）：iPhone 走系统 Live Activity（主目标），安卓走
+       * TYPE_APPLICATION_OVERLAY 悬浮窗包挖孔。形态对齐酷狗：点一下回 App，
+       * 长按展开播控胶囊。车机不做（没有挖孔，也没有「别的应用」）。
+       */}
+      {(bridge.isAndroid || bridge.isIOS) && !isCar && <DynamicIslandSection />}
 
       {/*
        * 状态栏歌词：整块从播放页「更多」搬过来（用户 2026-11-23「开关放在设置页去」）。

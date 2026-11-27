@@ -463,6 +463,16 @@ class Bridge(private val web: WebView) {
             null
         }
 
+        /*
+         * ---- 灵动岛 ----
+         *
+         * 与桌面歌词 / 状态栏歌词**各走各的命令**（三个独立功能，开关互不串线，
+         * 与 status_lyric 拆分的理由一致）。存档 `dynamic_island`，显示策略在
+         * 原生侧：开关开着 + 播放中才挂窗，暂停宽限 6s 后撤下。
+         */
+        "island_toggle" -> DynamicIsland.toggleState(Sy.app)
+        "island_state" -> DynamicIsland.stateJson()
+
         /* ---- 锁屏播放页 ---- */
         // 立刻预览一次（手动打开；不点亮屏幕，也不会因为开关一变就自己跳过去）
         "lock_show" -> { MainActivity.inst?.previewLockPanel(); null }

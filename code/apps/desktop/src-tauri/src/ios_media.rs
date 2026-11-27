@@ -33,9 +33,12 @@ pub fn init(app: &AppHandle) {
         ffi::notif_bootstrap();
         /* 点亮 ShuyinLyricsPiP.swift 的 C 入口，防 -dead_strip 剥掉符号。 */
         crate::lyrics_pip::adopt();
+        /* 点亮 ShuyinIsland.swift（灵动岛）的 C 入口，同理。 */
+        crate::island::adopt();
         /* 系统卡状态对账 + 桌面歌词心跳。 */
         spawn_state_ticker();
         spawn_pip_ticker();
+        spawn_island_ticker();
     }
 }
 
@@ -142,6 +145,31 @@ pub fn spawn_pip_ticker() {
 /* ------------------------------------------------------------------ */
 /* 系统「正在播放」卡状态对账                                          */
 /* ------------------------------------------------------------------ */
+
+/// 灵动岛（Live Activity）心跳：500ms 一帧，比画中画慢——胶囊上没有逐字
+/// 跑马灯，进度条不用那么密。开关打开才走到 IPC。
+///
+/// 歌名 / 歌手以系统卡那份为准（`smtc::last_meta`：card_for / smtc_update
+/// 都从那里过）。没有曲目（idx<0）时推 playing=false，Swift 侧宽限后
+/// end 掉 activity。
+#[cfg(target_os = "ios")]
+pub fn spawn_island_ticker() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !crate::island::on() {
+            continue;
+        }
+        let Some(app) = APP.get() else { continue };
+        let Some(p) = app.try_state::<Player>() else { continue };
+        let (idx, playing, pos, dur) = p.state_lite();
+        if idx < 0 {
+            crate::island::update("", "", pos, false, dur);
+            continue;
+        }
+        let (title, artist) = crate::smtc::last_meta();
+        crate::island::update(&title, &artist, pos, playing, dur);
+    });
+}
 
 /// 原生发现「暂停了 / 歌到底了」就直接刷新系统卡。
 ///

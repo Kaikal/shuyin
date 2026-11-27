@@ -337,6 +337,12 @@ pub fn clear_route_intent() {
 #[cfg(not(target_os = "ios"))]
 pub fn clear_route_intent() {}
 
+/// 当前推给系统「正在播放」卡的歌名 / 歌手（灵动岛心跳读这份，不再各存一份）。
+#[cfg(target_os = "ios")]
+pub fn last_meta() -> (String, String) {
+    apple::last_meta()
+}
+
 /* ------------------------------------------------------------------ */
 /* Apple（macOS / iOS）：MPNowPlayingInfoCenter + MPRemoteCommandCenter  */
 /*                                                                      */
@@ -743,6 +749,15 @@ mod apple {
         };
         let Some((title, artist, album, cover, fav)) = snap else { return };
         apply(&title, &artist, &album, playing, &cover, pos, dur, fav);
+    }
+
+    /// 当前推给系统卡的歌名 / 歌手。灵动岛（Live Activity）心跳用，
+    /// 元数据以系统卡这份为准（card_for / smtc_update 都从这里过）。
+    pub fn last_meta() -> (String, String) {
+        let Ok(g) = LAST.lock() else { return (String::new(), String::new()) };
+        g.as_ref()
+            .map(|x| (x.title.clone(), x.artist.clone()))
+            .unwrap_or_else(|| (String::new(), String::new()))
     }
 
     /// ♥ 的实心/空心（`likeCommand.isActive`）。类或命令拿不到时静默跳过。

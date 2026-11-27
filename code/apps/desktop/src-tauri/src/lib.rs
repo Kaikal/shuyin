@@ -18,6 +18,7 @@ pub mod coverart;
 pub mod ios_openurl;
 pub mod ios_media;
 pub mod lyrics_pip;
+pub mod island;
 pub mod net;
 #[cfg(desktop)]
 pub mod platform_login;
@@ -797,6 +798,23 @@ fn pip_lyric_toggle() -> bool {
 #[tauri::command]
 fn pip_lyric_state() -> bool {
     crate::lyrics_pip::on()
+}
+
+/// 开关「灵动岛」（iOS Live Activity），返回开关之后的真值。
+///
+/// iPhone 是灵动岛的主目标（用户 2026-11-27）：胶囊长在系统灵动岛（摄像头
+/// 挖孔）上，点一下打开疏音、长按展开，展开态由 Widget 扩展渲染。安卓那条
+/// 走 Kotlin `DynamicIsland`（`island_toggle` 命令同名不同实现）。
+#[tauri::command]
+fn island_toggle() -> bool {
+    let on = crate::island::toggle();
+    crate::player::log(&format!("island.toggle -> {on}"));
+    on
+}
+
+#[tauri::command]
+fn island_state() -> bool {
+    crate::island::on()
 }
 
 #[tauri::command]
@@ -3697,6 +3715,8 @@ pub fn run() {
             smtc_update,
             pip_lyric_toggle,
             pip_lyric_state,
+            island_toggle,
+            island_state,
             ios_media::lyric_timeline,
             update_dmg_install,
             probe_audio_url,

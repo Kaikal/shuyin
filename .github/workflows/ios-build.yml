@@ -94,6 +94,10 @@ jobs:
           if 'audio' not in modes:
               modes.append('audio')
           d['UIBackgroundModes'] = modes
+          # ---- 灵动岛（Live Activity，2026-11-27）----
+          # 不声明这个键，ActivityKit 的 request 直接被系统拒
+          # （AuthorizationInfo.areActivitiesEnabled 恒 False）。
+          d['NSSupportsLiveActivities'] = True
 
           # ---- 文件关联：让疏音出现在「用其他 App 打开」列表里 ----
           # 洛雪的 .lxmc / 音源脚本 .js 都没有系统内置类型，不自己声明的话
@@ -403,6 +407,7 @@ jobs:
           nm -gU "$BIN" 2>/dev/null | grep -E "_shuyin_" || echo "(一个都没有)"
           MISSING=""
           for s in shuyin_pip_adopt shuyin_pip_set shuyin_pip_toggle shuyin_pip_on \
+                   shuyin_island_adopt shuyin_island_set shuyin_island_toggle shuyin_island_on \
                    shuyin_notif_bootstrap shuyin_remote_command; do
             if nm -gU "$BIN" 2>/dev/null | grep -qE "[[:space:]]_${s}$"; then
               echo "OK   $s"
