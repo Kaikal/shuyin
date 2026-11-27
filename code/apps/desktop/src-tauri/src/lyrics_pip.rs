@@ -21,8 +21,7 @@
 //!
 //! dlsym 的代价是 Swift 侧 `@_cdecl` 符号可能被 Release 的 `-dead_strip` 剥掉
 //! （链接器看不到静态引用）。解法见 `adopt()`：App 启动时 dlsym 调一次
-//! `shuyin_pip_adopt`，那个 C 入口所在的 object 就被整个点亮保留——和灵动岛
-//! `shuyin_live_adopt` 完全同款机制。
+//! `shuyin_pip_adopt`，那个 C 入口所在的 object 就被整个点亮保留。
 
 #[cfg(target_os = "ios")]
 mod ffi {

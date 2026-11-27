@@ -11,12 +11,12 @@ pub mod hotkeys;
 ///
 /// 每次出**诊断包**就把这里改一下。未签名 IPA 由用户自己重签安装，版本号
 /// 又长期不动，光看界面分不出手里这份是不是刚下的——上一轮就白排查了一天。
-pub const BUILD_TAG: &str = "2026-11-26.diag9";
-/// 封面小图（原生接歌时给系统卡 / 灵动岛补封面）
+pub const BUILD_TAG: &str = "2026-11-28.diag11";
+/// 封面小图（原生接歌时给系统卡补封面）
 pub mod coverart;
 #[cfg(target_os = "ios")]
 pub mod ios_openurl;
-pub mod liveactivity;
+pub mod ios_media;
 pub mod lyrics_pip;
 pub mod net;
 #[cfg(desktop)]
@@ -1724,16 +1724,12 @@ fn stage_open_failed(app: &AppHandle, name: &str, msg: &str) {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
     /*
-     * 非 `file:` 的 URL 是「唤醒 App」用的自定义 scheme，不是「用疏音打开」。
+     * 非 `file:` 的 URL 不是「用疏音打开」，别当文件去拷——
      *
-     * 点灵动岛 / Now Playing 卡片回 App 时，系统送进来的是 `shuyin://live`
-     * 这类 URL（热启动走 tao 的 `RunEvent::Opened`）。以前这里一律当文件处理，
-     * `to_file_path()` 失败就写一条「系统给的不是本地文件地址」的 pending，
-     * 前端于是弹「打不开 open-file」——可 App 明明已经打开了，用户看到的就是
-     * 「点顶部进 App，还报一个莫名其妙的错」（2026-11-26 反馈）。
-     *
-     * 自定义 scheme 走的是 tauri 的 deep link 通道，不需要这里做任何事，
-     * 直接返回即可；只有真正的 file: URL 才落到下面的「用疏音打开」流程。
+     * 以前这里一律当文件处理，`to_file_path()` 失败就写一条「系统给的不是本地
+     * 文件地址」的 pending，前端于是弹「打不开 open-file」——可 App 明明已经
+     * 打开了，用户看到的就是「点顶部进 App，还报一个莫名其妙的错」
+     * （2026-11-26 反馈）。
      */
     if url.scheme() != "file" {
         return;
@@ -1820,7 +1816,7 @@ fn stage_opened_file(app: &AppHandle, url: &tauri::Url) {
     );
 }
 
-/// 把 iOS 冷启动攒下的 URL 摆到 inbox。
+/// 处理 iOS 冷启动攒下的 URL（文件摆到 inbox）。
 ///
 /// 通知观察者（`ios_openurl`）注册在 `UIApplicationMain` 之前，那时手里还没有
 /// AppHandle，所以只能先收着；这里补上落盘那一步。
@@ -1866,51 +1862,6 @@ fn take_open_file(app: AppHandle) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(&f).ok()?;
     let _ = std::fs::remove_file(&f);
     serde_json::from_str(&text).ok()
-}
-
-/// 取走「点灵动岛 / 锁屏卡回 App」的标记（取走即删）。
-///
-/// `ShuyinOpenIntent.perform()` 在 App 进程里执行时落 `open_now.flag`
-/// （见 liveactivity.rs 的 `handle_remote_command("open")`）。前端每次回到
-/// 前台 / 启动时取一次，有就展开播放页。
-///
-/// 为什么不用 `app.emit`：intent 可能发生在 WebView 还没就绪的冷启动阶段，
-/// emit 的事件没有监听者会直接丢；文件放着不怕，等前端醒了再来取。
-#[tauri::command]
-fn take_open_now(app: AppHandle) -> bool {
-    let Some(dir) = app.path().app_cache_dir().ok() else { return false };
-    let f = dir.join("open_now.flag");
-    let ok = f.exists();
-    if ok {
-        let _ = std::fs::remove_file(&f);
-    }
-    ok
-}
-
-/// 把一张本地封面读成 `data:` URL。
-///
-/// 只给 iOS 的 Live Activity 用：扩展进程跟主 App 各是各的沙箱，`file://`
-/// 路径在那边是读不到的，所以图必须以字节形式塞进 ContentState。前端再把它
-/// 压到 72×72（ContentState 只有 4KB 预算），尺寸压缩交给 canvas 更省事。
-///
-/// 限制 6MB：正常封面几百 KB，超了说明拿错文件了，不陪它玩。
-#[tauri::command]
-fn read_cover_data_url(path: String) -> Result<String, String> {
-    let bytes = std::fs::read(&path).map_err(|e| format!("封面读不出来：{e}"))?;
-    if bytes.len() > 6 * 1024 * 1024 {
-        return Err("封面文件过大".to_string());
-    }
-    // 只认魔数，不看扩展名：缓存目录里的文件是按哈希命名的，没有后缀
-    let mime = match bytes.first().copied() {
-        Some(0xFF) => "image/jpeg",
-        Some(0x89) => "image/png",
-        Some(b'G') => "image/gif",
-        Some(b'R') => "image/webp",
-        _ => "image/jpeg",
-    };
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
 }
 
 /// 把原生暂存的音源脚本收进清单，返回最终落下的名字。
@@ -1986,11 +1937,10 @@ fn stop(player: State<'_, Player>) {
 fn seek(player: State<'_, Player>, position_secs: f64) {
     player.seek(position_secs);
     /*
-     * 系统「正在播放」卡（iOS 锁屏 / 灵动岛）的进度得跟着走。
+     * 系统「正在播放」卡（iOS 锁屏）的进度得跟着走。
      *
      * 系统是拿「已播秒数 + 播放速率」自己走秒的，不重推一次它就沿旧锚点一直跑：
-     * 用户 2:30 拖到 0:40，锁屏还从 2:31 往前走。前端这一次只推
-     * `live_activity_sync`（自绘卡关掉后是空转），到不了 smtc 这条路。
+     * 用户 2:30 拖到 0:40，锁屏还从 2:31 往前走。这里直接重推一次。
      *
      * 只翻位置、元信息（含封面）沿用上一次——`reapply` 干的就是这件事，
      * 不走 `update` 是为了不重新解码一遍封面。
@@ -3337,10 +3287,8 @@ pub fn run() {
             #[cfg(target_os = "ios")]
             flush_cold_open(app.handle());
 
-            /* 灵动岛 / 锁屏实时活动（仅 iOS 有实际动作）。
-             * 放在这里是为了尽早接管上次残留的那条 activity——否则 App
-             * 重启后锁屏会同时挂着新旧两条。 */
-            liveactivity::init(app.handle());
+            /* iOS 媒体原生桥：系统卡状态对账 + 桌面歌词心跳（仅 iOS 有实际动作）。 */
+            ios_media::init(app.handle());
 
             /*
              * iOS 的系统媒体会话：音频会话 + 锁屏「正在播放」卡片 + 远控命令。
@@ -3478,19 +3426,6 @@ pub fn run() {
             append_log(
                 app.handle(),
                 &format!("boot v{} tag={BUILD_TAG}", env!("CARGO_PKG_VERSION")),
-            );
-            /*
-             * 灵动岛/锁屏卡「点了没反应」的唯一死因排查口。
-             *
-             * 那两处的 `Link` / `widgetURL` 全指向 `shuyin://live`，而**未注册的
-             * scheme 会让点击被系统整个吞掉**（不打开任何东西，连冷启动都没有）。
-             * 注册写在 Info.plist 的 CFBundleURLTypes 里，靠 CI 事后 patch ——
-             * patch 打歪了构建照样成功，只有 App 自己能问出来。见 liveactivity.rs。
-             */
-            #[cfg(target_os = "ios")]
-            append_log(
-                app.handle(),
-                &format!("[scheme] canOpen shuyin://live = {:?}", crate::liveactivity::scheme_ok()),
             );
             /* 曲终自动接下一首要顺手更新系统媒体卡片（锁屏/控制中心），那边要 AppHandle */
             crate::player::attach_app(app.handle().clone());
@@ -3760,12 +3695,9 @@ pub fn run() {
             play_url,
             net_request,
             smtc_update,
-            liveactivity::live_activity_sync,
             pip_lyric_toggle,
             pip_lyric_state,
-            liveactivity::live_activity_end,
-            liveactivity::lyric_timeline,
-            read_cover_data_url,
+            ios_media::lyric_timeline,
             update_dmg_install,
             probe_audio_url,
             local_audio_duration,
@@ -3788,7 +3720,6 @@ pub fn run() {
             import_source_url,
             import_source_staged,
             take_open_file,
-            take_open_now,
             delete_source_script,
             pause,
             resume,

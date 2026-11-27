@@ -50,11 +50,8 @@ symphonia = { version = "0.5", default-features = false, features = ["aac", "fla
 sha2 = "0.10"
 hex = "0.4"
 rayon = "1.10"
-# 封面转 data URL（iOS 的 Live Activity 扩展读不到 App 沙箱，只能把图塞进状态里）
+# 封面图编解码（base64 与缩略图相关工具）
 base64 = "0.22"
-# 封面缩略图：原生自己接下一首时，手里只有封面**网址**，而两个消费方都不认网址——
-#   · MPMediaItemArtwork 要文件/内存里的图；
-#   · Live Activity 的 ContentState 只放得下 4KB，得是一张 72×72 的小 JPEG。
 # 只开解码所需的那几种格式，不要默认的那一大堆（体积和编译时间都花在没用的地方）。
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
@@ -108,8 +105,7 @@ tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 # 所以连 objc2-foundation 都不需要，NSString/NSNumber 全走 class! + msg_send
 #
 # block2 是 MPRemoteCommandCenter 的按键回调（addTargetWithHandler:）要用的，
-# macOS / iOS 两端同一套。iOS 灵动岛按钮走 Swift 侧 LiveActivityIntent，
-# 那条链路不需要 block2。
+# macOS / iOS 两端同一套。
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"

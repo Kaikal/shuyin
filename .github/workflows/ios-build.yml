@@ -57,10 +57,10 @@ jobs:
       - name: Generate iOS project (tauri ios init)
         run: pnpm -F shuyin-desktop tauri ios init --ci
 
-      - name: Install Live Activity Swift bridge into the iOS project
+      - name: Install Swift bridge into the iOS project
         run: |
-          # 灵动岛的 Swift 桥接必须编进主 App 二进制（Rust 侧 dlsym 找
-          # shuyin_live_sync 这些 @_cdecl 符号）。脚本兼容 Xcode 16 的
+          # 桌面歌词的 Swift 桥接必须编进主 App 二进制（Rust 侧 dlsym 找
+          # shuyin_pip_set 这些 @_cdecl 符号）。脚本兼容 Xcode 16 的
           # synchronized group 与传统 PBXGroup 两种工程格式。
           gem install xcodeproj --no-document >/dev/null 2>&1 || sudo gem install xcodeproj --no-document
           ruby apps/desktop/src-tauri/ios/install-swift.rb apps/desktop/src-tauri/gen/apple
@@ -71,8 +71,7 @@ jobs:
           #
           # 之前只挑第一个，一旦 gen 目录里出现第二份 plist（不同 target 的
           # 宿主目录、或模板结构变化），改到的就可能不是 app target 的那份：
-          # 构建照常成功、包照常能装，只有「灵动岛点了没反应」这一个症状
-          # （shuyin:// 没注册，Live Activity 的 Link 会被系统整个吞掉）。
+          # 构建照常成功、包照常能装，只有中文名 / 后台音频等配置不生效。
           PLISTS=$(find apps/desktop/src-tauri/gen/apple -name "Info.plist" -not -path "*/Frameworks/*")
           echo "plists:"; echo "$PLISTS"
           for PLIST in $PLISTS; do
@@ -144,24 +143,6 @@ jobs:
                   'CFBundleTypeExtensions': ['lxmc', 'm3u', 'm3u8', 'pls', 'json'],
               },
           ]
-          # 实时活动（灵动岛 / 锁屏）：不写这个键，Activity.request 直接抛错，
-          # 岛永远不出现——而且系统不给任何提示，纯靠这个键
-          d['NSSupportsLiveActivities'] = True
-          # 高频更新。不写这个键，系统按「低频」额度限流：播放/暂停、换歌、
-          # 歌词这些推送会被静静丢掉——表现就是「岛上的播放键一直不动」
-          # 「倒计时走完了歌还在播」（2026-11-24 反馈），而 App 里一切正常。
-          d['NSSupportsLiveActivitiesFrequentUpdates'] = True
-          # ---- 自定义 scheme：让实时活动的 widgetURL 能把人带回 App ----
-          # Live Activity 里的 `.widgetURL` 必须是一个**已注册**的 scheme，
-          # 系统才会去打开宿主 App；没注册的表现就是「点了没反应」。
-          url_types = d.get('CFBundleURLTypes') or []
-          if not any('shuyin' in (x.get('CFBundleURLSchemes') or []) for x in url_types):
-              url_types.append({
-                  'CFBundleURLName': 'cn.shuyin.player',
-                  'CFBundleURLSchemes': ['shuyin'],
-              })
-          d['CFBundleURLTypes'] = url_types
-
           # ---- ATS：WebView 里的 http 图片放行 ----
           # 洛雪导出的酷狗/酷我封面有一部分还是 http://。安卓 WebView 放行，
           # iOS 默认按 ATS 拦掉，表现是「别的图都正常，只有导入歌单的封面空白」。
@@ -317,7 +298,7 @@ jobs:
                       '\t\t\t\t);') + body
 
           # 按花括号配对逐块定位 buildSettings = { ... }：整文件 replace 会误伤
-          # 其它段（改错段的症状是「构建照常成功，只有灵动岛/桌面歌词哑」）
+          # 其它段（改错段的症状是「构建照常成功，只有桌面歌词哑」）
           blocks, i = [], 0
           while True:
               j = s.find("buildSettings = {", i)
@@ -407,8 +388,8 @@ jobs:
       - name: Verify bridge symbols survive into the binary
         run: |
           # 这一步是**必须**的：这几个符号没有任何静态引用链，全靠链接参数活着。
-          # 少了它们构建一样成功、包一样能装、App 一切正常，只有灵动岛按钮和
-          # 桌面歌词开关静默失效（dlsym 返回 NULL）。发出去才发现 = 又白一轮。
+          # 少了它们构建一样成功、包一样能装、App 一切正常，只有桌面歌词开关
+          # 静默失效（dlsym 返回 NULL）。发出去才发现 = 又白一轮。
           APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -path "*Applications*" | head -1)
           if [ -z "$APP" ]; then
             APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
@@ -421,9 +402,8 @@ jobs:
           echo "--- 桥接符号"
           nm -gU "$BIN" 2>/dev/null | grep -E "_shuyin_" || echo "(一个都没有)"
           MISSING=""
-          for s in shuyin_live_sync shuyin_live_end shuyin_live_adopt \
-                   shuyin_pip_adopt shuyin_pip_set shuyin_pip_toggle shuyin_pip_on \
-                   shuyin_remote_command; do
+          for s in shuyin_pip_adopt shuyin_pip_set shuyin_pip_toggle shuyin_pip_on \
+                   shuyin_notif_bootstrap shuyin_remote_command; do
             if nm -gU "$BIN" 2>/dev/null | grep -qE "[[:space:]]_${s}$"; then
               echo "OK   $s"
             else
@@ -436,81 +416,18 @@ jobs:
               echo "### ❌ 原生桥接符号没进二进制：$MISSING"
               echo ""
               echo '这些入口只有 Rust 的 `dlsym` 用，链接器看不到引用就不会导出；'
-              echo '结果就是灵动岛按钮、桌面歌词开关**全部静默失效**（日志里'
+              echo '结果就是桌面歌词开关**静默失效**（日志里'
               echo '`pip dlsym toggle: symbol NULL`），而 App 其它功能完全正常。'
               echo ""
               echo '对应开关：`OTHER_LDFLAGS += -Wl,-export_dynamic`、'
               echo '`STRIP_INSTALLED_PRODUCT = NO`、`DEAD_CODE_STRIPPING = NO`、'
               echo '`CARGO_PROFILE_RELEASE_STRIP=debuginfo`。'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::桥接符号缺失，这个包出去灵动岛和桌面歌词必然无效"
+            echo "::error::桥接符号缺失，这个包出去桌面歌词必然无效"
             exit 1
           fi
           echo "全部桥接符号都在。"
 
-      - name: Build Live Activity widget extension and embed
-        run: |
-          APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d -path "*Applications*" | head -1)
-          if [ -z "$APP" ]; then
-            APP=$(find apps/desktop/src-tauri/gen/apple -name "*.app" -type d | head -1)
-          fi
-          echo "app: $APP"
-          if [ -z "$APP" ]; then echo "主包没出来，扩展无从谈起"; exit 1; fi
-
-          # 版本号必须与宿主一致，否则安装时被系统拒（extension version mismatch）
-          MV=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
-          BV=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
-          echo "host version: $MV ($BV)"
-
-          brew install xcodegen >/dev/null 2>&1 || true
-          which xcodegen || { echo "xcodegen 装不上"; exit 1; }
-
-          WIDGET=apps/desktop/src-tauri/ios/widget
-          ( cd "$WIDGET" && xcodegen generate --quiet )
-          mkdir -p build-logs
-          xcodebuild -project "$WIDGET/ShuyinWidget.xcodeproj" \
-                     -target ShuyinWidget \
-                     -sdk iphoneos \
-                     -configuration Release \
-                     -arch arm64 \
-                     MARKETING_VERSION="$MV" \
-                     CURRENT_PROJECT_VERSION="$BV" \
-                     CONFIGURATION_BUILD_DIR="$PWD/$WIDGET/build" \
-                     build > build-logs/widget-build.log 2>&1 || true
-          tail -40 build-logs/widget-build.log
-
-          APPEX=$(find "$WIDGET/build" -maxdepth 2 -name "*.appex" -type d | head -1)
-          echo "appex: $APPEX"
-          if [ -z "$APPEX" ]; then
-            {
-              echo "### 灵动岛扩展没编出来"
-              echo ""
-              echo '```'
-              grep -nE "error:|Undefined symbol|ld: |fatal error" build-logs/widget-build.log | head -30 || true
-              echo '```'
-              echo ""
-              echo "<details><summary>完整日志尾部</summary>"
-              echo ""
-              echo '```'
-              tail -150 build-logs/widget-build.log
-              echo '```'
-              echo ""
-              echo "</details>"
-            } >> "$GITHUB_STEP_SUMMARY"
-            grep -nE "error:|Undefined symbol|ld: |fatal error" build-logs/widget-build.log \
-              | head -12 | while IFS= read -r l; do echo "::error::$(printf '%s' "$l" | cut -c1-500)"; done || true
-            echo "扩展没编出来（看上面的 xcodebuild 日志 / step summary）"
-            exit 1
-          fi
-
-          # PlugIns/ 是 Xcode 认可的扩展存放位置。未签名 IPA 直接拷进去即可，
-          # Sideloadly / 爱思重签时会连扩展一起签。
-          mkdir -p "$APP/PlugIns"
-          rm -rf "$APP/PlugIns/ShuyinWidget.appex"
-          cp -R "$APPEX" "$APP/PlugIns/"
-          echo "--- PlugIns"
-          ls -la "$APP/PlugIns"
-          /usr/libexec/PlistBuddy -c "Print :NSExtension" "$APP/PlugIns/ShuyinWidget.appex/Info.plist"
 
       - name: Upload build logs (on failure)
         if: failure()
@@ -534,50 +451,9 @@ jobs:
           ls -l "$APP"/Assets.car 2>/dev/null || true
           echo "--- 文件关联（决定「用疏音打开」里有没有我们）"
           /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes" "$APP/Info.plist" 2>/dev/null || echo "(没有 CFBundleDocumentTypes)"
-          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations NSSupportsLiveActivities NSSupportsLiveActivitiesFrequentUpdates; do
+          for k in LSSupportsOpeningDocumentsInPlace UTImportedTypeDeclarations; do
             printf "%s = " "$k"
             /usr/libexec/PlistBuddy -c "Print :$k" "$APP/Info.plist" 2>/dev/null | head -3 || echo "(缺失)"
-          done
-          echo "--- URL scheme（**灵动岛/锁屏卡点击的命门**）"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$APP/Info.plist" 2>/dev/null || true
-          # 兜底：前面那步是「事后 patch 源 plist」，万一打在了别的文件上，
-          # 构建照样成功、包照样能装，只有点灵动岛毫无反应（系统找不到 scheme
-          # 时会把点击整个吞掉，连冷启动都不会发生）。这里直接改**产物**里的
-          # Info.plist，IPA 是之后才压的，所以一定进包。幂等，已有就不动。
-          python3 - "$APP/Info.plist" <<'PY'
-          import plistlib, sys
-          p = sys.argv[1]
-          d = plistlib.load(open(p, 'rb'))
-          types = d.get('CFBundleURLTypes') or []
-          if not any('shuyin' in (x.get('CFBundleURLSchemes') or []) for x in types):
-              types.append({'CFBundleURLName': 'cn.shuyin.player', 'CFBundleURLSchemes': ['shuyin']})
-              d['CFBundleURLTypes'] = types
-              plistlib.dump(d, open(p, 'wb'))
-              print('产物里原本没有 → 已就地补上 shuyin')
-          else:
-              print('产物里已经有 shuyin，未改动')
-          PY
-          if ! python3 - "$APP/Info.plist" <<'PY'
-          import plistlib, sys
-          d = plistlib.load(open(sys.argv[1], 'rb'))
-          ok = any('shuyin' in (x.get('CFBundleURLSchemes') or []) for x in (d.get('CFBundleURLTypes') or []))
-          print('scheme ok' if ok else 'scheme MISSING')
-          sys.exit(0 if ok else 1)
-          PY
-          then
-            {
-              echo "### ❌ 产物 Info.plist 里没有注册 shuyin scheme"
-              echo ""
-              echo "Live Activity 的 \`Link\` / \`widgetURL\` 指向 \`shuyin://live\`。"
-              echo "这个 scheme 没进包 = 用户点灵动岛/锁屏卡时**系统整个吞掉点击**，"
-              echo "不打开任何东西、连冷启动都没有（app.log 里 \`[scheme] canOpen\` 会是 false）。"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "--- 灵动岛扩展（没有它 = 岛上什么都看不到）"
-          ls -la "$APP/PlugIns" 2>/dev/null || echo "(没有 PlugIns 目录)"
-          for f in "$APP"/PlugIns/*.appex/ShuyinWidget; do
-            [ -f "$f" ] && echo "可执行文件: $f ($(ls -l "$f" | awk '{print $5}') bytes)"
           done
 
       - name: Package unsigned IPA

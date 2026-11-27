@@ -28,25 +28,9 @@ import {
 import { cachedAudio, cachedAudioQuality, dropCachedAudio, hasCachedAudio, warmCache } from './audioCache'
 import { cachedCoverPath, cachedLyric, rememberCover, rememberLyric, mediaCacheVersion } from './mediaCache'
 import { isIOS } from './shellMode'
-import { liveArtOf } from './liveArt'
 import { installIdleTracking, userActive, waitIdle } from './idle'
 import { diag } from './diag'
 import { parseLrc, plainLyricLines } from '@shuyin/core'
-
-/**
- * 灵动岛 / 锁屏卡片要显示的那一句歌词。
- *
- * 截到 40 字：ContentState 一共只有 4KB（封面占大头），而 JSON 里的中文会变成
- * `\uXXXX`（每字 6 字节），一行 60 字就要多吃 100 多字节。40 字足够一整句
- * （中文歌一句很少超过 20 字），再长扩展那边也放不下。
- */
-const LIVE_LINE_MAX = 40
-function liveLineOf(doc: LyricsDoc | null, position: number): string {
-  const lines = doc?.lines ?? []
-  if (!lines.length) return ''
-  const text = (lyricAt(doc, position)?.text ?? '').trim()
-  return text.length > LIVE_LINE_MAX ? text.slice(0, LIVE_LINE_MAX) : text
-}
 
 export interface PlayerSnapshot {
   playing: boolean
@@ -2293,107 +2277,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
    */
   const cacheVer = mediaCacheVersion()
 
-  /*
-   * 灵动岛（iOS Live Activity）：把「当前曲目 + 播放状态」推给原生。
-   *
-   * 只在状态**真的变了**的时候调（换歌 / 播放暂停 / 拖动进度 / 封面补全 / 换句），
-   * 绝不当心跳用：进度条由扩展里的 `Text(timerInterval:)` 自己走秒，
-   * 每秒推一次只会烧掉 Live Activity 的更新预算（超了系统会限流，
-   * 表现就是「灵动岛卡在某一秒不动」）。
-   *
-   * 封面必须先压成 base64：扩展和主 App 是两个沙箱，路径在那边读不到。
-   * `line` 是当前那一句歌词，空串 = 这首歌没有歌词（锁屏就不画那一行）。
-   */
-  const liveSyncNow = useCallback(
-    async (
-      t: LocalTrack | undefined, playing: boolean, position: number, duration: number,
-      line = '',
-      fav = false,
-    ) => {
-      if (!isIOS) return
-      /*
-       * 序号 + 串行队列：**最后一条一定赢**。
-       *
-       * 以前这里是「异步压封面 → invoke」两头都异步、彼此不排队，于是：
-       *   · 切歌/暂停那一刻会连着发两条（一条来自「换歌」effect，一条来自
-       *     「换句」effect），谁先到 ActivityKit 全看封面解码耗时；
-       *   · 更糟的是 `liveArtOf` 第二次进来时 `cachedPath` 已经是新路径、
-       *     `cachedB64` 还是空串——**当场返回一张空封面**并立刻发出，
-       *     而第一条稍后才带着封面和**旧状态**落地。
-       * 用户看到的就是「岛上的播放/暂停状态和 App 里对不上」，
-       * 而且时好时坏（2026-11-23 第二轮反馈）。
-       *
-       * 现在：拿号 → 等封面 → 号过期就整条丢掉（更新的那条会覆盖它），
-       * 没过期就排在上一条 `invoke` 后面发出去。顺序 = 调用顺序。
-       */
-      const seq = ++liveSeq.current
-      if (!t) {
-        // 队列空了 / 播完了：把锁屏上那条收掉，别留一块过期的卡片
-        liveChain.current = liveChain.current.then(() =>
-          bridge.liveEnd().catch(() => { /* 没有活着的 activity 时是空操作 */ }),
-        )
-        return
-      }
-      const art = await liveArtOf(cachedCoverPath(t.cover) ?? null)
-      if (seq !== liveSeq.current) return
-      const payload = {
-        title: t.title ?? '',
-        artist: t.artist ?? '',
-        album: t.album ?? '',
-        art,
-        line,
-        playing,
-        fav,
-        position: Math.max(0, position || 0),
-        duration: Math.max(0, duration || 0),
-        /* 锚点必须是**发出这一刻**：等封面解码可能花掉几十毫秒，
-           用进来时的时间戳会让锁屏的进度条往回跳一格 */
-        anchor: Date.now() / 1000,
-      }
-      liveChain.current = liveChain.current.then(() =>
-        bridge.liveSync(payload).catch(() => { /* 灵动岛起不来不该影响播放 */ }),
-      )
-    },
-    [],
-  )
-
-  /** 灵动岛推送的序号与串行队列（见 liveSyncNow 里的说明） */
-  const liveSeq = useRef(0)
-  const liveChain = useRef<Promise<void>>(Promise.resolve())
-
-  /*
-   * 当前这一句歌词（iOS 锁屏 / 灵动岛用）。
-   *
-   * 依赖里放 `snapshot.position` 是必要的——它每秒都在变，`lyricAt` 得靠它定位；
-   * 但返回值在**同一句之内是同一个字符串**，所以下面那个 effect 不会每秒触发。
-   * 长句截到 60 字符：ContentState 有 4KB 上限，锁屏也只有一行，多了纯浪费。
-   */
-  const liveLine = useMemo(
-    () => (isIOS ? liveLineOf(lyrics, snapshot.position) : ''),
-    [lyrics, snapshot.position],
-  )
-
-  /*
-   * 换句 → 推一次灵动岛。
-   *
-   * key 里带 `currentId` 是为了切歌时强制推一次：新歌开头几秒常常没有歌词（空串），
-   * 光比字符串会漏掉「把上一首的词留在锁屏上」这种情况。
-   *
-   * 约 3~5 秒一次，是 Live Activity 能长期承受的量级；每秒推会被系统限流。
-   * 主 App 进后台后 JS 会被 iOS 挂起，锁屏就停在那一刻的句子——系统限制，不是推送的问题。
-   */
-  const lastLiveLine = useRef('')
-  useEffect(() => {
-    if (!isIOS) return
-    const key = `${currentId ?? ''}|${liveLine}`
-    if (key === lastLiveLine.current) return
-    lastLiveLine.current = key
-    const t = currentTrack(queueState)
-    if (!t) return
-    /* position/playing 故意不进依赖：它们每秒都变，进来就等于每秒推一次 */
-    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine, curFavOn)
-  }, [liveLine, currentId, liveSyncNow])
-
   useEffect(() => {
     if (!bridge.isTauri && !isAndroid) return
     const t = currentTrack(queueState)
@@ -2414,7 +2297,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (bridge.isTauri) {
         void bridge.invoke('smtc_update', { title: '', artist: '', album: '', playing: false, cover: '', fav: false }).catch(() => {})
       }
-      void liveSyncNow(undefined, false, 0, 0)
       return
     }
     void bridge.invoke('smtc_update', {
@@ -2428,8 +2310,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
        * 锁屏「正在播放」卡片靠这两个画进度条。
        *
        * 只在切歌 / 暂停 / 恢复时推一次——系统拿「已播秒数 + 播放速率」自己走秒。
-       * 每秒推一次不但没必要，还会让后台被节流的 App 把卡片卡在某一秒不动
-       * （和灵动岛那边是同一个教训）。
+       * 每秒推一次不但没必要，还会让后台被节流的 App 把卡片卡在某一秒不动。
        */
       position: snapshot.position,
       duration: snapshot.duration,
@@ -2440,22 +2321,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
      *   · 推了但原生没吃（原生侧有 `meta <-` 那条，成对看）。
      */
     void bridge.trace(`meta push "${t.title ?? ''}" idx=${queueState.index}`)
-    /*
-     * 顺手推一份给灵动岛。
-     *
-     * 这里用渲染时的 `snapshot.position` 而不是现查一次 `playerState()`：
-     * 切歌的那一帧刚发完 play_file，原生状态还没回来，现查会拿到上一首的
-     * 位置——反而更错。effect 的依赖里没有 position 是故意的：位置每秒都变，
-     * 进了依赖就等于每秒推一次。
-     */
-    /*
-     * 这里的 `liveLine` 取的是「此刻」的值，故意**不进依赖数组**——
-     * 进了就等于每句都重跑整个 effect，把 smtc_update / trace 也带成每句一次。
-     * 换句那次推送由上面那个专门的小 effect 负责，这里只保证切歌那一帧
-     * 不把上一首的歌词带到锁屏上。
-     */
-    void liveSyncNow(t, snapshot.playing, snapshot.position, snapshot.duration, liveLine, curFavOn)
-  }, [currentId, snapshot.playing, curFavOn, cacheVer, liveSyncNow,
+  }, [currentId, snapshot.playing, curFavOn, cacheVer,
       metaTrack?.title, metaTrack?.artist, metaTrack?.album, metaTrack?.cover])
 
   /*
@@ -2482,9 +2348,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const lastTimeline = useRef('')
   useEffect(() => {
     /*
-     * iOS 也推：锁屏卡上的那句词以前靠前端每句推一次，App 一进后台 JS 就被冻住，
-     * 词停在那一刻（用户：「iPhone 没有桌面歌词」）。原生拿到整张表就能自己算
-     * （见 liveactivity 的 line_at）。
+     * iOS 也推：桌面歌词（画中画）那一句以前靠前端每句推一次，App 一进后台 JS
+     * 就被冻住，词停在那一刻。原生拿到整张表就能自己算（见 ios_media）。
      */
     if (!isAndroid && !isIOS) return
     /* 切歌立刻清空：新歌开头几秒不该还唱着上一首的歌词 */
@@ -3194,27 +3059,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // 本地文件 seek 是内存级操作，1.5s 足够；在线要重开 Range 请求，给 4s
     seekGuard.current = { target: secs, until: performance.now() + (curOnlineRef.current ? 4000 : 1500) }
     void bridge.seek(secs)
-    /*
-     * 拖动进度也要推一次灵动岛：扩展是按「锚点 + 已流逝时间」自己走秒的，
-     * 不推的话它会沿旧锚点继续往下跑，越走越偏，直到下次换歌才对上。
-     *
-     * 当前句必须按**新位置**重算：`liveLine` 是基于拖动前那个位置算出来的，
-     * 直接用会把上一句又推一遍，锁屏上就出现「拖完还显示刚才那句」。
-     */
-    if (t) {
-      void liveSyncNow(
-        t, snapRef.current.playing, secs, snapRef.current.duration,
-        liveLineOf(lyrics, secs),
-        /*
-         * 收藏态必须跟着一起推。
-         *
-         * 这个参数默认 false，漏传就等于「拖一次进度，岛上那颗星灭掉」——
-         * 用户看到的是「收藏按钮状态不会切换」（2026-11-24 反馈）。
-         */
-        curFavOn,
-      )
-    }
-  }, [queueState, liveSyncNow, lyrics, curFavOn])
+  }, [queueState])
 
   /*
    * 锁屏 / 控制中心拖进度条 → 原生那边已经直接 seek 了播放器，这里把 UI 跟上。

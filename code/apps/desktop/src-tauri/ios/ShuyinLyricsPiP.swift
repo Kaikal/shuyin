@@ -3,6 +3,7 @@ import AVKit
 import CoreGraphics
 import Darwin
 import UIKit
+import UserNotifications
 
 /// iOS「桌面歌词」：画中画（Picture in Picture）里跑一条自绘的字幕。
 ///
@@ -687,7 +688,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
 /// `ShuyinPiP` 类在 Swift 侧没有任何静态引用链，Release 的 `-dead_strip`
 /// 会把整个 object（含下面三个 `@_cdecl` 符号）剥掉，dlsym 于是恒 NULL、
 /// 开关永远返回 false。Rust 启动时 dlsym 命中本函数 → 链接器认定这个
-/// object 可达、连同类一起保留。和灵动岛的 `shuyin_live_adopt` 同款机制。
+/// object 可达、连同类一起保留。
 /// 函数体刻意引用 `ShuyinPiP.shared`，确保优化器不会把类本身也剥掉。
 @_cdecl("shuyin_pip_adopt")
 public func shuyinPiPAdopt() {
@@ -721,4 +722,18 @@ public func shuyinPiPOn() -> Bool {
     var out = false
     DispatchQueue.main.sync { out = ShuyinPiP.shared.wanted }
     return out
+}
+
+/// App 启动时申请通知授权。系统「正在播放」卡与画中画都属通知体系，
+/// 首次「允许通知」是正常的一步，之后不再弹。Rust 侧 `ios_media::init` dlsym 调它。
+@_cdecl("shuyin_notif_bootstrap")
+public func shuyinNotifBootstrap() {
+    DispatchQueue.main.async {
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, error in
+            NSLog("[shuyin] notif auth granted=%d err=%@",
+                  granted ? 1 : 0, error?.localizedDescription ?? "-")
+        }
+    }
 }

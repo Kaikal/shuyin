@@ -292,10 +292,10 @@ pub fn update(
 
 /// 只翻「播放 / 暂停」并把元信息按上一次推的再发一遍（Apple 平台）。
 ///
-/// 给**灵动岛/锁屏实时活动的播放键**用：那条路径由 Swift 的 intent 直接落到
-/// Rust 的 `liveactivity::handle_remote_command`，不经过本模块的 `dispatch`，
-/// 所以锁屏那张「正在播放」卡不会自己跟着翻。没有这一句，用户按岛上的暂停，
-/// 声音停了、岛也变了，锁屏卡还画着 ▶（2026-11-23「状态不匹配」的一层）。
+/// 给画中画窗口的播放键用：那条路径由 Swift 直接落到 Rust 的
+/// `ios_media::handle_remote_command`，不经过本模块的 `dispatch`，
+/// 所以锁屏那张「正在播放」卡不会自己跟着翻。没有这一句，用户按画中画的暂停，
+/// 声音停了，锁屏卡还画着 ▶。
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub fn refresh_state(playing: bool, pos: f64, dur: f64) {
     apple::reapply(playing, pos, dur);
@@ -767,8 +767,6 @@ mod apple {
 
     /// 锁屏 / 控制中心 / 耳机按键的落地动作。
     ///
-    /// 与灵动岛按钮（`liveactivity::handle_remote_command`）是两条独立入口：
-    /// 那条来自 Swift 的 LiveActivityIntent，这条来自 MPRemoteCommandCenter。
     /// 播放暂停都在 Rust 侧直接做——前端可能已被系统挂起，不能指望它。
     fn dispatch(app: &AppHandle, cmd: &str, pos: Option<f64>) {
         use tauri::Manager;
@@ -813,7 +811,7 @@ mod apple {
                 reapply(!s.playing, s.position, s.duration);
             }
             /*
-             * 收藏：和灵动岛那颗星同一个落点——收藏列表只有前端有一份。
+             * 收藏：收藏列表只有前端有一份。
              * 锁屏那颗 ♥ 是系统画的（见 init 里的 likeCommand），状态没法由我们
              * 染成实心，所以「有没有收上」由前端弹一条 toast 交代。
              */

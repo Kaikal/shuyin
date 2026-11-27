@@ -1680,7 +1680,7 @@ impl Player {
                                 sh.relayed.store(-1, Ordering::SeqCst);
                                 sh.auto.store(n.index as i64, Ordering::SeqCst);
                                 /*
-                                 * 系统媒体卡片（锁屏 / 控制中心）和灵动岛现在就换歌名：
+                                 * 系统媒体卡片（锁屏 / 控制中心）现在就换歌名：
                                  * 等前端醒来再换的话，新歌已经响着、卡片还挂在上一首。
                                  */
                                 card_for_parts(
@@ -1903,7 +1903,7 @@ impl Player {
 
     /// 「下标 / 在播 / 位置 / 时长」——同样**不消费**任何一次性标记。
     ///
-    /// 灵动岛的状态对账线程每 700ms 读一次，用 `snapshot()` 会把 `ended`
+    /// 状态对账线程每 700ms 读一次，用 `snapshot()` 会把 `ended`
     /// 在半路吃掉：前端那条「曲终 → 换下一首」就再也不会触发了。
     pub fn state_lite(&self) -> (i64, bool, f64, f64) {
         (
@@ -1916,7 +1916,7 @@ impl Player {
 
     /// 原生手里有没有一首「已经加载好的歌」。
     ///
-    /// 给灵动岛 / 托盘的播放键判断用（同样不能走 `snapshot()`，见 `state_lite`）。
+    /// 给画中画 / 托盘的播放键判断用（同样不能走 `snapshot()`，见 `state_lite`）。
     pub fn has_track(&self) -> bool {
         self.shared
             .track
@@ -1925,41 +1925,6 @@ impl Player {
             .and_then(|t| t.clone())
             .map(|t| !t.is_empty())
             .unwrap_or(false)
-    }
-
-    /// 按队列下标取「这首歌是谁」（标题 / 歌手 / 专辑 / 封面 / 时长）。
-    ///
-    /// 给原生接歌之后的收尾用：曲终自己换了下一首，前端 JS 可能还冻着，
-    /// 系统卡片和灵动岛的歌名得有人填。原料链里有整张歌单的元信息，
-    /// 直链表里也有几首——两处都问一遍，问不到就返回 None（调用方保持原样）。
-    pub fn meta_of(&self, index: i64) -> Option<(String, String, String, String, f64)> {
-        if index < 0 {
-            return None;
-        }
-        let idx = index as usize;
-        if let Ok(c) = self.shared.chain.lock() {
-            if let Some(i) = c.items.iter().find(|i| i.index == idx && !i.title.is_empty()) {
-                return Some((
-                    i.title.clone(),
-                    i.artist.clone(),
-                    i.album.clone(),
-                    i.cover.clone(),
-                    i.duration,
-                ));
-            }
-        }
-        if let Ok(q) = self.shared.prefetch.lock() {
-            if let Some(i) = q.iter().find(|i| i.index == idx && !i.title.is_empty()) {
-                return Some((
-                    i.title.clone(),
-                    i.artist.clone(),
-                    i.album.clone(),
-                    i.cover.clone(),
-                    i.duration,
-                ));
-            }
-        }
-        None
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
@@ -2062,13 +2027,11 @@ fn next_chain_item(
     }
 }
 
-/// 系统媒体卡片（锁屏 / 控制中心）换到这一首
+/// 系统媒体卡片（锁屏 / 控制中心）换到这一首。
 ///
-/// 顺带把灵动岛也换过去。为什么两处都在这儿换：`card_for` 是**原生自己接歌**
-/// 的唯一收口（直链表接上的、现场取链接上的都走这里），而那一刻后台 JS 冻着，
-/// 前端那条 `live_activity_sync` 不会发生——不在这里推，灵动岛就停在上一首：
-/// 歌名不动、进度条走完停在那儿、播放键一直画着「暂停」（用户 2026-11-24 反馈的
-/// 「倒计时结束了歌还在播」就是这个）。
+/// `card_for` 是**原生自己接歌**的唯一收口（直链表接上的、现场取链接上的都走这里），
+/// 而那一刻后台 JS 冻着，前端那条 `smtc_update` 不会发生——不在这里推，锁屏卡
+/// 就停在上一首。
 fn card_for(item: &crate::srchost::ChainItem) {
     card_for_parts(
         item.title.clone(),
@@ -2090,20 +2053,17 @@ fn card_for_parts(title: String, artist: String, album: String, cover: String, d
      */
     std::thread::spawn(move || {
         let art = crate::coverart::resolve(&cover);
-        let path = art.as_ref().map(|a| a.path.clone()).unwrap_or_default();
-        let b64 = art.map(|a| a.b64).unwrap_or_default();
+        let path = art.map(|a| a.path).unwrap_or_default();
         crate::append_log(
             &app,
             &format!(
-                "card idx={idx} \"{title}\" art={} b64={}B",
+                "card idx={idx} \"{title}\" art={}",
                 if path.is_empty() { "none" } else { "ok" },
-                b64.len()
             ),
         );
         /* 最后一个 false = 「这首收没收藏」：原生这一刻不知道（收藏列表只在前端），
            先按未收藏画，前端那条 `smtc_update` 到了会覆盖成真值。 */
         crate::smtc::update(&app, title.clone(), artist.clone(), album.clone(), true, path, 0.0, dur, false);
-        crate::liveactivity::push_track(&title, &artist, &album, &b64, true, 0.0, dur);
     });
 }
 

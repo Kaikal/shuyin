@@ -1,4 +1,4 @@
-//! iOS 冷启动「用疏音打开」的补救层。
+//! iOS 冷启动 URL（「用疏音打开」）的补救层。
 //!
 //! 为什么需要这一层（读 tao 0.37.1 源码确认，不是猜）：
 //!
@@ -20,7 +20,7 @@
 
 use std::sync::Mutex;
 
-/// 待处理文件 URL（只收 `file://`）。
+/// 冷启动时系统送进来的 `file://` URL。
 static PENDING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// NSString：与 smtc.rs 同一套裸 msg_send 写法（不开 objc2-foundation，
@@ -35,8 +35,8 @@ unsafe fn ns(s: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject> {
 
 /// 把 NSURL 的绝对地址收进待处理队列。
 ///
-/// 只认 `file:` —— 自定义 scheme / universal link 那条路 tao 是好的，
-/// 重复收进来反而会把网页链接当成本地文件去拷。
+/// 只收 `file:`：「用疏音打开」，`stage_opened_file` 会把文件摆到 inbox。
+/// 其他 scheme（http 等）交给 `stage_opened_file` 忽略即可。
 ///
 /// # Safety
 /// `url` 必须是 NSURL 或 null。
