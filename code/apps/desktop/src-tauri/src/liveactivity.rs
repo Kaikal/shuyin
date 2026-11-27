@@ -1,10 +1,15 @@
-//! iOS 灵动岛 / 锁屏：**自绘 Live Activity（酷狗同款机制）+ 系统 Now Playing 卡共存**。
+//! iOS 灵动岛 / 锁屏：**只走系统「正在播放」卡**（2026-11-27 定案）。
 //!
-//! 自绘卡开着（`DRAW_OWN_CARD = true`）时本模块管两头接线：
-//!   · 把前端推来的播放状态转成 JSON 交给 Swift（`src-tauri/ios/ShuyinLiveActivity.swift`），
-//!     再落到 widget 扩展画出灵动岛 / 锁屏卡（样式照系统媒体卡重画过，2026-11-26）；
-//!   · 把灵动岛按钮的点击转成播放器动作。
-//! 系统 Now Playing 卡（`smtc::apple`）**同时存在**，负责耳机键 / 控制中心 / CarPlay。
+//! `DRAW_OWN_CARD = false`：不启动任何自绘 Live Activity，灵动岛 / 锁屏 / 通知栏
+//! 上只有 iOS 自己的 Now Playing 卡（`smtc::apple`）。用户反复实测后的最终诉求：
+//! 「不想要自绘制，要系统的，并且要能进入应用」——系统卡点击进 App 是 iOS 按
+//! nowPlayingInfo 关联的 bundle id 自动激活，本来就能进，第三方不用插手。
+//! 同时这也根治了两条老问题：① 系统卡 + 自绘卡同时在锁屏/通知栏出现（两张卡）；
+//! ② 每次自绘活动上屏都挂的「允许疏音的实时活动」授权提示（不 request 就永不弹）。
+//!
+//! 本模块在关自绘状态下只剩四件事：启动时 `ffi::end()` 收掉旧包残留的 activity、
+//! 拦住任何会把自绘卡造回来的推送、`spawn_state_ticker` 给系统卡做状态对账、
+//! 以及桌面歌词（画中画）的心跳。
 //!
 //! 为什么中间要过一层 Rust 而不是让前端直连 Swift：
 //!   Tauri 的 iOS 侧没有「JS → 任意 Swift 函数」的通道，要么写一个完整的
@@ -36,28 +41,23 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// 要不要画**我们自己的**实时活动（灵动岛 + 锁屏那张自绘卡）。
 ///
-/// 2026-11-26 晚**最终定案 = true**。当天下午先把自绘关掉出了一版「只留系统卡」
-/// 的包去验证，用户随即拍板回来自绘——原话：「别人能实现，肯定是可以实现的，
-/// 重新写一个灵动岛功能」。查证结果也支持这个方向：
+/// **2026-11-27 最终定案 = false，不要再翻回去。** 用户经过六轮实测后的明确诉求：
+/// 「不想要自绘制，要系统的，并且要可以进入应用」。系统 Now Playing 卡点击进 App
+/// 由 iOS 按 bundle id 自动激活（用户已实测点系统卡能进），不需要自绘 intent。
 ///
-///   · **酷狗上的就是实时活动（ActivityKit Live Activity）**——设置里它出现在
-///     「实时活动」名单里，网上的玩机教程全都是这么教的。所以「点一下进 App、
-///     长按展开」本来就是 Live Activity 的标准行为，不是系统卡给的；
-///   · **系统那张 Now Playing 胶囊的点击归 SpringBoard 管**：点一下只会展开，
-///     第三方没有任何 API 能把「进 App」挂上去。只留系统卡的版本做不到
-///     「点一下进应用」，这条路是死的；
-///   · 用户嘴里的「系统卡片」指的是**长得像系统媒体卡**——所以答案不是换机制，
-///     而是**把自绘卡的 UI 重画成系统媒体卡的样子**（岛：紧凑态左声波+右封面、
-///     展开态大封面+歌名+进度+圆形播放键；见 widget/ShuyinLiveActivityWidget.swift）。
+/// 关掉自绘同时根治了之前反复出现的两条 bug：
+///   ① **两张卡**：系统媒体卡 + 自绘卡在锁屏/通知栏同时出现 → 现在只剩系统那张；
+///   ② **授权弹窗**：用户 11-27 实测「昨晚点了同意，今天重装照样弹」——自绘活动
+///      每次 request 都会挂「允许疏音的实时活动」，不 request 就永不弹。
 ///
-/// 11-25~26 来回翻了五次烧饼，教训就一条：**把两张卡混成一张**。
-///   ① 自绘 Live Activity（本模块 + widget 扩展）：能自定义内容、能挂点击 intent，
-///      代价是锁屏多一张卡（已压成一行歌词条弱化）；
-///   ② 系统 Now Playing 卡（`smtc::apple`，MPNowPlayingInfoCenter）：永远在，
-///      但内容和点击都不可定制。
-/// 两者长期共存：②负责耳机键/控制中心/CarPlay，①负责灵动岛展示与交互。
-/// **不要再把 DRAW_OWN_CARD 关掉**——关掉 = 岛上点不开 App（系统卡替代不了）。
-pub const DRAW_OWN_CARD: bool = true;
+/// 11-25~27 来回翻了六轮烧饼，根因一直是「把两种卡片混为一谈」：
+///   ① 系统 Now Playing 卡（`smtc::apple`，MPNowPlayingInfoCenter）：点一下进 App 是
+///      系统行为，本来就支持；负责耳机键/控制中心/CarPlay；
+///   ② 自绘 Live Activity（本模块 + widget）：能自定义内容/挂 intent，代价是锁屏多
+///      一张卡 + 授权弹窗。
+/// 用户要的是 ①，所以 ② 整个关掉。Swift/widget/intents 全部保留在仓库里不删，
+/// 只靠这个常量切换——将来用户若主动要求恢复自绘，改回 true 即可。
+pub const DRAW_OWN_CARD: bool = false;
 
 /// 一次播放状态的快照，字段名与 Swift 侧的 `ShuyinLive.Payload` 一一对应。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
