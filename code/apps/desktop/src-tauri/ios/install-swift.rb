@@ -199,7 +199,8 @@ else
     embed.dst_subfolder_spec = '13'
     app.build_phases << embed
   end
-  embed.add_file(ext.product_reference)
+  bf = embed.add_file_reference(ext.product_reference)
+  bf.settings = { 'ATTRIBUTES' => ['RemoveHeadersOnCopy', 'CodeSignOnCopy'] }
   puts "[swift] 扩展已嵌入主 App（bundle id: #{bundle_id}.island）"
 
   project.save
