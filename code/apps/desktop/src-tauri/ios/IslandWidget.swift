@@ -1,4 +1,5 @@
 import ActivityKit
+import AppIntents
 import CoreFoundation
 import SwiftUI
 import WidgetKit
@@ -30,7 +31,7 @@ private let islandAccent = Color(red: 1.0, green: 0.79, blue: 0.30)
 /// 扩展进程里发 Darwin 通知（无负载，命令编码在通知名里）。
 private func islandPost(_ cmd: String) {
     CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotificationCenter(),
+        CFNotificationCenterGetDarwinNotifyCenter(),
         CFNotificationName("\(islandCmdPrefix)\(cmd)" as CFString),
         nil, nil, true,
     )
@@ -49,7 +50,7 @@ struct ShuyinIslandLive: Widget {
             /* 锁屏上的卡片（Live Activity 同时出现在灵动岛和锁屏，共用一份 state） */
             IslandLockView(s: context.state)
         } dynamicIsland: { context in
-            DynamicIsland { expanded in
+            DynamicIsland {
                 let s = context.state
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: "music.note")

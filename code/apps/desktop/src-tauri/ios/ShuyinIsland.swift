@@ -216,7 +216,7 @@ final class ShuyinIsland {
             for a in acts {
                 try? await a.end(contentState(), dismissalPolicy: .immediate)
             }
-            NSLog("[shuyin] island ended (%d) %@", acts.count, reason)
+            NSLog("[shuyin] island ended \(acts.count) \(reason)")
         }
     }
 
@@ -229,7 +229,7 @@ final class ShuyinIsland {
     func registerObserverIfPossible() {
         guard !observing else { return }
         observing = true
-        let center = CFNotificationCenterGetDarwinNotificationCenter()
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
         let names: [CFString] = [
             ShuyinIsland.cmdPlayPause as CFString,
             ShuyinIsland.cmdPrev as CFString,
@@ -243,9 +243,9 @@ final class ShuyinIsland {
             ShuyinIsland.forward(cmd: cmd)
         }
         for n in names {
-            CFNotificationCenterAddObserver(center, nil, cb, n, nil, .deliverImmediately)
+            CFNotificationCenterAddObserver(center, nil, cb, CFNotificationName(n), nil, .deliverImmediately)
         }
-        NSLog("[shuyin] island observers registered (%d)", names.count)
+        NSLog("[shuyin] island observers registered \(names.count)")
     }
 
     /// 转发给 Rust（与画中画同一入口：playpause 直接切，prev/next 发事件给前端）。
