@@ -19,14 +19,15 @@ use std::time::{Duration, Instant};
 /* 诊断日志                                                            */
 /* ------------------------------------------------------------------ */
 
-/// app.log 的绝对路径，由 lib.rs 启动时注入。
+/// app 日志目录，由 lib.rs 启动时注入。
 ///
 /// 打包版是 `windows_subsystem = "windows"`，没有控制台，`eprintln!` 写进虚空；
-/// 而 seek 耗时、重拉流这类问题只能靠事后取证，所以这里统一落到同一个日志文件。
-static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// 而 seek 耗时、重拉流这类问题只能靠事后取证，所以这里统一落到同一个日志文件
+/// （按天分文件、留 3 天，见 `crate::write_log_at`）。
+static LOG_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 
-pub fn set_log_path(p: std::path::PathBuf) {
-    let _ = LOG_PATH.set(p);
+pub fn set_log_dir(p: std::path::PathBuf) {
+    let _ = LOG_DIR.set(p);
 }
 
 /// 启动时注入的 AppHandle：原生自动接下一首时要顺手更新系统媒体卡片。
@@ -55,18 +56,11 @@ fn is_trial_clip(real: f64, expect: f64) -> bool {
 }
 
 fn log_line(line: &str) {
-    use std::io::Write;
-    let Some(p) = LOG_PATH.get() else {
+    let Some(dir) = LOG_DIR.get() else {
         eprintln!("{line}");
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(f, "[{ts}] {line}");
-    }
+    crate::write_log_at(dir, line);
 }
 
 /* ------------------------------------------------------------------ */
@@ -999,6 +993,14 @@ pub struct PlayerSnapshot {
     /// 原生自己取链接上了下一首（后台 JS 冻住时走的那条路），报它接到的下标。
     /// 和 `auto` 的区别：`auto` 是「表里已有直链、直接接」，这个是「现场取链」。
     pub relayed: i64,
+    /// 定时关闭剩余秒数（0 = 没开；「播完本曲」模式也是 0）
+    pub sleep: i64,
+    /// 定时关闭「播完当前这首就停」。
+    ///
+    /// 字段名跟安卓那条 `player://state` 保持一致（snake_case），前端一份解析
+    /// 两端通吃；这个结构体整体是 camelCase，所以这里单独 rename。
+    #[serde(rename = "sleep_track")]
+    pub sleep_track: bool,
 }
 
 /// 前端事先递过来的「接下来几首」直链。
@@ -1663,6 +1665,20 @@ impl Player {
                         *sh.played.lock().unwrap_or_else(|e| e.into_inner()) = (dur, Instant::now());
                         *sh.started_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         /*
+                         * **定时关闭「播完这首」：曲终就是「播完」的准点。**
+                         *
+                         * 不接下一首、不取链，直接把 `ended` 推给前端（界面的
+                         * 播放态跟着停）。放在「问预告表」之前：晚一步就会先把
+                         * 下一首接上、响半秒再被暂停——用户听到的是「停是停了，
+                         * 但切了一首」。
+                         */
+                        if crate::sleep::stop_after_track() {
+                            sh.auto.store(-1, Ordering::SeqCst);
+                            sh.ended.store(true, Ordering::SeqCst);
+                            log_line("sleep: end-of-track -> stop");
+                            continue;
+                        }
+                        /*
                          * **先问预告表：有下一首就自己接，不交给前端。**
                          *
                          * iOS 在后台会把 WebView 的 JS 冻住，`ended` 推过去没人接，
@@ -1941,6 +1957,8 @@ impl Player {
         } else {
             0.0
         };
+        /* 定时关闭：真值在 `sleep` 模块，这里只负责带出去（前端面板显示剩余） */
+        let (sleep, sleep_track) = crate::sleep::state();
         PlayerSnapshot {
             playing: sh.playing.load(Ordering::SeqCst),
             position: current_position(sh),
@@ -1957,6 +1975,8 @@ impl Player {
             buffered,
             pf: sh.prefetch.lock().map(|q| q.len()).unwrap_or(0),
             relayed: sh.relayed.load(Ordering::SeqCst),
+            sleep,
+            sleep_track,
         }
     }
 }
@@ -2054,16 +2074,29 @@ fn card_for_parts(title: String, artist: String, album: String, cover: String, d
     std::thread::spawn(move || {
         let art = crate::coverart::resolve(&cover);
         let path = art.map(|a| a.path).unwrap_or_default();
+        /*
+         * 播放态**照实取**，不要写死 true。
+         *
+         * 用户暂停着切歌时（点队列里另一首但不播），以前这里推的是「在播」，
+         * 系统卡/灵动岛于是画着暂停键旁边一个「正在播放」——就是用户说的
+         * 「灵动岛的播放暂停状态和歌曲不对应」。取当前真值最稳：换歌开始播时
+         * 它本来就是 true，暂停切歌时就是 false。
+         */
+        let playing = {
+            use tauri::Manager;
+            app.try_state::<Player>().map(|p| p.state_lite().1).unwrap_or(true)
+        };
         crate::append_log(
             &app,
             &format!(
-                "card idx={idx} \"{title}\" art={}",
+                "card idx={idx} \"{title}\" art={} playing={}",
                 if path.is_empty() { "none" } else { "ok" },
+                playing,
             ),
         );
         /* 最后一个 false = 「这首收没收藏」：原生这一刻不知道（收藏列表只在前端），
            先按未收藏画，前端那条 `smtc_update` 到了会覆盖成真值。 */
-        crate::smtc::update(&app, title.clone(), artist.clone(), album.clone(), true, path, 0.0, dur, false);
+        crate::smtc::update(&app, title.clone(), artist.clone(), album.clone(), playing, path, 0.0, dur, false);
     });
 }
 

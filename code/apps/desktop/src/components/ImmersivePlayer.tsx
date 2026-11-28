@@ -2680,7 +2680,7 @@ export function ImmersivePlayer({ open, onClose, onOpenDetail, onOpenQueue, onTo
            * 放在「更多」里而不是只放设置页：用户是**躺着听的时候**才想起要定时，
            * 那时他不会去设置页翻。标签上直接写剩余时间，不用点进去才知道开没开。
            */
-          ...(isAndroid ? [{
+          ...((isAndroid || isIOS) ? [{
             id: 'sleep',
             label: p.sleep.track
               ? '定时关闭 · 播完这首'

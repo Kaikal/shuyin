@@ -50,8 +50,8 @@ export function SleepSheet({ open, onClose }: { open: boolean; onClose(): void }
   const sub = sleep.track
     ? '播完当前这首就暂停'
     : sleep.on
-      ? `还有 ${mmss(sleep.remain)}，到点会淡出并暂停`
-      : '到点后淡出并暂停，不会关掉应用'
+      ? `还有 ${mmss(sleep.remain)}，到点会暂停`
+      : '到点后暂停，不会关掉应用'
 
   /* 选完就收起：这是个「一锤子」设置，留在面板上没有任何后续操作 */
   const pick = (min: number | 'track' | null) => {

@@ -107,6 +107,20 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     /// 两者都要在 didStop 收尾，但只有后者要回传 `pipclosed` 把开关拨回去。
     private var selfClosing = false
 
+    /**
+     * 用户按了画中画上的「回到 App」，系统正在把窗口放大回应用。
+     *
+     * 这一段要拦两件事：
+     *   · `didBecomeActive` 里那条「回到 App 就收起浮窗」的兜底——系统自己已经在
+     *     做收尾动画了，我们再调一次 `stopPictureInPicture()` 就是两个动画打架，
+     *     用户看到的就是「黑一下、窗口又滑一下」（2026-11-28 反馈）；
+     *   · `didStop` 里「用户按 ×」的那条分支——收尾原因是回 App，不是关窗，
+     *     不能把开关拨回关、更不能回传 `pipclosed`。
+     *
+     * 3 秒兜底复位：万一某个系统版本不回调 didStop，旗不能一直立着。
+     */
+    private var restoring = false
+
     /// 立闸：`stopping` 立即生效，另给一个 `secs` 秒的时间窗口兜住迟到的 setPlaying。
     private func markStopping(_ secs: TimeInterval) {
         stopping = true
@@ -346,6 +360,15 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
             ) { [weak self] _ in
                 guard let self, self.wanted else { return }
                 if self.ctrl?.isPictureInPictureActive == true {
+                    /*
+                     * 正在「回 App」的系统收尾（restore）就别再插一脚：
+                     * 系统已经在把窗口放大回去了，我们再 stopPictureInPicture()
+                     * 会变成两个动画抢同一个窗口——黑屏 + 多滑一下就是这么来的。
+                     */
+                    if self.restoring {
+                        NSLog("[shuyin] pip active-stop skipped (restoring)")
+                        return
+                    }
                     self.stoppingForForeground = true
                     self.ctrl?.stopPictureInPicture()
                     NSLog("[shuyin] pip stop (back to app)")
@@ -613,13 +636,40 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     }
 
     /// 点画中画上的「回到 App」：必须回调 completionHandler，否则窗口不关。
+    ///
+    /// 2026-11-28 用户要求「直接放大到应用播放界面」，而以前这里只是立刻回 true：
+    /// App 从后台被拉起来时还停在原来那一页（甚至是曲库顶部），画中画窗口放大
+    /// 回去对上的是一张还没画出来的界面——就是那一下黑屏 + 跳一下。
+    ///
+    /// 现在的顺序：
+    ///   1. 先给前端发 `restore`，让它把播放页打开（`pip://restore` → 播放页）；
+    ///   2. 立起 `restoring`，拦住 didBecomeActive 里那条「回 App 就收窗」，
+    ///      别再和系统的收尾动画抢；
+    ///   3. 让出一帧（120ms）再回 true，等 WebView 把播放页画出来，
+    ///      放大动画落点就是播放页本身。
     func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
             completionHandler: @escaping (Bool) -> Void,
     ) {
         NSLog("[shuyin] pip restore request")
-        completionHandler(true)
+        restoring = true
+        /* 收尾期间 AVKit 补发的 setPlaying(false) 一律只记账（别把歌暂停了） */
+        markStopping(2)
+        /* 目的页：播放界面。前端收到就切过去（App 在后台时 JS 冻着，
+           这条会在回到前台的第一时间执行，正好赶在放大动画之前）。 */
+        send("restore")
+        /*
+         * 150ms：足够 WebView 跑完 React 的一次渲染（事件是回到前台后才处理，
+         * 这一小段同时也在等 window 变 key）。再多用户就会觉得「点了没反应」。
+         */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            completionHandler(true)
+        }
+        /* 兜底：万一系统没回调 didStop，旗子不能一直立着 */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.restoring = false
+        }
     }
 
     // MARK: - SampleBufferPlaybackDelegate（iOS 26 SDK 里这 4 个都是 required）
@@ -706,15 +756,18 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         _ controller: AVPictureInPictureController,
     ) {
         stopping = false
-        NSLog("[shuyin] pip stopped (fg=%d self=%d)",
-              stoppingForForeground ? 1 : 0, selfClosing ? 1 : 0)
-        if stoppingForForeground {
-            /*
-             * 是我们自己「回到 App 就收起来」收的：**控制器和宿主 view 都留着**。
-             * 销毁了下次切后台就再也浮不起来（后台不允许 start），留着才能靠
-             * `canStartPictureInPictureAutomaticallyFromInline` 自动重开。
-             */
+        NSLog("[shuyin] pip stopped (fg=%d self=%d restore=%d)",
+              stoppingForForeground ? 1 : 0, selfClosing ? 1 : 0, restoring ? 1 : 0)
+        /*
+         * 「回 App」有两条路：用户点了窗口上的方框箭头（restore 回调），
+         * 或 App 自己回到前台（didBecomeActive 兜底）。两条都是收窗、
+         * **不是关开关**，所以控制器和宿主 view 都留着——销毁了下次切后台
+         * 就再也浮不起来（后台不允许 start），留着才能靠
+         * `canStartPictureInPictureAutomaticallyFromInline` 自动重开。
+         */
+        if stoppingForForeground || restoring {
             stoppingForForeground = false
+            restoring = false
             return
         }
         if selfClosing {

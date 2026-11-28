@@ -1182,16 +1182,15 @@ mod apple {
             };
             let center: Retained<AnyObject> = objc2::msg_send![np_cls, defaultCenter];
             /*
-             * 只有「自己那套胶囊」（`shuyin.island.own`，默认关）才压系统卡。
+             * 只有「自己那套胶囊」（`shuyin.island.own`）才压系统卡。
              *
-             * **默认不压**：岛上交给 iOS 自带的「正在播放」画。nowPlayingInfo 只要
-             * 挂着，系统就把它当一条系统级实时活动占岛位——这正是默认想要的形态
-             * （点一下开 App、长按展开系统播控）。
+             * **2026-11-28 起这条路已经关闭**：设置里删了那颗开关，Swift 侧
+             * 启动时把存档改回 false 并收掉历史 activity，`live()` 恒 false。
+             * 也就是说系统卡永远挂着——岛上就是 iOS 自带的「正在播放」。
              *
-             * 用户手动开了自绘胶囊才把 nowPlayingInfo 摘掉：留着的话我们的 compact
-             * 旁边会挤一颗 minimal 小黑点（2026-11-27 实测截图），且没有公开 API
-             * 只从岛上摘。副作用要知道：活动起不来时岛与锁屏会一起空，所以这条
-             * 互斥必须由用户显式开启，别做默认。
+             * 当初为什么会走互斥：留着 nowPlayingInfo，我们的 compact 旁边会挤
+             * 一颗 minimal 小黑点（2026-11-27 实测截图），且没有公开 API 只从岛上摘。
+             * 但压掉的副作用太大：活动起不来时岛与锁屏一起空。所以彻底不走这条路。
              * LAST 照常记：灵动岛心跳的 last_meta/last_cover 还靠它。
              */
             if crate::island::live() {

@@ -308,6 +308,28 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
   }
 
   /**
+   * 导出诊断日志（最近 3 天）。
+   *
+   * 日志现在放在应用数据目录（不再是下载目录），手机上用户进不去，
+   * 所以由原生复制一份到公共下载目录：iOS 是「文件 → 我的 iPhone → 疏音」，
+   * 安卓是 `Download/疏音/日志-<时间戳>`。
+   */
+  const exportLogs = async () => {
+    try {
+      const dir = await bridge.invoke<string>('logs_export')
+      if (!dir) {
+        toast('还没有日志可以导出')
+        return
+      }
+      toast(`日志已导出到：${dir}`, { ok: true })
+      /* 桌面顺手打开那个文件夹；手机上开了也没用 */
+      if (bridge.isDesktop) void bridge.revealInFolder(dir).catch(() => {})
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '导出日志失败', { bad: true })
+    }
+  }
+
+  /**
    * 旧版本缓存误落盘的副本（`Music/疏音/online_*`）。
    *
    * 见 bridge.cacheCopies 的说明：以前缓存被发布成了下载文件，缓存目录一直空着，
@@ -589,11 +611,13 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       )}
 
       {/*
-       * 灵动岛（2026-11-27）：iPhone 走系统 Live Activity（主目标），安卓走
-       * TYPE_APPLICATION_OVERLAY 悬浮窗包挖孔。形态对齐酷狗：点一下回 App，
-       * 长按展开播控胶囊。车机不做（没有挖孔，也没有「别的应用」）。
+       * 灵动岛（2026-11-27）：安卓走 TYPE_APPLICATION_OVERLAY 悬浮窗包挖孔，
+       * 形态对齐酷狗：点一下回 App，长按展开播控胶囊。
+       * **iPhone 不再出现这一块**（2026-11-28 用户定案）：iOS 岛上就是系统自带的
+       * 「正在播放」，系统自己画胶囊、自己展开，没有可调的选项。
+       * 车机不做（没有挖孔，也没有「别的应用」）。
        */}
-      {(bridge.isAndroid || bridge.isIOS) && !isCar && <DynamicIslandSection />}
+      {bridge.isAndroid && !isCar && <DynamicIslandSection />}
 
       {/*
        * 状态栏歌词：整块从播放页「更多」搬过来（用户 2026-11-23「开关放在设置页去」）。
@@ -925,6 +949,19 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         )}
         {cacheMsg && <div className="cache-msg">{cacheMsg}</div>}
         {/*
+         * 诊断日志：只留最近 3 天，出问题时点一下导出到下载目录。
+         * 和「缓存」同属存储类，放在这一块。
+         */}
+        <div className="set-row">
+          <span className="set-label">
+            诊断日志
+            <span className="set-sub">只保留最近 3 天；出问题时导出发给开发者</span>
+          </span>
+          <span className="set-ctl">
+            <button className="ghost-btn" onClick={() => void exportLogs()}>导出日志</button>
+          </span>
+        </div>
+        {/*
          * 旧版本留下的缓存副本：只在真有的时候出现，避免平时多一行看不懂的东西。
          * 文案说清「不是你的下载」，否则用户不敢点。
          */}
@@ -988,13 +1025,14 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
       </section>
 
       {/*
-       * 定时关闭 / 音量保护：**安卓专属**（真值在原生 SleepTimer / AudioEngine）。
+       * 定时关闭 / 音量保护。
        *
-       * 桌面端没有这两条：定时关闭在桌面上意义不大（没人插着电睡觉听），
-       * 而淡入淡出要动 Rust 音频线程那一侧，两边节奏不同步反而会「一个平台有一处没」。
-       * 等桌面那边要做时，这里把 isAndroid 去掉即可。
+       * 定时关闭：安卓 = Kotlin `SleepTimer`，iOS/桌面 = Rust `sleep` 模块，
+       * 两边都是原生对表（熄屏后前端 JS 冻住，`setTimeout` 不走）。
+       * 音量保护只有安卓有：它挂在 ExoPlayer 的输出链上，Rust 这条链没有对应实现。
+       * 2026-11-28 用户问「苹果端为啥没有定时关闭」——这里放开到 iOS。
        */}
-      {bridge.isAndroid && (
+      {(bridge.isAndroid || bridge.isIOS) && (
         <section className="set-group" data-pane="play" data-sec="guard">
           <h3>睡眠与音量</h3>
           <div className="set-row">
@@ -1015,6 +1053,8 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
               </button>
             </span>
           </div>
+          {/* 音量保护只挂在安卓 ExoPlayer 的输出链上，Rust 那条链没有对应实现 */}
+          {bridge.isAndroid && (
           <div className="set-row">
           <span className="set-label">音量保护</span>
             <button
@@ -1024,9 +1064,9 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
               <span className="sr-only">音量保护</span>
             </button>
           </div>
+          )}
         </section>
       )}
-
       <section className="set-group" data-pane="play" data-sec="boot">
         <h3>启动</h3>
         <div className="set-row">

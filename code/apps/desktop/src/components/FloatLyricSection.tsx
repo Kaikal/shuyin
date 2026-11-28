@@ -74,8 +74,12 @@ export function FloatLyricSection() {
   return (
     <section className="set-group" data-pane="shell" data-sec="float">
       <h3>桌面歌词</h3>
+      {/*
+       * 2026-11-28 用户要求：这一块**不要任何说明文字**，标题 + 一颗开关就够。
+       * 所以没有 `set-label`、没有 `set-sub`（空 span 只是把开关顶到右边）。
+       */}
       <div className="set-row">
-        <span className="set-label">离开应用时浮在其它界面之上</span>
+        <span className="set-label" />
         <button
           className="toggle" role="switch" aria-checked={on}
           onClick={toggle}
@@ -83,11 +87,6 @@ export function FloatLyricSection() {
           <span className="sr-only">桌面歌词</span>
         </button>
       </div>
-      <p className="set-sub">
-        {isIOS
-          ? 'iOS 走系统画中画：窗口上的 ±10 秒就是上一首 / 下一首；回到疏音会自动收起。'
-          : '安卓走系统悬浮窗：需要「显示在其他应用上层」权限。'}
-      </p>
     </section>
   )
 }

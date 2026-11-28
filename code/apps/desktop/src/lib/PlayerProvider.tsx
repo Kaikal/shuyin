@@ -3369,7 +3369,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   /* ---------------- 定时关闭 / 音量保护（安卓原生执行，前端只发命令） ---------------- */
 
   const setSleep = useCallback((min: number | 'track' | null) => {
-    if (!isAndroid) return
+    /*
+     * 安卓：Kotlin `SleepTimer`；iOS / 桌面：Rust `sleep` 模块 + `sleep_set`。
+     * 其余环境（纯浏览器预览）没有原生命令，直接返回。
+     */
+    if (!isAndroid && !isIOS) return
     /*
      * 乐观更新：先按用户选的值画上，等原生下一帧把真值带回来（`sleep` 字段）。
      * 不乐观的话，点了「30 分钟」面板要等 250ms 才变成「30 分钟」，

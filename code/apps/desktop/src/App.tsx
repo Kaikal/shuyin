@@ -639,6 +639,21 @@ export function App() {
     setDetail(t)
   }
 
+  /*
+   * 画中画（桌面歌词）上的「回到 App」：**先把播放页打开**。
+   *
+   * iOS 原生收到那颗方框箭头后会把画中画窗口放大回应用。以前我们什么都不做，
+   * 放大的落点是「离开时停着的那一页」（曲库/列表），用户看到的就是
+   * 「黑一下、然后跳到别处」。现在原生先发这条 `pip://restore`、等 150ms
+   * 再放大，这里抢先把播放页亮出来，动画落点直接是播放界面。
+   */
+  useEffect(() => bridge.onPipRestore(() => {
+    flashPlayer(true)
+    openDetail(null)
+    setQueueOpen(false)
+    setNowOpen(true)
+  }), [])
+
   /* ---------- 点击空白处收起右侧卡片 ----------
    * 播放列表、歌曲详情这类贴边弹出的卡片，点别处应该自动收回——
    * 总是要求用户先找到那颗小小的 ✕ 太费劲。开关按钮本身（data-panel-toggle）

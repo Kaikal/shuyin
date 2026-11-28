@@ -5,45 +5,26 @@ import UIKit
 
 /// iOS「灵动岛」：ActivityKit Live Activity 的主 App 侧管理器。
 ///
-/// ## 两条路，默认走系统那条（2026-11-28 用户定）
+/// ## 2026-11-28 起：**不再自绘**，岛上完全交给系统
 ///
-///   · **默认（存档关）**：岛上就是 iOS 自带的「正在播放」——系统按
-///     `MPNowPlayingInfoCenter` 自己画胶囊、自己展开播控，点一下打开疏音。
-///     这条路零权限、零配额、零扩展依赖，**永远不会空**。
-///   · **手动开（`shuyin.island.own`）**：换成下面这套我们自己的 Live Activity
-///     （封面胶囊，酷狗同款），并压掉系统卡避免岛上两颗胶囊打架。
+/// 用户定案：「用系统那个，不要自绘」，并且明确把设置里「用疏音胶囊替代系统
+/// 『正在播放』」那一项也去掉。所以现在 iOS 上：
 ///
-/// 为什么默认要倒过来：2026-11-27 为了让岛上只留我们的胶囊，把系统卡
-/// `setNowPlayingInfo: nil` 压掉了。结果一旦我们的 activity 起不来
+///   · 岛 = iOS 自带的「正在播放」——系统按 `MPNowPlayingInfoCenter` 自己画
+///     胶囊、自己展开播控，点一下打开疏音。零权限、零配额、零扩展依赖。
+///   · 本文件这套 Live Activity 只在**历史遗留**时收尾：老版本把开关写过 true，
+///     启动时 `disableOwn()` 把存档改回关、把还挂着的 activity end 掉，
+///     然后把 `setNowPlayingInfo` 让回给系统（`smtc::apply` 里的互斥看 `live()`，
+///     这时恒为 false）。
+///
+/// 为什么彻底关掉而不是留着当选项：2026-11-27 为了让岛上只留我们的胶囊，
+/// 把系统卡 `setNowPlayingInfo: nil` 压掉了。结果一旦我们的 activity 起不来
 /// （系统「实时活动」被关 / 扩展没嵌上 / 免费证书重装后授权重置），
-/// **岛上和锁屏一起变空**——用户看到的就是「灵动岛没了」。所以现在默认
-/// 把系统卡放出来，我们的胶囊变成可选。
+/// **岛上和锁屏一起变空**——用户看到的就是「灵动岛没了 / 状态和歌对不上」。
 ///
-/// ## 形态（开关打开时）
-///
-/// 系统灵动岛长在摄像头挖孔周围，Live Activity 的 compact 视图画在挖孔两侧：
-///   · **点一下胶囊 = 打开疏音**——这是 Live Activity 的系统默认行为，
-///     不写一行代码（整块胶囊本来就是可点的）；
-///   · **长按 = 系统自动展开**——展开态由 Widget 扩展渲染
-///     （`ios/IslandWidget.swift`：歌名 + 播控）。
-///
-/// ## 生命周期
-///
-///     Rust 心跳（ios_media::spawn_island_ticker，500ms）
-///       → shuyin_island_set(title, artist, pos, playing, dur)（本文件）
-///         → 播放中：起 activity（懒起）+ 节流 update
-///         → 暂停 8s：end 掉 activity；恢复播放重新 request
-///
-/// update 有系统配额（活跃 activity 每小时有上限），所以**不做逐帧推**：
-/// 进度条用 `ProgressView(timerInterval:)` 让系统按墙钟自走，只在
-/// 换歌 / 暂停恢复 / 拖进度（|Δpos|>4s）/ 时长变化时才真 update。
-///
-/// ## 展开态播控怎么回来
-///
-/// 扩展进程里的 `Button(intent:)` 够不到主 App 二进制（dlsym 是进程内的），
-/// 走 Darwin 通知跨进程转发：扩展 post `cn.shuyin.island.cmd.*`，
-/// 本文件的观察者收到后 dlsym 调 Rust 的 `shuyin_remote_command`
-/// ——后台播歌时主 App 活着（audio 后台模式），这条路通。
+/// 下面这套 request/update/end 的实现保留着（`shuyin_island_set` 仍会被
+/// Rust 心跳调到），但 `wanted` 恒为 false，全部路径都是空转；留着是为了
+/// 万一以后要恢复，逻辑与注释都还在。
 ///
 /// ## 符号存活（同 ShuyinLyricsPiP 的坑）
 ///
@@ -64,19 +45,14 @@ final class ShuyinIsland {
     /// Rust → Swift 的远端命令入口（Darwin 通知最终落到这里）。
     private typealias RemoteFn = @convention(c) (UnsafePointer<CChar>?) -> Void
 
-    /// 存档键。**2026-11-28 换了新键**。
+    /// 存档键。2026-11-28 起**永远写 false**：设置里已经没有这颗开关了。
     ///
-    /// 旧键 `shuyin.island` 是「没写过 = false」，可昨天调胶囊时写过 true；
-    /// 老键会把「自绘胶囊」原封不动带进新版本，而用户此刻要的是系统那个
-    /// （岛上现在空着，正是因为我们把系统「正在播放」卡压掉了）。换键 = 全体复位成默认关。
+    /// 换过键（旧键 `shuyin.island` 是昨天调胶囊时写过的）是为了让老用户
+    /// 复位成「系统的岛」，别再被上一次的 true 拖着走。
     private static let ownKey = "shuyin.island.own"
 
-    /// 开关真值（持久化；对齐画中画的 `shuyin.pip.lyrics`）。
-    ///
-    /// **默认关 = 走 iOS 自带的「正在播放」灵动岛**：系统自己画胶囊与展开态，
-    /// 点一下打开疏音、长按展开系统播控，不占我们的实时活动授权与 update 配额。
-    /// 打开才切到我们自己的 ActivityKit 胶囊（`IslandWidget.swift` 那套封面款），
-    /// 同时压掉系统卡（`smtc::apply` 里那条互斥）。
+    /// 开关真值。现在恒为 false（见 `disableOwn`），保留字段只为让上面那套
+    /// request/update 逻辑原样编译。
     private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: ShuyinIsland.ownKey)
 
     /// 当前挂着的 activity。 adopts 孤儿：上次启动没来得及 end 就被杀，
@@ -182,21 +158,31 @@ final class ShuyinIsland {
         return small.jpegData(compressionQuality: 0.7)
     }
 
-    private func performToggle() -> Bool {
-        wanted.toggle()
-        UserDefaults.standard.set(wanted, forKey: ShuyinIsland.ownKey)
-        if wanted {
-            /* 有歌在放 / 刚暂停（宽限期内）就直接起；没歌等心跳带着数据来再起 */
-            if playing || dur > 0 {
-                startIfNeeded()
-                pushIfNeeded()
-            }
-            NSLog("[shuyin] island on")
-        } else {
-            endActivity(reason: "toggle off")
-            NSLog("[shuyin] island off")
+    /// 收掉历史遗留的自绘胶囊（启动时调一次）。
+    ///
+    /// 老版本把开关调成过 true，`Activity` 可能还挂在灵动岛上。设置里的开关
+    /// 已经删了，没人会去关它——不在这里收，用户就会一直看到一颗「疏音的胶囊」
+    /// 和系统卡打架（而且它的播放态来自另一条心跳，容易出现「状态和歌对不上」）。
+    func disableOwn() {
+        let was = wanted
+        wanted = false
+        UserDefaults.standard.set(false, forKey: ShuyinIsland.ownKey)
+        /* 旧键也顺手清掉，免得以后有人又去读它 */
+        UserDefaults.standard.removeObject(forKey: "shuyin.island")
+        if was || !Activity<IslandAttributes>.activities.isEmpty {
+            endActivity(reason: "own island removed")
         }
-        return wanted
+    }
+
+    private func performToggle() -> Bool {
+        /*
+         * 设置里这颗开关已经删了（2026-11-28）。万一还有老前端调进来，
+         * 一律当「关」处理：宁可什么都不做，也不能又打开一套自绘胶囊
+         * 把系统卡压掉。
+         */
+        disableOwn()
+        NSLog("[shuyin] island toggle ignored (own island removed)")
+        return false
     }
 
     private func startIfNeeded() {
@@ -362,6 +348,8 @@ public func shuyinIslandAdopt() {
         }
         _ = ShuyinIsland.shared
         ShuyinIsland.shared.registerObserverIfPossible()
+        /* 老版本留下的自绘胶囊：启动就收掉，让系统「正在播放」接管灵动岛 */
+        ShuyinIsland.shared.disableOwn()
     }
 }
 

@@ -646,6 +646,26 @@ export const bridge = {
     return () => { disposed = true; unlisten?.() }
   },
 
+  /**
+   * 订阅「用户点了画中画上的回到 App」。
+   *
+   * 原生先把窗口放大回应用的动画挂起 150ms 等我们切页（见
+   * `ShuyinLyricsPiP.restoreUserInterfaceForPictureInPictureStop…`），
+   * 这里收到就打开播放页——动画落点直接是播放页，不再黑一下再跳。
+   */
+  onPipRestore(cb: () => void): () => void {
+    if (!isTauri) return () => {}
+    let unlisten: (() => void) | null = null
+    let disposed = false
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      if (disposed) return
+      listen('pip://restore', () => cb()).then(u => {
+        if (disposed) u(); else unlisten = u
+      })
+    })
+    return () => { disposed = true; unlisten?.() }
+  },
+
   /** 订阅播放状态事件 */
   onPlayerEvent(cb: (e: { event: string; payload: unknown }) => void): () => void {
     if (isAndroid) {

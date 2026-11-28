@@ -1,44 +1,32 @@
 //! iOS「灵动岛」：ActivityKit Live Activity 的 Rust 接线。
 //!
-//! ## 默认走系统那条（2026-11-28）
+//! ## 2026-11-28 起：**岛上完全交给系统**，这套只负责收拾历史遗留
 //!
-//! 岛上默认就是 iOS 自带的「正在播放」：我们只管照常发 `MPNowPlayingInfoCenter`
-//! （见 `smtc::apply`），胶囊与展开态全由系统画，点一下开 App 也是系统行为。
-//! 这条路上这里整套都是**惰性的**：存档 `shuyin.island.own` 默认 false，
-//! `on()` 恒 false → 心跳线程空转、`smtc` 不压系统卡。
+//! 用户定案「用系统那个，不要自绘」，设置里「用疏音胶囊替代系统『正在播放』」
+//! 那一项也一并删掉。所以 iOS 上岛 = iOS 自带的「正在播放」：我们只管照常发
+//! `MPNowPlayingInfoCenter`（见 `smtc::apply`），胶囊与展开态全由系统画，
+//! 点一下开 App 也是系统行为。零权限、零配额、零扩展依赖，永远不会空。
 //!
-//! 用户手动开 `shuyin.island.own` 才切到下面这套自绘胶囊（封面款），
-//! 那时才 request/update 我们的 Live Activity，并压掉系统卡。
+//! 本模块在这条路上是**惰性的**：Swift 侧启动时把存档 `shuyin.island.own`
+//! 改回 false 并 end 掉还挂着的 activity，`on()` 恒 false → 心跳线程空转、
+//! `smtc` 不压系统卡、`live()` 恒 false。
 //!
-//! ## 形态（用户 2026-11-27 按酷狗定稿，开关打开时的样子）
+//! 为什么彻底关掉：2026-11-27 为了让岛上只留我们的胶囊，把系统卡
+//! `setNowPlayingInfo: nil` 压掉了；一旦我们的 activity 起不来（系统「实时活动」
+//! 被关 / 扩展没嵌上 / 免费证书重装后授权重置），**岛上和锁屏一起变空**，
+//! 表现就是「灵动岛没了 / 状态和歌对不上」。
 //!
-//! 系统灵动岛就长在摄像头挖孔周围，Live Activity 的 compact 视图画在挖孔两侧：
-//! **点一下 = 打开疏音、长按 = 系统自动展开**——这两条都是系统默认行为，
-//! 不用我们写一行手势代码。展开态由 Widget 扩展渲染（歌名 + 播控）。
+//! ## 保留的实现（开关恒关，走不到）
 //!
-//! ## 为什么 UI 必须在 Widget 扩展里
-//!
-//! ActivityKit 的 `ActivityConfiguration` 只能放在 WidgetKit 扩展 target 里，
-//! 主 App 只负责 `request` / `update` / `end`。扩展由 CI 的 `install-swift.rb`
-//! 现场建 target（`tauri ios init` 每次都从零生成工程），共享的
-//! `IslandAttributes` 两边各编一份。
-//!
-//! ## 为什么和画中画（lyrics_pip.rs）是两个独立功能
-//!
-//! 画中画是「边刷别的 App 边看词」，灵动岛是「锁屏/其它界面上那一小块
-//! 播放状态」。开关、存档（`shuyin.island.own`）、心跳线程都各走各的。
+//! 系统灵动岛长在摄像头挖孔周围，Live Activity 的 compact 视图画在挖孔两侧：
+//! 点一下 = 打开疏音、长按 = 系统自动展开，都是系统默认行为。展开态由 Widget
+//! 扩展渲染（`IslandWidget.swift`）。UI 必须放在 WidgetKit 扩展 target 里——
+//! 扩展由 CI 的 `install-swift.rb` 现场建（`tauri ios init` 每次从零生成工程）。
 //!
 //! ## 跨 Rust↔Swift 一律 dlsym（项目铁律，理由见 lyrics_pip.rs 文件头）
 //!
 //! dlsym 的代价是 Swift 侧 `@_cdecl` 符号可能被 `-dead_strip` 剥掉，
 //! 解法同款：App 启动时 dlsym 调一次 `shuyin_island_adopt` 点亮整个 object。
-//!
-//! ## 展开态的播控怎么回到主 App
-//!
-//! Live Activity 上的 `Button(intent:)` 跑在**扩展进程**里，dlsym 够不到
-//! 主 App 二进制。用 Darwin 通知跨进程转发：扩展 post
-//! `cn.shuyin.island.cmd.playpause` 等三条通知，主 App 侧的观察者收到后
-//! dlsym 调 Rust 的 `shuyin_remote_command`（后台播歌时主 App 活着）。
 
 #[cfg(target_os = "ios")]
 mod ffi {
@@ -158,7 +146,8 @@ pub fn update(title: &str, artist: &str, pos: f64, playing: bool, dur: f64, art:
 #[cfg(not(target_os = "ios"))]
 pub fn update(_title: &str, _artist: &str, _pos: f64, _playing: bool, _dur: f64, _art: &[u8]) {}
 
-/// 开/关，返回关完之后应该显示的状态。非 iOS 恒 false。
+/// 开/关。2026-11-28 起设置里已经没有这颗开关，iOS 恒返回 false
+/// （Swift 侧会顺手把历史遗留的 activity 收掉）。
 #[cfg(target_os = "ios")]
 pub fn toggle() -> bool {
     ffi::toggle()

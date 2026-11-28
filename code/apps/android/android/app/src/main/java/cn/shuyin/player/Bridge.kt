@@ -252,6 +252,12 @@ class Bridge(private val web: WebView) {
             LockScreen.trace("js " + a.optString("msg", ""))
             null
         }
+        /*
+         * 导出诊断日志 → `Download/疏音/日志-<时间戳>/`。
+         * 真值在原生：应用私有目录用户进不去，得由原生搬到公共目录。
+         * 没有日志时返回空串，前端据此提示。
+         */
+        "logs_export" -> LockScreen.exportLogs() ?: ""
         "stop" -> { send(PlaybackService.ACT_STOP); null }
         "seek" -> { send(PlaybackService.ACT_SEEK, "secs" to a.optDouble("positionSecs", 0.0)); null }
         "set_volume" -> {

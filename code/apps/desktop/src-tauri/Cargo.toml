@@ -28,6 +28,8 @@ tauri-plugin-single-instance = "2"
 encoding_rs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 日志按天分文件 / 只留 3 天 / 导出目录带时间戳（本地时区）
+chrono = "0.4"
 
 # 扫描：目录遍历 + 元数据
 walkdir = "2"

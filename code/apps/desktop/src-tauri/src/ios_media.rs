@@ -274,6 +274,15 @@ fn handle_remote_command(cmd: &str) {
         "pipclosed" => {
             let _ = app.emit("pip://state", serde_json::json!({ "on": false }));
         }
+        /*
+         * 用户点了画中画上的「回到 App」：Swift 侧先发这一条，再把窗口放大回去。
+         * 前端收到就把播放页打开——放大动画的落点于是是播放页本身，而不是
+         * 离开时停着的那一页（2026-11-28 用户：「直接放大到应用播放界面」）。
+         */
+        "restore" => {
+            let _ = app.emit("pip://restore", serde_json::json!({}));
+            crate::append_log(app, "pip.restore -> player page");
+        }
         other => {
             crate::append_log(app, &format!("pip.cmd unknown {other}"));
         }

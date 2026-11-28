@@ -24,6 +24,7 @@ pub mod net;
 pub mod platform_login;
 pub mod player;
 pub mod smtc;
+pub mod sleep;
 pub mod srchost;
 #[cfg(windows)]
 pub mod wallpaper;
@@ -158,35 +159,37 @@ pub(crate) fn browser_args() -> &'static str {
 /* 诊断日志                                                            */
 /* ------------------------------------------------------------------ */
 
-fn log_path(app: &AppHandle) -> PathBuf {
-    /*
-     * **iOS 的日志必须人能拿到。**
-     *
-     * `app_local_data_dir()` 在 iOS 上是 Library/Application Support/…，
-     * 「文件」App 里根本看不见——真机出问题时用户取不到日志，只能靠猜
-     * （2026-11-24「后台放完一首就停」就是这么来回猜了三轮）。
-     * 落到 Documents/疏音/app.log：Info.plist 已开 UIFileSharingEnabled，
-     * 用户可以在「文件 → 我的 iPhone → 疏音」里直接长按分享。
-     */
-    let base = if cfg!(target_os = "ios") {
-        app.path().document_dir().ok().map(|d| d.join("疏音"))
-    } else {
-        None
-    };
-    base.or_else(|| app.path().app_local_data_dir().ok())
-        .map(|d| d.join("app.log"))
-        .unwrap_or_else(|| PathBuf::from("app.log"))
+/// 诊断日志目录：`<数据根>/cache/logs`。
+///
+/// **2026-11-28 用户要求：日志别再写进下载目录**。以前 iOS 落在
+/// `Documents/疏音/app.log`——那正好是 App 的下载目录（歌、歌词、日志混在一起），
+/// 用户翻「文件」App 时很乱。现在所有平台统一放应用自己的数据根下，
+/// 和音频缓存（`cache/audio`）同一个 cache 目录，由设置页的「导出日志」拿出去。
+fn log_dir(app: &AppHandle) -> PathBuf {
+    data_root(app).join("cache").join("logs")
 }
 
-pub(crate) fn append_log(app: &AppHandle, line: &str) {
+/// 日志按天分文件：`app-2026-11-28.log`（只保留最近 3 天）。
+///
+/// 按天分而不是一个无限长的 app.log：用户报「昨天放着放着停了」时，
+/// 最要紧的是能翻到昨天那份，而不是被今天的几百 KB 冲掉。
+fn log_file_in(dir: &std::path::Path) -> PathBuf {
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    dir.join(format!("app-{day}.log"))
+}
+
+/// 往指定目录追加一行日志（带秒级时间戳）。不给 AppHandle 的调用方
+/// （音频线程 `player::log`、音源宿主）也走这里。
+pub(crate) fn write_log_at(dir: &std::path::Path, line: &str) {
     use std::io::Write;
-    let path = log_path(app);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
     }
-    // 超过 512KB 直接换新文件，避免无限增长
+    maybe_prune_logs(dir);
+    let path = log_file_in(dir);
+    /* 单日上限 8MB：一天的 trace 再密也到不了，真到了就是有东西在刷屏 */
     if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > 512 * 1024 {
+        if meta.len() > 8 * 1024 * 1024 {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -204,6 +207,123 @@ pub(crate) fn append_log(app: &AppHandle, line: &str) {
         let mut buf = format!("[{ts}] {line}\n").into_bytes();
         let _ = f.write_all(&mut buf);
     }
+}
+
+/// 上一次清理是哪一天（`num_days_from_ce`）。换天时顺手清理一次。
+static LAST_PRUNE_DAY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MIN);
+
+fn maybe_prune_logs(dir: &std::path::Path) {
+    let day = chrono::Local::now().date_naive().num_days_from_ce() as i64;
+    if LAST_PRUNE_DAY.swap(day, std::sync::atomic::Ordering::Relaxed) != day {
+        prune_logs(dir);
+    }
+}
+
+/// 只留最近 3 天（今天 + 前两天）。文件名里的日期就是判据——
+/// 不靠 mtime：拷贝/解压/时区变化都会把 mtime 搅乱。
+fn prune_logs(dir: &std::path::Path) {
+    let keep_from = chrono::Local::now().date_naive() - chrono::Duration::days(2);
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(rest) = name.strip_prefix("app-").and_then(|s| s.strip_suffix(".log")) else {
+            continue;
+        };
+        let Ok(d) = chrono::NaiveDate::parse_from_str(rest, "%Y-%m-%d") else { continue };
+        if d < keep_from {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// 旧版本的日志文件搬进新目录（一次性）。
+///
+/// 桌面/iOS 以前都在 `app_local_data_dir/app.log`，iOS 还额外有一份
+/// `Documents/疏音/app.log`（就是那个下载目录）。搬过来之后老文件删掉，
+/// 省得用户以为「日志还堆在下载里」。
+fn migrate_legacy_logs(app: &AppHandle, dir: &std::path::Path) {
+    let mut olds: Vec<PathBuf> = Vec::new();
+    if let Ok(d) = app.path().app_local_data_dir() {
+        olds.push(d.join("app.log"));
+    }
+    #[cfg(target_os = "ios")]
+    if let Ok(d) = app.path().document_dir() {
+        olds.push(d.join("疏音").join("app.log"));
+    }
+    for old in olds {
+        if old == log_file_in(dir) {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(&old) else { continue };
+        if meta.len() == 0 {
+            let _ = std::fs::remove_file(&old);
+            continue;
+        }
+        /* 老文件可能很大：只搬最后一段，够定位问题了 */
+        let text = std::fs::read_to_string(&old).unwrap_or_default();
+        if !text.is_empty() {
+            use std::io::Write;
+            if std::fs::create_dir_all(dir).is_ok() {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_file_in(dir))
+                {
+                    let tail: String = {
+                        let skip = text.len().saturating_sub(512 * 1024);
+                        let mut s = &text[skip..];
+                        /* 别从半个字符/半行开始 */
+                        if let Some(i) = s.find('\n') {
+                            s = &s[i + 1..];
+                        }
+                        s.to_string()
+                    };
+                    let _ = f.write_all(b"---- 旧版日志（搬迁） ----\n");
+                    let _ = f.write_all(tail.as_bytes());
+                    if !tail.ends_with('\n') {
+                        let _ = f.write_all(b"\n");
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&old);
+    }
+}
+
+pub(crate) fn append_log(app: &AppHandle, line: &str) {
+    write_log_at(&log_dir(app), line);
+}
+
+/// 把日志导出到系统「下载」目录（iOS 是「文件 → 我的 iPhone → 疏音」）。
+///
+/// 设置页那颗「导出日志」按钮：用户出问题时不用再教他怎么找隐藏目录，
+/// 点一下生成一个带时间戳的文件夹，里面就是最近 3 天的日志。
+#[tauri::command]
+fn logs_export(app: AppHandle) -> Result<String, String> {
+    let src = log_dir(&app);
+    let dst = default_download_dir(&app).join(format!(
+        "疏音日志-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    std::fs::create_dir_all(&dst).map_err(|e| format!("建不了导出目录「{}」：{e}", dst.display()))?;
+    let mut n = 0usize;
+    if let Ok(rd) = std::fs::read_dir(&src) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            if std::fs::copy(&p, dst.join(e.file_name())).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return Err("还没有日志可以导出".into());
+    }
+    append_log(&app, &format!("logs.export -> {} ({n} files)", dst.display()));
+    Ok(dst.to_string_lossy().to_string())
 }
 
 /// 前端诊断日志（白屏 / 闪退排查用）
@@ -800,11 +920,11 @@ fn pip_lyric_state() -> bool {
     crate::lyrics_pip::on()
 }
 
-/// 开关「灵动岛」的**自绘胶囊**（iOS Live Activity），返回开关之后的真值。
+/// 开关「灵动岛」的自绘胶囊（iOS Live Activity）。
 ///
-/// **默认关**（2026-11-28 用户：「用系统那个，不要自绘」）：岛上走 iOS 自带的
-/// 「正在播放」，系统画胶囊、系统展开播控，我们什么都不用做。打开才换成我们的
-/// ActivityKit 胶囊（封面款），并压掉系统卡——两条互斥，否则岛上两颗胶囊打架。
+/// **2026-11-28 起设置里已经没有这颗开关**（用户：「用系统那个，不要自绘」）：
+/// iOS 岛上就是系统自带的「正在播放」，系统画胶囊、系统展开播控。
+/// 老前端若还调这条，Swift 侧一律当「关」处理并把历史 activity 收掉。
 /// 安卓那条走 Kotlin `DynamicIsland`（`island_toggle` 命令同名不同实现）。
 #[tauri::command]
 fn island_toggle(_app: AppHandle) -> bool {
@@ -832,6 +952,28 @@ fn island_state() -> serde_json::Value {
         "on": crate::island::on(),
         "enabled": crate::island::enabled(),
     })
+}
+
+/// 定时关闭：「N 分钟后暂停」/「播完这首就停」。
+///
+/// 真值在 Rust（[`sleep`] 模块），到点由原生暂停——iOS 切后台后前端 JS 会被
+/// 冻住，`setTimeout` 不走（安卓那份是 Kotlin `SleepTimer`，同名命令）。
+/// 传 `track: true` = 播完本曲；`minutes` 传 0 = 关掉。
+#[tauri::command]
+fn sleep_set(minutes: Option<i64>, track: Option<bool>) {
+    if track.unwrap_or(false) {
+        crate::sleep::set_end_of_track();
+    } else {
+        crate::sleep::set_minutes(minutes.unwrap_or(0));
+    }
+}
+
+/// 定时关闭的当前状态（{ remain 秒, track }）。前端主要靠 `player://state`
+/// 每 250ms 那一帧里的 `sleep` / `sleep_track`，这条命令给「刚打开面板」用。
+#[tauri::command]
+fn sleep_state() -> serde_json::Value {
+    let (remain, track) = crate::sleep::state();
+    serde_json::json!({ "remain": remain, "track": track, "on": remain > 0 || track })
 }
 
 #[tauri::command]
@@ -3451,8 +3593,13 @@ pub fn run() {
                 crate::player::log(l)
             })));
             app.manage(player);
-            // 音频线程没有 AppHandle，日志路径从这儿注入（打包版 stderr 看不到）
-            crate::player::set_log_path(log_path(app.handle()));
+            // 音频线程没有 AppHandle，日志目录从这儿注入（打包版 stderr 看不到）
+            {
+                let dir = log_dir(app.handle());
+                /* 老版本那份 app.log（iOS 上还在下载目录里）搬过来并删掉 */
+                migrate_legacy_logs(app.handle(), &dir);
+                crate::player::set_log_dir(dir);
+            }
             /*
              * 真机日志的第一行：**先确认装的是哪个包**。
              * 未签名 IPA 要用户自己重签，很容易装回旧的那份（版本号一直没动，
@@ -3587,6 +3734,21 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || loop {
+                    /*
+                     * 定时关闭到点：**原生自己暂停**，不等前端。
+                     *
+                     * 必须放在下面那个「界面在后台就不推」的闸**前面**：
+                     * 用户最需要定时的场景恰恰是熄屏躺着听，那时 iOS 上这个
+                     * 循环正好被那道闸挡住——放后面就永远不会触发。
+                     * 这个循环本来就是 250ms 一拍、且只在 iOS/桌面跑，
+                     * 正好当定时器的对表线程（安卓那份在 PlaybackService 里对表）。
+                     */
+                    if crate::sleep::due() {
+                        if let Some(p) = handle.try_state::<Player>() {
+                            p.pause();
+                        }
+                        append_log(&handle, "sleep: timer fired -> pause");
+                    }
                     /*
                      * 界面在后台就别推了——**只在 iOS 上这么做**。
                      *
@@ -3767,6 +3929,9 @@ pub fn run() {
             spectrum,
             cover_abs_path,
             diag_log,
+            logs_export,
+            sleep_set,
+            sleep_state,
             boot_ok,
             #[cfg(desktop)]
             apply_min_size,

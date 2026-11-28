@@ -309,25 +309,10 @@ object LockScreen {
         }
         traceThread.execute {
             try {
-                val dir = Sy.app.getExternalFilesDir(null)
+                val dir = logDir()
                 if (dir != null) {
-                    val f = java.io.File(dir, "lock.log")
-                    /*
-                     * 64KB 太小：一天下来（每首歌两条 meta + 每轮 pf plan）不到半天就轮转，
-                     * 「昨天还停过」这种事根本查不到前因。512KB 能覆盖两三天，
-                     * 超了留一份 lock.log.1 再重建 —— 用户报「播着播着停了」时要看的是
-                     * 停止**之前**那几首发生了什么。
-                     */
-                    if (f.exists() && f.length() > 512 * 1024) {
-                        try {
-                            val old = java.io.File(dir, "lock.log.1")
-                            if (old.exists()) old.delete()
-                            f.renameTo(old)
-                        } catch (_: Throwable) {
-                            f.delete()
-                        }
-                    }
-                    f.appendText(take.joinToString(""))
+                    pruneLogs(dir)
+                    logFile(dir)?.appendText(take.joinToString(""))
                 }
             } catch (_: Throwable) {
                 /* 没存储权限就算了，不影响功能 */
@@ -335,6 +320,62 @@ object LockScreen {
                 traceBusy = false
             }
         }
+    }
+
+    /*
+     * 日志落点（2026-11-28 统一）：`<应用文件目录>/logs/lock-YYYY-MM-DD.log`。
+     *
+     * 以前是 `<应用文件目录>/lock.log` 一个无限长的文件 + 512KB 轮转换成 .1。
+     * 现在按天分文件、只留最近 3 天：用户报「昨天放完一首就停」时，
+     * 最要紧的是能翻到昨天那份，而不是被今天的记录冲掉。
+     * 想拿出来看走设置页「导出日志」，会复制到 `Download/疏音/` 下。
+     */
+    private fun logDir(): java.io.File? =
+        try { Sy.app.getExternalFilesDir(null)?.let { java.io.File(it, "logs") } } catch (_: Throwable) { null }
+
+    private fun logFile(dir: java.io.File): java.io.File? {
+        val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        return java.io.File(dir, "lock-$day.log")
+    }
+
+    /** 只留最近 3 天（今天 + 前两天）。文件名里的日期就是判据 */
+    private fun pruneLogs(dir: java.io.File) {
+        val keep = SimpleDateFormat("yyyyMMdd", Locale.US)
+            .format(Date(System.currentTimeMillis() - 2 * 24 * 3600_000L))
+        val files = dir.listFiles() ?: return
+        for (f in files) {
+            val n = f.name
+            if (!n.startsWith("lock-") || !n.endsWith(".log")) continue
+            val day = n.removePrefix("lock-").removeSuffix(".log").replace("-", "")
+            if (day.length == 8 && day < keep) {
+                try { f.delete() } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    /**
+     * 把日志导出到 `Download/疏音/日志-<时间戳>/`。
+     *
+     * 返回导出目录的路径；没有日志时返回 null（前端提示「还没有日志」）。
+     * 放到公共下载目录是因为手机上应用私有目录用户根本进不去——
+     * 出问题时要的是「能拷出来发给开发者」。
+     */
+    fun exportLogs(): String? {
+        val src = logDir() ?: return null
+        val files = src.listFiles()?.filter { it.isFile } ?: return null
+        if (files.isEmpty()) return null
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val dst = java.io.File(DownloadStore.textDir(), "日志-$stamp")
+        try {
+            dst.mkdirs()
+            for (f in files) {
+                try { f.copyTo(java.io.File(dst, f.name), overwrite = true) } catch (_: Throwable) {}
+            }
+        } catch (_: Throwable) {
+            return null
+        }
+        trace("logs export -> ${dst.absolutePath}")
+        return dst.absolutePath
     }
 
     /** 「页面可能被挡住」的那条通知（一天最多一次） */
