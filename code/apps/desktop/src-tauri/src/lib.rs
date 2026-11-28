@@ -800,11 +800,12 @@ fn pip_lyric_state() -> bool {
     crate::lyrics_pip::on()
 }
 
-/// 开关「灵动岛」（iOS Live Activity），返回开关之后的真值。
+/// 开关「灵动岛」的**自绘胶囊**（iOS Live Activity），返回开关之后的真值。
 ///
-/// iPhone 是灵动岛的主目标（用户 2026-11-27）：胶囊长在系统灵动岛（摄像头
-/// 挖孔）上，点一下打开疏音、长按展开，展开态由 Widget 扩展渲染。安卓那条
-/// 走 Kotlin `DynamicIsland`（`island_toggle` 命令同名不同实现）。
+/// **默认关**（2026-11-28 用户：「用系统那个，不要自绘」）：岛上走 iOS 自带的
+/// 「正在播放」，系统画胶囊、系统展开播控，我们什么都不用做。打开才换成我们的
+/// ActivityKit 胶囊（封面款），并压掉系统卡——两条互斥，否则岛上两颗胶囊打架。
+/// 安卓那条走 Kotlin `DynamicIsland`（`island_toggle` 命令同名不同实现）。
 #[tauri::command]
 fn island_toggle(_app: AppHandle) -> bool {
     let on = crate::island::toggle();

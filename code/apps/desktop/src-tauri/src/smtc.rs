@@ -785,9 +785,10 @@ mod apple {
 
     /// 灵动岛开关刚打开时的即时撤卡：别等下一次 apply（切歌/暂停恢复才触发），
     /// 用户一开开关，岛旁边那颗 minimal 小黑点就该消失。
-    /// 开关没开时是空操作（幂等，乱调无副作用）。
+    /// **只在我们的 activity 真挂上了才撤**（`island::live()`）——没挂上还撤，
+    /// 岛和锁屏就一起空。开关没开时是空操作（幂等，乱调无副作用）。
     pub fn suppress_now_playing() {
-        if !crate::island::on() {
+        if !crate::island::live() {
             return;
         }
         unsafe {
@@ -1141,15 +1142,19 @@ mod apple {
             };
             let center: Retained<AnyObject> = objc2::msg_send![np_cls, defaultCenter];
             /*
-             * 灵动岛（Live Activity）开着时压掉系统「正在播放」卡：
-             * nowPlayingInfo 只要挂着，系统就把它当一条**系统级实时活动**占一个
-             * 岛位——我们的胶囊 compact 旁边挤一颗 minimal 小黑点（2026-11-27
-             * 用户实测截图），而且没有公开 API 只从岛上摘。压掉它，岛上只剩
-             * 我们的胶囊；锁屏/控制中心由 Live Activity 的锁屏卡接管（大封面
-             * + 进度 + 播控，IslandWidget 按系统排版画的）。
+             * 只有「自己那套胶囊」（`shuyin.island.own`，默认关）才压系统卡。
+             *
+             * **默认不压**：岛上交给 iOS 自带的「正在播放」画。nowPlayingInfo 只要
+             * 挂着，系统就把它当一条系统级实时活动占岛位——这正是默认想要的形态
+             * （点一下开 App、长按展开系统播控）。
+             *
+             * 用户手动开了自绘胶囊才把 nowPlayingInfo 摘掉：留着的话我们的 compact
+             * 旁边会挤一颗 minimal 小黑点（2026-11-27 实测截图），且没有公开 API
+             * 只从岛上摘。副作用要知道：活动起不来时岛与锁屏会一起空，所以这条
+             * 互斥必须由用户显式开启，别做默认。
              * LAST 照常记：灵动岛心跳的 last_meta/last_cover 还靠它。
              */
-            if crate::island::on() {
+            if crate::island::live() {
                 let nil: *mut AnyObject = std::ptr::null_mut();
                 let _: () = objc2::msg_send![&center, setNowPlayingInfo: nil];
             } else {

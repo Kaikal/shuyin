@@ -1,6 +1,16 @@
 //! iOS「灵动岛」：ActivityKit Live Activity 的 Rust 接线。
 //!
-//! ## 形态（用户 2026-11-27 按酷狗定稿，iPhone 是主目标）
+//! ## 默认走系统那条（2026-11-28）
+//!
+//! 岛上默认就是 iOS 自带的「正在播放」：我们只管照常发 `MPNowPlayingInfoCenter`
+//! （见 `smtc::apply`），胶囊与展开态全由系统画，点一下开 App 也是系统行为。
+//! 这条路上这里整套都是**惰性的**：存档 `shuyin.island.own` 默认 false，
+//! `on()` 恒 false → 心跳线程空转、`smtc` 不压系统卡。
+//!
+//! 用户手动开 `shuyin.island.own` 才切到下面这套自绘胶囊（封面款），
+//! 那时才 request/update 我们的 Live Activity，并压掉系统卡。
+//!
+//! ## 形态（用户 2026-11-27 按酷狗定稿，开关打开时的样子）
 //!
 //! 系统灵动岛就长在摄像头挖孔周围，Live Activity 的 compact 视图画在挖孔两侧：
 //! **点一下 = 打开疏音、长按 = 系统自动展开**——这两条都是系统默认行为，
@@ -16,7 +26,7 @@
 //! ## 为什么和画中画（lyrics_pip.rs）是两个独立功能
 //!
 //! 画中画是「边刷别的 App 边看词」，灵动岛是「锁屏/其它界面上那一小块
-//! 播放状态」。开关、存档（`shuyin.island`）、心跳线程都各走各的。
+//! 播放状态」。开关、存档（`shuyin.island.own`）、心跳线程都各走各的。
 //!
 //! ## 跨 Rust↔Swift 一律 dlsym（项目铁律，理由见 lyrics_pip.rs 文件头）
 //!
@@ -94,6 +104,14 @@ mod ffi {
         unsafe { f() }
     }
 
+    /// 岛上此刻真的挂着我们的 activity 没有（开关开 ≠ 挂上了）。
+    pub fn running() -> bool {
+        let p = lookup("shuyin_island_running");
+        if p.is_null() { return false; }
+        let f: GetFn = unsafe { std::mem::transmute(p) };
+        unsafe { f() }
+    }
+
     /// 系统设置里「实时活动」允许了没有（false = 我们的 activity 根本起不来）。
     pub fn enabled() -> bool {
         let p = lookup("shuyin_island_enabled");
@@ -159,6 +177,23 @@ pub fn on() -> bool {
 
 #[cfg(not(target_os = "ios"))]
 pub fn on() -> bool {
+    false
+}
+
+/// **系统「正在播放」卡能不能被压掉** = 用户开了自绘胶囊 **且** 我们的 activity
+/// 真的挂上了。
+///
+/// 只判 `on()` 是不够的：系统「实时活动」被拒、扩展没嵌上、请求失败时开关照样是
+/// true，可 activity 根本没起来——这时再压系统卡，岛上和锁屏就一起空了
+/// （2026-11-27 用户报「灵动岛没了」就是这个）。宁可不压，让系统卡顶上来。
+/// 非 iOS 恒 false（安卓没有这个概念）。
+#[cfg(target_os = "ios")]
+pub fn live() -> bool {
+    ffi::on() && ffi::running()
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn live() -> bool {
     false
 }
 

@@ -1,15 +1,18 @@
 /**
  * 设置页 · 灵动岛。
  *
- * 两个平台的落地通道完全不同，但形态与手势是同一个（用户 2026-11-27 按酷狗定稿）：
- *   · **iPhone（主目标）**：ActivityKit Live Activity——胶囊长在系统灵动岛
- *     （摄像头挖孔）上，**点一下 = 打开疏音（系统默认行为）、长按 = 系统自动
- *     展开**，展开态带歌名和播控。需要 Widget 扩展（CI 现场生成 target）。
+ * 两个平台的落地通道完全不同，形态也不一样：
+ *   · **iPhone（默认走系统）**：岛上就是 iOS 自带的「正在播放」——系统按
+ *     `MPNowPlayingInfoCenter` 自己画胶囊、自己展开播控，点一下打开疏音。
+ *     这条路零权限、零配额，永远不会空。**2026-11-28 用户定案：用系统那个，
+ *     不要自绘**，所以这里的开关默认关，打开才换成我们自己的 ActivityKit 胶囊
+ *     （封面款，需要系统允许「实时活动」，且会压掉系统卡避免两颗胶囊打架）。
  *   · **安卓**：`TYPE_APPLICATION_OVERLAY` 悬浮窗包住摄像头挖孔
- *     （Kotlin `DynamicIsland`），同样的点按/长按手势，自己画胶囊。
+ *     （Kotlin `DynamicIsland`），点按/长按手势同上，自己画胶囊。
  *
  * 状态只认原生：`island_state` 问真值，`island_toggle` 返回开完之后的真值。
- * 安卓的开关在原生侧，iOS 的开关在 Swift 侧（UserDefaults），前端只是显示。
+ * 安卓的开关在原生侧，iOS 的开关在 Swift 侧（UserDefaults `shuyin.island.own`），
+ * 前端只是显示。
  */
 import { useCallback, useEffect, useState } from 'react'
 import { bridge, isAndroid } from '../lib/bridge'
@@ -76,16 +79,18 @@ export function DynamicIslandSection() {
         }
         if (r?.on) {
           toast(isIOS
-            ? '灵动岛已开启：播放时胶囊出现在灵动岛上，点一下回到疏音，长按展开'
+            ? '换成疏音胶囊了：播放时出现在灵动岛上，长按展开播控'
             : '灵动岛已开启：播放时贴在摄像头挖孔上，点一下回疏音，长按展开')
-          /* 开了开关但系统没允许实时活动：岛上只会挂系统「正在播放」卡 */
+          /* 开了开关但系统没允许实时活动：我们的胶囊起不来，岛上只剩系统卡 */
           void bridge.invoke<IslandState>('island_state')
             .then(s => {
               if (s && typeof s === 'object' && s.enabled === false) {
-                toast('系统设置 → 疏音 → 实时活动 未允许，灵动岛不会出现')
+                toast('系统设置 → 疏音 → 实时活动 未允许，疏音胶囊不会出现（岛上仍是系统的「正在播放」）')
               }
             })
             .catch(() => {})
+        } else if (isIOS) {
+          toast('已改回系统灵动岛：胶囊与播控都交给 iOS 自己画')
         }
       })
       .catch(() => { read() })
@@ -95,14 +100,16 @@ export function DynamicIslandSection() {
     <section className="set-group" data-pane="shell" data-sec="island">
       <h3>灵动岛</h3>
       <div className="set-row">
-        <span className="set-label">播放时在摄像头挖孔处显示迷你胶囊</span>
+        <span className="set-label">
+          {isIOS ? '用疏音的封面胶囊替代系统「正在播放」' : '播放时在摄像头挖孔处显示迷你胶囊'}
+        </span>
         <button className="toggle" role="switch" aria-checked={on} onClick={toggle}>
           <span className="sr-only">灵动岛</span>
         </button>
       </div>
       <p className="set-sub">
         {isIOS
-          ? '走系统灵动岛（Live Activity）：点胶囊打开疏音，长按展开播控。需要 iOS 16.1 以上。'
+          ? '默认关闭 = 走 iOS 自带的「正在播放」灵动岛：点胶囊打开疏音、长按展开系统播控，不用授任何权限。打开后换成疏音的封面胶囊（需系统允许「实时活动」）。'
           : '走系统悬浮窗：需要「显示在其他应用上层」权限。点一下回疏音，长按展开播控。'}
       </p>
       {saw === false && (
@@ -118,11 +125,11 @@ export function DynamicIslandSection() {
           </span>
         </div>
       )}
-      {isIOS && enabled === false && (
+      {isIOS && on && enabled === false && (
         <div className="set-row">
-          <span className="set-label">系统未允许实时活动，灵动岛不会出现</span>
+          <span className="set-label">系统未允许实时活动，疏音胶囊不会出现</span>
           <span className="set-ctl">
-            <span className="set-sub">系统设置 → 疏音 → 实时活动</span>
+            <span className="set-sub">系统设置 → 疏音 → 实时活动（岛上仍是系统「正在播放」）</span>
           </span>
         </div>
       )}

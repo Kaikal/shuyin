@@ -5,7 +5,21 @@ import UIKit
 
 /// iOS「灵动岛」：ActivityKit Live Activity 的主 App 侧管理器。
 ///
-/// ## 形态（用户 2026-11-27 按酷狗定稿，iPhone 是主目标）
+/// ## 两条路，默认走系统那条（2026-11-28 用户定）
+///
+///   · **默认（存档关）**：岛上就是 iOS 自带的「正在播放」——系统按
+///     `MPNowPlayingInfoCenter` 自己画胶囊、自己展开播控，点一下打开疏音。
+///     这条路零权限、零配额、零扩展依赖，**永远不会空**。
+///   · **手动开（`shuyin.island.own`）**：换成下面这套我们自己的 Live Activity
+///     （封面胶囊，酷狗同款），并压掉系统卡避免岛上两颗胶囊打架。
+///
+/// 为什么默认要倒过来：2026-11-27 为了让岛上只留我们的胶囊，把系统卡
+/// `setNowPlayingInfo: nil` 压掉了。结果一旦我们的 activity 起不来
+/// （系统「实时活动」被关 / 扩展没嵌上 / 免费证书重装后授权重置），
+/// **岛上和锁屏一起变空**——用户看到的就是「灵动岛没了」。所以现在默认
+/// 把系统卡放出来，我们的胶囊变成可选。
+///
+/// ## 形态（开关打开时）
 ///
 /// 系统灵动岛长在摄像头挖孔周围，Live Activity 的 compact 视图画在挖孔两侧：
 ///   · **点一下胶囊 = 打开疏音**——这是 Live Activity 的系统默认行为，
@@ -50,8 +64,20 @@ final class ShuyinIsland {
     /// Rust → Swift 的远端命令入口（Darwin 通知最终落到这里）。
     private typealias RemoteFn = @convention(c) (UnsafePointer<CChar>?) -> Void
 
+    /// 存档键。**2026-11-28 换了新键**。
+    ///
+    /// 旧键 `shuyin.island` 是「没写过 = false」，可昨天调胶囊时写过 true；
+    /// 老键会把「自绘胶囊」原封不动带进新版本，而用户此刻要的是系统那个
+    /// （岛上现在空着，正是因为我们把系统「正在播放」卡压掉了）。换键 = 全体复位成默认关。
+    private static let ownKey = "shuyin.island.own"
+
     /// 开关真值（持久化；对齐画中画的 `shuyin.pip.lyrics`）。
-    private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: "shuyin.island")
+    ///
+    /// **默认关 = 走 iOS 自带的「正在播放」灵动岛**：系统自己画胶囊与展开态，
+    /// 点一下打开疏音、长按展开系统播控，不占我们的实时活动授权与 update 配额。
+    /// 打开才切到我们自己的 ActivityKit 胶囊（`IslandWidget.swift` 那套封面款），
+    /// 同时压掉系统卡（`smtc::apply` 里那条互斥）。
+    private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: ShuyinIsland.ownKey)
 
     /// 当前挂着的 activity。 adopts 孤儿：上次启动没来得及 end 就被杀，
     /// 重启后第一次 set 要接管回来，不然灵动岛上永远挂着一条死掉的疏音。
@@ -106,6 +132,19 @@ final class ShuyinIsland {
         return out
     }
 
+    /// 此刻岛上真的挂着我们的 activity 没有。
+    ///
+    /// 给 Rust 决定「能不能压掉系统『正在播放』卡」用：activity 没挂上还压卡，
+    /// 就是岛上、锁屏一起变空（2026-11-27 装上车后「灵动岛没了」的那次）。
+    /// 暂停超过宽限期 activity 会被收掉，这里也会如实返回 false，
+    /// 系统卡于是重新出现——宁可两颗都少，也不要一颗都没有。
+    var running: Bool {
+        if Thread.isMainThread { return activity != nil }
+        var out = false
+        DispatchQueue.main.sync { out = self.activity != nil }
+        return out
+    }
+
     // MARK: - 内部
 
     private func performSet(title: String, artist: String, pos: Double, playing: Bool, dur: Double, art: Data?) {
@@ -145,7 +184,7 @@ final class ShuyinIsland {
 
     private func performToggle() -> Bool {
         wanted.toggle()
-        UserDefaults.standard.set(wanted, forKey: "shuyin.island")
+        UserDefaults.standard.set(wanted, forKey: ShuyinIsland.ownKey)
         if wanted {
             /* 有歌在放 / 刚暂停（宽限期内）就直接起；没歌等心跳带着数据来再起 */
             if playing || dur > 0 {
@@ -364,6 +403,14 @@ public func shuyinIslandOn() -> Bool {
     var out = false
     DispatchQueue.main.sync { out = ShuyinIsland.shared.wanted }
     return out
+}
+
+/// 岛上此刻真的挂着我们的 activity 没有（开关开 ≠ 挂上了）。
+/// Rust 侧用它决定要不要压系统「正在播放」卡——没挂上还压就是全空。
+@_cdecl("shuyin_island_running")
+public func shuyinIslandRunning() -> Bool {
+    guard #available(iOS 16.2, *) else { return false }
+    return ShuyinIsland.shared.running
 }
 
 /// 系统有没有允许实时活动（设置 → 疏音 → 实时活动）。
