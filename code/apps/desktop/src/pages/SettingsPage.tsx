@@ -1042,8 +1042,8 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
                 {p.sleep.track
                   ? '播完当前这首就暂停'
                   : p.sleep.on
-                    ? `还有 ${Math.max(1, Math.ceil(p.sleep.remain / 60))} 分钟，到点淡出并暂停`
-                    : '到点淡出并暂停，不会退出应用；播放页「更多」里也能设'
+                    ? `还有 ${Math.max(1, Math.ceil(p.sleep.remain / 60))} 分钟，到点暂停`
+                    : '到点暂停，不会退出应用；播放页「更多」里也能设'
                 }
               </span>
             </span>
