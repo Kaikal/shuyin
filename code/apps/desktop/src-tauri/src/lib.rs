@@ -214,7 +214,8 @@ static LAST_PRUNE_DAY: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(i64::MIN);
 
 fn maybe_prune_logs(dir: &std::path::Path) {
-    let day = chrono::Local::now().date_naive().num_days_from_ce() as i64;
+    let today = chrono::Local::now().date_naive();
+    let day = chrono::Datelike::num_days_from_ce(&today) as i64;
     if LAST_PRUNE_DAY.swap(day, std::sync::atomic::Ordering::Relaxed) != day {
         prune_logs(dir);
     }
@@ -279,7 +280,7 @@ fn migrate_legacy_logs(app: &AppHandle, dir: &std::path::Path) {
                         }
                         s.to_string()
                     };
-                    let _ = f.write_all(b"---- 旧版日志（搬迁） ----\n");
+                    let _ = f.write_all("---- 旧版日志（搬迁） ----\n".as_bytes());
                     let _ = f.write_all(tail.as_bytes());
                     if !tail.ends_with('\n') {
                         let _ = f.write_all(b"\n");
