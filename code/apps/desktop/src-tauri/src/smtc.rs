@@ -955,6 +955,44 @@ mod apple {
         }
     }
 
+    /// 远程封面在本地还没有（`artwork()` 只认已落盘那份，绝不下载）。
+    fn cover_missing_on_disk(cover: &str) -> bool {
+        let remote = cover.starts_with("http://") || cover.starts_with("https://");
+        remote && crate::coverart::lookup(cover).is_none()
+    }
+
+    /// 后台把封面下下来，成功后按最后一次 meta 重推整张卡。
+    ///
+    /// 为什么必须重推而不是只改图：`MPNowPlayingInfoCenter` 是整份覆盖的，
+    /// 只有再走一次 `apply`（`reapply` 用 LAST 里的元信息）才会带上前一次
+    /// 拿不到的那张 `artwork`。
+    fn refetch_cover(cover: &str, playing: bool, pos: f64, dur: f64) {
+        use std::collections::HashSet;
+        use std::sync::{Mutex, OnceLock};
+        static TRIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        let set = TRIED.get_or_init(|| Mutex::new(HashSet::new()));
+        {
+            let Ok(mut g) = set.lock() else { return };
+            if !g.insert(cover.to_string()) {
+                return;
+            }
+            /* 别让这张表无限长 */
+            if g.len() > 128 {
+                g.clear();
+                g.insert(cover.to_string());
+            }
+        }
+        let url = cover.to_string();
+        std::thread::spawn(move || {
+            let ok = crate::coverart::resolve(&url).is_some();
+            crate::player::log(&format!("smtc: cover prefetch {}", if ok { "ok" } else { "fail" }));
+            if ok {
+                /* 下载完成后重推：这时 lookup 命中，封面就上卡了 */
+                reapply(playing, pos, dur);
+            }
+        });
+    }
+
     /// 一次性把远控命令挂到共享命令中心。
     /// 每个块内捕获自己的 AppHandle，效果与 Windows 完全同形。
     pub fn init(app: &AppHandle) -> Result<(), String> {
@@ -1132,7 +1170,9 @@ mod apple {
                 "MPNowPlayingInfoPropertyPlaybackRate",
                 num(if playing { 1.0 } else { 0.0 })
             );
-            if let Some(art) = artwork(cover) {
+            let art = artwork(cover);
+            let missing_art = art.is_none();
+            if let Some(art) = art {
                 put!("artwork", art);
             }
 
@@ -1199,6 +1239,18 @@ mod apple {
             }
 
             objc_autoreleasePoolPop(pool);
+
+            /*
+             * 封面只有网址、本地那份还没落盘时，artwork() 只能放弃（同步路径不能等
+             * 网络，见 coverart::lookup）——卡片就没图，灵动岛那颗也是空的
+             * （2026-11-28 用户报「灵动岛上没有歌曲封面图片」）。
+             *
+             * 后台补一次：下好了按最后一次 meta 重推整张卡（reapply → apply，
+             * 第二次 lookup 必命中）。同一条网址只试一次，坏链接不会反复起线程。
+             */
+            if missing_art && cover_missing_on_disk(cover) {
+                refetch_cover(cover, playing, position, duration);
+            }
         }
     }
 }

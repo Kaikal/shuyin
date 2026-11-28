@@ -173,12 +173,22 @@ pub fn spawn_island_ticker() {
          * 字节过 FFI，其余心跳传空切片（Swift 沿用上一张）。每 500ms 拖几百 KB
          * 过 dlsym 纯属浪费，而且 ContentState 塞大图也吃 update 配额。
          */
-        static LAST_ART: std::sync::Mutex<(String, Vec<u8>)> =
-            std::sync::Mutex::new((String::new(), Vec::new()));
+        static LAST_ART: std::sync::Mutex<(String, Vec<u8>, u8)> =
+            std::sync::Mutex::new((String::new(), Vec::new(), 0));
         let cover = crate::smtc::last_cover();
         let mut art: Vec<u8> = Vec::new();
-        let changed = LAST_ART.lock().map(|g| g.0 != cover).unwrap_or(false);
-        if !cover.is_empty() && changed {
+        let (fresh, empty, tries) = match LAST_ART.lock() {
+            Ok(g) => (g.0 != cover, g.1.is_empty(), g.2),
+            Err(_) => (false, true, 8),
+        };
+        /*
+         * 重读条件除了「换歌」，还要包括「上一轮没读到图」：
+         * 封面常常只有一个网址，落盘是 `smtc::apply` 那条后台预取干的活儿，
+         * 换歌那一刻文件往往还没写下来。只认换歌的话这张图就永远不补了
+         * ——2026-11-28 用户报「灵动岛上没有歌曲封面图片」就是这么来的。
+         * 最多重试 8 轮（4 秒），别为一个坏链接每 500ms 读一次盘。
+         */
+        if !cover.is_empty() && (fresh || (empty && tries < 8)) {
             let local = if cover.contains("://") {
                 crate::coverart::lookup(&cover).map(|c| c.path)
             } else {
@@ -191,11 +201,17 @@ pub fn spawn_island_ticker() {
                     }
                 }
             }
-            /* 没读到也记下网址：别每 500ms 重试一次文件 IO */
             if let Ok(mut g) = LAST_ART.lock() {
                 g.0 = cover.clone();
                 if !art.is_empty() {
                     g.1 = art.clone();
+                    g.2 = 0;
+                } else if fresh {
+                    /* 换歌第一轮没读到：先把上一首的图清掉，别让它挂在岛上 */
+                    g.1.clear();
+                    g.2 = 1;
+                } else {
+                    g.2 = tries.saturating_add(1);
                 }
             }
         }

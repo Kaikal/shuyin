@@ -64,8 +64,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
      * 画中画窗口上那颗键是「播放/暂停」还是「停止」，系统看的是
      * `timeRangeForPlayback` 给的时长：正无穷（直播语义）= 停止键。
      * 以前为了去掉 ±10 秒跳转键返回了正无穷，副作用就是暂停键变成了
-     * 停止键（2026-11-26 用户实报）。现在传真实时长换回播放/暂停，
-     * ±10 秒键会回来，但它们被映射成上一首/下一首，反而有用。
+     * 停止键（2026-11-26 用户实报）。现在传真实时长换回播放/暂停；
+     * 跳转键另外用 `requiresLinearPlayback = true` 关掉了（2026-11-28）。
      */
     private var duration: Double = 0
     /// 已经画进 buffer 的那一帧的「内容指纹」，一样就不重画（省电）
@@ -92,22 +92,47 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
      */
     private var stopping = false
 
+    /**
+     * 收尾闸的**有效期**（截止时刻）。
+     *
+     * 光靠 willStop→didStop 之间的 `stopping` 旗挡不住：AVKit 补发的那次
+     * `setPlaying(false)` 常在 didStop **之后**才到（顺序不保证），那时旗已经放了，
+     * 转发出去 = 音乐被暂停。2026-11-28 用户第三次报「关闭桌面歌词，音乐就停掉」
+     * 就是这条漏网。所以改成时间窗口：我们自己要收窗时立一个 2 秒的闸，
+     * 窗口内来的 setPlaying 一律只记账。
+     */
+    private var swallowUntil = Date.distantPast
+
+    /// 这一次收窗是**我们自己**发起的（关开关），不是用户按了 ×。
+    /// 两者都要在 didStop 收尾，但只有后者要回传 `pipclosed` 把开关拨回去。
+    private var selfClosing = false
+
+    /// 立闸：`stopping` 立即生效，另给一个 `secs` 秒的时间窗口兜住迟到的 setPlaying。
+    private func markStopping(_ secs: TimeInterval) {
+        stopping = true
+        swallowUntil = Date().addingTimeInterval(secs)
+    }
+
     /// 开关真值（持久化：用户开过一次，下次启动仍按开的来）
     private(set) var wanted: Bool = UserDefaults.standard.bool(forKey: "shuyin.pip.lyrics")
 
     /// 画布尺寸（像素）。
     ///
-    /// 一条 1280×160 的扁条（8:1），对齐酷狗桌面歌词：窗口矮、字不大、
+    /// 一条 1280×180 的扁条（≈7:1），对齐酷狗桌面歌词：窗口矮、字不大、
     /// 悬浮在屏幕上只占一条缝。画中画窗口的**高度占比由内容宽高比决定**
     /// ——画布越扁，系统给的窗口越矮，「占用空间」就小；字号也跟着按宽度
     /// 比例调小（见 render 里 fontPt 的取值）。
+    ///
+    /// 2026-11-28 从 160 抬到 180（8:1 → 7:1）：用户要「按钮稍微大一点点，
+    /// 不要大太多」。画中画那排播控是系统画的，缩放跟着窗口走——窗口高一点，
+    /// 播放/暂停键就跟着大一点，但又不至于变成一条胖卡片。
     ///
     /// 但**不能写死**：画中画窗口的宽高比是系统给的（用户还能捏合缩放），
     /// 固定画布 + `resizeAspect` 会在窗口里上下留黑边，字看上去忽大忽小——
     /// 2026-11-25 用户报的「文字太大、不适配」就是这条。
     /// `didTransitionToRenderSize` 会按窗口真实比例改写 H。
     private var W = 1280
-    private var H = 160
+    private var H = 180
 
     // MARK: - 对外（C 入口调这些）
 
@@ -148,6 +173,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         UserDefaults.standard.set(wanted, forKey: "shuyin.pip.lyrics")
         if wanted {
             stopping = false
+            swallowUntil = .distantPast
+            selfClosing = false
             guard attachLayer() else {
                 /*
                  * 拿不到前台 keyWindow（App 还没完成启动）：这一下没法起 PiP。
@@ -170,15 +197,38 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
              */
             NSLog("[shuyin] pip armed (will show on background)")
         } else {
-            ctrl?.stopPictureInPicture()
-            ctrl = nil
-            host?.removeFromSuperview()
-            host = nil
+            /*
+             * 关开关 = 我们自己要收窗。**先立闸**再收：AVKit 收尾时会按
+             * Apple 文档那句「stop PiP terminates playback」调一次
+             * setPlaying(false)，转发出去就是把正在放的音乐暂停掉
+             * （2026-11-26 / 2026-11-28 两次实报的根因）。
+             *
+             * 控制器**不能当场置 nil**：置了就收不到 willStop/didStop，
+             * 闸立不起来、宿主 view 也清不掉。留给 didStop 收尾（selfClosing）。
+             */
+            markStopping(2)
+            if ctrl?.isPictureInPictureActive == true {
+                selfClosing = true
+                ctrl?.stopPictureInPicture()
+                NSLog("[shuyin] pip stop (toggle off)")
+            } else {
+                teardown()
+                /* 没在浮窗上就没有收尾回调，闸自己放掉，别让它一直吞 setPlaying */
+                stopping = false
+                swallowUntil = .distantPast
+            }
             painted = "\u{0}"
             lastEnqueue = .distantPast
         }
         NSLog("[shuyin] pip toggle -> %@", wanted ? "on" : "off")
         return wanted
+    }
+
+    /// 拆掉控制器与宿主 view（关开关、按 × 之后共用；「回 App」那条要留着，见 didStop）。
+    private func teardown() {
+        ctrl = nil
+        host?.removeFromSuperview()
+        host = nil
     }
 
     // MARK: - 建窗口
@@ -247,8 +297,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
          * "missing argument for parameter 'playbackDelegate'"）。
          *
          * 所以「靠不传 delegate 去掉播放控件」这条路在 iOS 26 上走不通。控件
-         * 的收敛改由代理方法做：`timeRangeForPlayback` 返回正无穷（直播语义）
-         * 让系统不摆 ±10 秒那两颗跳转键，剩下的交给系统空闲自动淡出。
+         * 的收敛改由下面两条做：`requiresLinearPlayback = true` 去掉 ±10 秒
+         * 跳转键，`timeRangeForPlayback` 给有限时长把播放/暂停键画出来。
          */
         let source = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: layer,
@@ -256,6 +306,18 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         )
         let c = AVPictureInPictureController(contentSource: source)
         c.delegate = self
+        /*
+         * **只要播放/暂停一颗键，不要 ±10 秒那两颗跳转键**（用户 2026-11-28）。
+         *
+         * 系统画不画跳转键看的是「内容能不能跳」：`requiresLinearPlayback = true`
+         * 把这条内容声明成线性播放，系统就不给跳转键（也不给拖动），剩下的
+         * 播放/暂停键要靠 `timeRangeForPlayback` 给**有限时长**才画得出来。
+         *
+         * 上一版走的是「时长返回正无穷（直播语义）→ 没有跳转键」，副作用是
+         * 暂停键变成了停止键（2026-11-26 实报）。两条约束的正确组合就是
+         * 「有限时长 + requiresLinearPlayback」。
+         */
+        c.requiresLinearPlayback = true
         /*
          * 已经成功启动过一次之后，切后台让系统自动浮起来。
          * 它要求 App 声明 audio 后台模式（Info.plist 已配）且此刻在出声。
@@ -546,7 +608,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     func pictureInPictureControllerWillStopPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController,
     ) {
-        stopping = true
+        markStopping(2)
         NSLog("[shuyin] pip will stop")
     }
 
@@ -570,9 +632,9 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
          * 的注释），说的是窗口里那条视频，不是正在放的音乐——只记账，不转发。
          * 没有这道闸，按 × 关窗口 = 音乐跟着暂停，2026-11-26 实报。
          */
-        if stopping {
+        if stopping || Date() < swallowUntil {
             self.playing = playing
-            NSLog("[shuyin] pip setPlaying(%d) swallowed (stopping)", playing ? 1 : 0)
+            NSLog("[shuyin] pip setPlaying(%d) swallowed (closing)", playing ? 1 : 0)
             return
         }
         /*
@@ -603,7 +665,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
     }
 
     /// iOS 26 SDK 把这个方法标成 required，删掉直接 conformance 编译失败。
-    /// 正无穷时长下系统一般不画跳转键；万一画出来，点下去映射上一首/下一首。
+    /// `requiresLinearPlayback = true` 之后系统不会再画跳转键；万一某个版本
+    /// 还是画了出来，点下去映射上一首/下一首，至少不是「跳 10 秒」这种胡说。
     func pictureInPictureController(
         _ controller: AVPictureInPictureController,
         skipByInterval skipInterval: CMTime,
@@ -643,7 +706,8 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
         _ controller: AVPictureInPictureController,
     ) {
         stopping = false
-        NSLog("[shuyin] pip stopped (fg=%d)", stoppingForForeground ? 1 : 0)
+        NSLog("[shuyin] pip stopped (fg=%d self=%d)",
+              stoppingForForeground ? 1 : 0, selfClosing ? 1 : 0)
         if stoppingForForeground {
             /*
              * 是我们自己「回到 App 就收起来」收的：**控制器和宿主 view 都留着**。
@@ -651,6 +715,13 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
              * `canStartPictureInPictureAutomaticallyFromInline` 自动重开。
              */
             stoppingForForeground = false
+            return
+        }
+        if selfClosing {
+            /* 我们自己关的开关：拆干净，不回传 pipclosed（开关本来就是关的）。 */
+            selfClosing = false
+            teardown()
+            painted = "\u{0}"
             return
         }
         /*
@@ -662,9 +733,7 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
          */
         wanted = false
         UserDefaults.standard.set(false, forKey: "shuyin.pip.lyrics")
-        ctrl = nil
-        host?.removeFromSuperview()
-        host = nil
+        teardown()
         painted = "\u{0}"
         send("pipclosed")
     }
