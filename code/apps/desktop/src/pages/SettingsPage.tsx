@@ -955,7 +955,7 @@ export function SettingsPage({ deskOn, onToggleDesk }: SettingsPageProps) {
         <div className="set-row">
           <span className="set-label">
             诊断日志
-            <span className="set-sub">只保留最近 3 天；出问题时导出发给开发者</span>
+            <span className="set-sub">只保留最近 3 天</span>
           </span>
           <span className="set-ctl">
             <button className="ghost-btn" onClick={() => void exportLogs()}>导出日志</button>

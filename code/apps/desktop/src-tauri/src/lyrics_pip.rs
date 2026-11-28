@@ -85,6 +85,21 @@ mod ffi {
         let f: Fn = unsafe { std::mem::transmute(p) };
         unsafe { f() }
     }
+
+    /// 前端把播放页画出来了：放行系统那条「放大回 App」的动画。
+    ///
+    /// 见 Swift 里 `restoreUserInterfaceForPictureInPictureStopWithCompletionHandler`
+    /// 的注释：以前固定等 150ms 就回调，WebView 那会儿还没画完 → 放大落点是
+    /// 一张黑屏，用户看到「黑一下再滑上来」。
+    pub fn restore_ready() {
+        let p = lookup("shuyin_pip_restore_ready");
+        if p.is_null() {
+            return;
+        }
+        type Fn = unsafe extern "C" fn();
+        let f: Fn = unsafe { std::mem::transmute(p) };
+        unsafe { f() }
+    }
 }
 
 /// App 启动时点亮 Swift 侧 C 入口，防 -dead_strip 剥掉符号。
@@ -127,3 +142,12 @@ pub fn on() -> bool {
 pub fn on() -> bool {
     false
 }
+
+/// 前端播完「回到播放页」这一帧了，放行画中画收尾动画。
+#[cfg(target_os = "ios")]
+pub fn restore_ready() {
+    ffi::restore_ready();
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn restore_ready() {}

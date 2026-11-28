@@ -644,14 +644,31 @@ export function App() {
    *
    * iOS 原生收到那颗方框箭头后会把画中画窗口放大回应用。以前我们什么都不做，
    * 放大的落点是「离开时停着的那一页」（曲库/列表），用户看到的就是
-   * 「黑一下、然后跳到别处」。现在原生先发这条 `pip://restore`、等 150ms
-   * 再放大，这里抢先把播放页亮出来，动画落点直接是播放界面。
+   * 「黑一下、然后跳到别处」。现在原生先发这条 `pip://restore`，
+   * 等这里的回执（`pip_restore_ready`）再放大，落点就是画好的播放界面。
    */
   useEffect(() => bridge.onPipRestore(() => {
+    /*
+     * 「放大的落点就是播放页」要拆成两半才成立（2026-11-28 第二次反馈）：
+     *
+     *   1. 页面本身**瞬间出现**。`flashPlayer` 只是先把 `data-open` 翻过来，
+     *      `.imm` 那条 280ms 的位移淡入还在——系统放大动画落在一张正在淡入、
+     *      还在往上滑的页面上，看起来就是「黑一下，然后滑到顶上」。
+     *      这里给 <html> 挂 `data-imm-instant`，CSS 把播放页的过渡全关掉，
+     *      等这一趟结束（600ms）再摘掉。
+     *   2. 画完再让系统动。原生把 completionHandler 存着等回执，
+     *      两帧之后（React 的重渲染 + 首帧合成）我们再回一条 `pip_restore_ready`。
+     */
+    const root = document.documentElement
+    root.dataset.immInstant = '1'
     flashPlayer(true)
     openDetail(null)
     setQueueOpen(false)
     setNowOpen(true)
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      void bridge.invoke('pip_restore_ready').catch(() => {})
+      window.setTimeout(() => { delete root.dataset.immInstant }, 600)
+    }))
   }), [])
 
   /* ---------- 点击空白处收起右侧卡片 ----------

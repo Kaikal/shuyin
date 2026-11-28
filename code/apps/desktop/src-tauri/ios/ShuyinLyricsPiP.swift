@@ -121,6 +121,10 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
      */
     private var restoring = false
 
+    /// 等前端「播放页画好了」的回执再回调的那颗 completionHandler。
+    /// 只存一次；`finishRestore` 取走并置 nil，所以超时与回执谁先到都只生效一次。
+    private var pendingRestore: ((Bool) -> Void)?
+
     /// 立闸：`stopping` 立即生效，另给一个 `secs` 秒的时间窗口兜住迟到的 setPlaying。
     private func markStopping(_ secs: TimeInterval) {
         stopping = true
@@ -660,16 +664,31 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
            这条会在回到前台的第一时间执行，正好赶在放大动画之前）。 */
         send("restore")
         /*
-         * 150ms：足够 WebView 跑完 React 的一次渲染（事件是回到前台后才处理，
-         * 这一小段同时也在等 window 变 key）。再多用户就会觉得「点了没反应」。
+         * **等前端的回执再放行动画**。
+         *
+         * 上一版固定等 150ms 就 `completionHandler(true)`：那会儿 WKWebView
+         * 往往还没画出播放页，系统按我们的话开始放大，落点是一张还没上色的
+         * 界面——用户看到的就是「黑一下、然后页面滑上来」（2026-11-28 第二次实报）。
+         * 现在把回调存起来，前端画完播放页那一帧回一条 `pip_restore_ready`
+         * （Rust `pip_restore_ready` → dlsym 到本文件），我们才让系统动。
+         * 900ms 是兜底：回执丢了也绝不能让画中画窗口僵在原地。
          */
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            completionHandler(true)
+        pendingRestore = completionHandler
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            self?.finishRestore("timeout")
         }
         /* 兜底：万一系统没回调 didStop，旗子不能一直立着 */
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.restoring = false
         }
+    }
+
+    /// 放行系统那条「放大回 App」的动画（只生效一次）。
+    func finishRestore(_ why: String) {
+        guard let cb = pendingRestore else { return }
+        pendingRestore = nil
+        NSLog("[shuyin] pip restore -> animate (%@)", why)
+        cb(true)
     }
 
     // MARK: - SampleBufferPlaybackDelegate（iOS 26 SDK 里这 4 个都是 required）
@@ -844,6 +863,20 @@ public func shuyinPiPOn() -> Bool {
     var out = false
     DispatchQueue.main.sync { out = ShuyinPiP.shared.wanted }
     return out
+}
+
+/// 前端「播放页已经画好了」的回执：放行系统那条放大动画。
+///
+/// 由 Rust 的 `pip_restore_ready` 命令 dlsym 过来（`App.tsx` 在打开播放页
+/// 之后、两帧之后调）。回调必须在主线程，所以这里统一跳一次 main。
+@_cdecl("shuyin_pip_restore_ready")
+public func shuyinPiPRestoreReady() {
+    guard #available(iOS 15.0, *) else { return }
+    if Thread.isMainThread {
+        ShuyinPiP.shared.finishRestore("ui ready")
+    } else {
+        DispatchQueue.main.async { ShuyinPiP.shared.finishRestore("ui ready") }
+    }
 }
 
 /// App 启动时申请通知授权。系统「正在播放」卡与画中画都属通知体系，

@@ -73,13 +73,15 @@ export function FloatLyricSection() {
 
   return (
     <section className="set-group" data-pane="shell" data-sec="float">
-      <h3>桌面歌词</h3>
       {/*
        * 2026-11-28 用户要求：这一块**不要任何说明文字**，标题 + 一颗开关就够。
-       * 所以没有 `set-label`、没有 `set-sub`（空 span 只是把开关顶到右边）。
+       *
+       * 之前写成「h3 标题 + 一行空标签托着开关」，卡片里那行只有一颗开关、
+       * 标题又单独占一行，渲染出来是一大块空白（用户：「你自己看一下好看吗」）。
+       * 现在就是把标题当成行标签，开关贴右边——和「启动时接着上次播放」同一种形状。
        */}
       <div className="set-row">
-        <span className="set-label" />
+        <span className="set-label">桌面歌词</span>
         <button
           className="toggle" role="switch" aria-checked={on}
           onClick={toggle}

@@ -31,6 +31,8 @@ export function SleepSheet({ open, onClose }: { open: boolean; onClose(): void }
   const { sleep } = p
   /* 关闭时先把动画放完再卸载：直接 return null 会「啪」一下消失 */
   const [shown, setShown] = useState(open)
+  /* 自定义分钟数（字符串：允许用户先删空再输，不要被 number 强转成 0） */
+  const [custom, setCustom] = useState('')
 
   useEffect(() => {
     if (open) { setShown(true); return }
@@ -52,6 +54,12 @@ export function SleepSheet({ open, onClose }: { open: boolean; onClose(): void }
     : sleep.on
       ? `还有 ${mmss(sleep.remain)}，到点会暂停`
       : '到点后暂停，不会关掉应用'
+
+  /* 1~720 分钟之外的不算数（空串 / 0 / 超长）：按钮据此置灰 */
+  const customMin = (() => {
+    const n = Number.parseInt(custom, 10)
+    return Number.isFinite(n) && n >= 1 && n <= 720 ? n : 0
+  })()
 
   /* 选完就收起：这是个「一锤子」设置，留在面板上没有任何后续操作 */
   const pick = (min: number | 'track' | null) => {
@@ -101,6 +109,36 @@ export function SleepSheet({ open, onClose }: { open: boolean; onClose(): void }
                   </button>
                 )
               })}
+            </div>
+          </div>
+
+          <div className="spx-sec">
+            <div className="spx-label">自定义</div>
+            {/*
+             * 自定义分钟数：预设只有 15/30/45/60/90，用户 2026-11-28 反馈
+             * 「没有自定义时长」。范围卡 1~720（12 小时）——再长就不是「定时
+             * 关闭」而是「忘了关」，原生那边也是按 32 位秒数存的，不设上限没意义。
+             */}
+            <div className="sleep-in-row">
+              <input
+                className="sleep-in"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                placeholder="分钟数"
+                value={custom}
+                onChange={e => setCustom(e.target.value.replace(/[^\d]/g, '').slice(0, 4))}
+                aria-label="自定义分钟数"
+              />
+              <span className="sleep-in-unit">分钟后暂停</span>
+              <button
+                className="ghost-btn"
+                disabled={!customMin}
+                style={customMin ? undefined : { opacity: 0.45 }}
+                onClick={() => { if (customMin) pick(customMin) }}
+              >
+                开始
+              </button>
             </div>
           </div>
 

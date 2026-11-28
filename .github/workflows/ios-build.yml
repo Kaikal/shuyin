@@ -408,7 +408,7 @@ jobs:
           echo "--- 桥接符号"
           nm -gU "$BIN" 2>/dev/null | grep -E "_shuyin_" || echo "(一个都没有)"
           MISSING=""
-          for s in shuyin_pip_adopt shuyin_pip_set shuyin_pip_toggle shuyin_pip_on \
+          for s in shuyin_pip_adopt shuyin_pip_set shuyin_pip_toggle shuyin_pip_on shuyin_pip_restore_ready \
                    shuyin_island_adopt shuyin_island_set shuyin_island_toggle shuyin_island_on shuyin_island_enabled shuyin_island_running \
                    shuyin_notif_bootstrap shuyin_remote_command; do
             if nm -gU "$BIN" 2>/dev/null | grep -qE "[[:space:]]_${s}$"; then

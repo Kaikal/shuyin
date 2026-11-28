@@ -924,6 +924,17 @@ fn pip_lyric_state() -> bool {
     crate::lyrics_pip::on()
 }
 
+/// 前端回执：点画中画「回到 App」时，播放页已经画好了，可以放行放大动画。
+///
+/// 为什么要这条：系统会先问我们「界面准备好了没」（Swift 侧把 completionHandler
+/// 存了下来），过早回 true 就是「放大落点是一张黑屏，然后页面再滑上来」。
+/// 前端在 `pip://restore` 里切到播放页、两帧之后再调这条。
+/// 非 iOS 空实现（安卓没有画中画，桌面端画中画是另一个窗口）。
+#[tauri::command]
+fn pip_restore_ready() {
+    crate::lyrics_pip::restore_ready();
+}
+
 /// 开关「灵动岛」的自绘胶囊（iOS Live Activity）。
 ///
 /// **2026-11-28 起设置里已经没有这颗开关**（用户：「用系统那个，不要自绘」）：
@@ -3737,6 +3748,9 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             {
                 let handle = app.handle().clone();
+                /* iOS 系统卡对账的「连续不一致」计数（见下面那段） */
+                #[cfg(target_os = "ios")]
+                let mut card_miss = 0u8;
                 std::thread::spawn(move || loop {
                     /*
                      * 定时关闭到点：**原生自己暂停**，不等前端。
@@ -3752,6 +3766,48 @@ pub fn run() {
                             p.pause();
                         }
                         append_log(&handle, "sleep: timer fired -> pause");
+                    }
+                    /*
+                     * iOS：系统「正在播放」卡的播放/暂停**跟着引擎真值走**。
+                     *
+                     * 卡片有三个写入口，任何一个推错，系统那张卡（锁屏 /
+                     * 通知中心 / 灵动岛，是同一张）就会一直错到下一次状态变化：
+                     *   · 前端 `smtc_update`（界面在后台时 JS 冻着，来不了）；
+                     *   · 锁屏按键 `dispatch`（只在用户按键那一下）；
+                     *   · 原生接歌 `card_for_parts`（后台自动接下一首走这里，
+                     *     它取的是那一刻的真值，起播瞬间可能还是 false）。
+                     * 用户 2026-11-28 第二次报「灵动岛和通知栏的播放暂停还是不同步」，
+                     * 落在这三条的缝里：没人再推一次。
+                     *
+                     * 这里每 250ms 比一次「卡上写的」和「引擎真的」，不一致就重推。
+                     * 比的是 `smtc` 里记的**已推值**（PUSHED），所以哪怕错是别人推的，
+                     * 下一个 tick 也会被纠回来。放在 UI_VISIBLE 闸**前面**：
+                     * 熄屏/后台正是这套纠错最要紧的时候。
+                     *
+                     * **要连续三拍（≈750ms）都不一致才动手**：暂停/恢复走的是
+                     * `Cmd::Pause` + 淡出，引擎那份 `playing` 要一两百毫秒才翻过来；
+                     * 一拍就纠会把用户刚按下的状态弹回去（锁屏点暂停 → 卡片闪回
+                     * 「在播」→ 再变暂停）。
+                     */
+                    #[cfg(target_os = "ios")]
+                    {
+                        if let Some(p) = handle.try_state::<Player>() {
+                            let (_, playing, pos, dur) = p.state_lite();
+                            let now = if playing { 1i8 } else { 0 };
+                            let pushed = crate::smtc::pushed_playing();
+                            /* -1 = 卡上现在是空的（没歌 / 已撤）：没东西可对账 */
+                            if pushed >= 0 && pushed != now {
+                                card_miss = card_miss.saturating_add(1);
+                                if card_miss >= 3 {
+                                    card_miss = 0;
+                                    /* `refresh_state` = apple 模块里那条 `reapply`
+                                       （只翻播放态、元信息沿用上一次推的） */
+                                    crate::smtc::refresh_state(playing, pos, dur);
+                                }
+                            } else {
+                                card_miss = 0;
+                            }
+                        }
                     }
                     /*
                      * 界面在后台就别推了——**只在 iOS 上这么做**。
@@ -3898,6 +3954,7 @@ pub fn run() {
             smtc_update,
             pip_lyric_toggle,
             pip_lyric_state,
+            pip_restore_ready,
             island_toggle,
             island_state,
             ios_media::lyric_timeline,

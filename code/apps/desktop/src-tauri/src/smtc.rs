@@ -301,6 +301,18 @@ pub fn refresh_state(playing: bool, pos: f64, dur: f64) {
     apple::reapply(playing, pos, dur);
 }
 
+/// 系统卡上一次写进去的播放态（-1 = 没写/已撤）。
+/// 250ms 对表线程用它跟引擎比，见 `apple::PUSHED` 的注释。非 iOS 恒 -1。
+#[cfg(target_os = "ios")]
+pub fn pushed_playing() -> i8 {
+    apple::pushed_playing()
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn pushed_playing() -> i8 {
+    -1
+}
+
 /// 灵动岛开关打开后的即时对账：立刻撤系统「正在播放」卡（岛上小黑点的根源）。
 /// 关闭方向不用这里管——`apply` 在下一次切歌/暂停恢复时看到开关已关就自动
 /// 重发系统卡（state ticker 也在兜底）。
@@ -740,6 +752,19 @@ mod apple {
     /// 用户看到的就是「明明在放，锁屏还画着 ▶」（2026-11-23 反馈）。
     static LAST: std::sync::Mutex<Option<LastInfo>> = std::sync::Mutex::new(None);
 
+    /// 最近一次真正写进 `MPNowPlayingInfoCenter` 的播放态（-1 = 卡还没写过/已撤）。
+    ///
+    /// 250ms 的对表线程（lib.rs）拿它跟引擎真值比：不一致就 `reapply` 重推一次。
+    /// 为什么需要它：卡片有三个写入口（前端的 `smtc_update`、锁屏按键那条
+    /// `dispatch`、原生接歌的 `card_for_parts`），任何一处推错，系统那张卡
+    /// 就会一直错到下一次状态变化——后台 JS 冻着时尤其明显（用户 2026-11-28
+    /// 第二次报「灵动岛和通知栏的播放暂停不同步」）。
+    static PUSHED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+
+    pub fn pushed_playing() -> i8 {
+        PUSHED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     #[derive(Clone)]
     struct LastInfo {
         title: String,
@@ -828,6 +853,7 @@ mod apple {
     /// 播放暂停都在 Rust 侧直接做——前端可能已被系统挂起，不能指望它。
     fn dispatch(app: &AppHandle, cmd: &str, pos: Option<f64>) {
         use tauri::Manager;
+        crate::append_log(app, &format!("smtc.cmd {cmd}"));
         let Some(p) = app.try_state::<crate::player::Player>() else {
             return;
         };
@@ -1103,6 +1129,15 @@ mod apple {
         duration: f64,
         fav: bool,
     ) {
+        /*
+         * 留痕：再出现「岛上/通知栏跟 App 不一致」时，先看这行——
+         * `playing` 是**推过去的真值**，`pos` 是那一帧的进度。
+         * 与 `card idx=… playing=…`（原生接歌）和 `smtc.cmd …`（锁屏按键）
+         * 三条成对读，就能分清是没人推、还是推错了。
+         */
+        crate::player::log(&format!(
+            "smtc: apply \"{title}\" playing={playing} pos={position:.1}/{duration:.1}"
+        ));
         unsafe {
             /*
              * 这些对象是 autoreleased 的，而调用线程（Tauri 的命令线程）没有
@@ -1120,6 +1155,7 @@ mod apple {
                 if let Ok(mut g) = LAST.lock() {
                     *g = None;
                 }
+                PUSHED.store(-1, std::sync::atomic::Ordering::Relaxed);
                 /* 没有歌就没有「已收藏」：那颗 ♥ 得退回空心，否则下一首一开就是亮的 */
                 set_like(false);
                 if let Some(np_cls) = cls("MPNowPlayingInfoCenter") {
@@ -1170,6 +1206,14 @@ mod apple {
                 "MPNowPlayingInfoPropertyPlaybackRate",
                 num(if playing { 1.0 } else { 0.0 })
             );
+            /*
+             * 「标称速率」也写一份（恒 1.0）。
+             * 系统算进度时用的是 rate × 时间差，暂停那一帧 rate=0 就停住；
+             * 只写 rate 不写 defaultRate 时，部分系统版本在「暂停 → 恢复」之后
+             * 会把卡片上的键停在 ⏸ 不动（2026-11-28 用户第二次报「不同步」）。
+             * 两个字段一起给，行为才稳定。
+             */
+            put!("MPNowPlayingInfoPropertyDefaultPlaybackRate", num(1.0));
             let art = artwork(cover);
             let missing_art = art.is_none();
             if let Some(art) = art {
@@ -1198,6 +1242,7 @@ mod apple {
                 let _: () = objc2::msg_send![&center, setNowPlayingInfo: nil];
             } else {
                 let _: () = objc2::msg_send![&center, setNowPlayingInfo: &*info];
+                PUSHED.store(if playing { 1 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
                 /*
                  * 显式告诉系统「现在是在播还是暂停」。
                  *

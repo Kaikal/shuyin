@@ -1027,6 +1027,24 @@ html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-tabrow-solo { margin
   from { opacity: 0; transform: translateX(26px); }
   to { opacity: 1; transform: none; }
 }
+
+/*
+ * 画中画「回到 App」的那一帧：播放页**直接出现**，不要位移也不要淡入。
+ *
+ * 启由 App.tsx 的 `pip://restore` 处理里挂到 <html> 上（600ms 后摘掉）。
+ * 系统会把画中画窗口放大回应用，落点必须是一张已经画好的播放页；只要这页
+ * 还在 280ms 的 translateY + opacity 过渡里，用户看到的就是「黑一下、
+ * 然后页面从下往上滑」（2026-11-28 两次实报）。
+ * 子元素也一起关：封面 / 控制区各有一段错开的入场过渡，留着照样是「先黑后亮」。
+ */
+html[data-imm-instant='1'] .imm,
+html[data-imm-instant='1'] .imm * {
+  transition: none !important;
+}
+html[data-imm-instant='1'] .imm {
+  opacity: 1 !important;
+  transform: none !important;
+}
 @media (prefers-reduced-motion: reduce) {
   html[data-shell='phone'] .imm-grid[data-pager='lyric'] .imm-lyric { animation: none; }
 }
@@ -1781,6 +1799,13 @@ html[data-shell='phone'] .settings-page .set-row {
   padding: 10px 2px;
   min-height: 44px;
 }
+/*
+ * 底部再垫一截：迷你播放条是 `position: fixed` 浮在页面上的（`.page` 的 inset
+ * 只让到 Tab 栏上方），最后一行设置项在滚到底时仍可能落在播放条背后。
+ * 用户 2026-11-28 报「定时关闭被迷你播放条挡住，点不到」就是这条——
+ * 播放页那两段（频谱 / 音效）都很高，睡眠那块正好是「滚到底才看得见」的那一段。
+ */
+html[data-shell='phone'] .settings-page { padding-bottom: 68px; }
 html[data-shell='phone'] .settings-page .set-label {
   font-size: 13.5px;
   color: var(--hd-text-1);
@@ -4648,6 +4673,31 @@ html[data-shell='phone'] .imm-mp-acts .imm-dl-wrap { display: flex; }
 .spx-pos .spx-card { padding: 9px 8px; min-height: 62px; }
 .spx-pos .spx-n { font-size: 12px; }
 .spx-pos .spx-d { font-size: 9.5px; }
+
+/*
+ * 定时关闭 · 自定义分钟数（2026-11-28）。
+ * 一行三格：输入框（吃掉剩余宽度）/ 单位 / 开始。高度对齐上面的 `.spx-card`
+ * 里那颗按钮，免得同一张面板里出现两种按钮高度。
+ */
+.sleep-in-row { display: flex; align-items: center; gap: 8px; }
+.sleep-in {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--hd-line-strong);
+  border-radius: 12px;
+  background: var(--hd-surface-1);
+  color: var(--hd-text-1);
+  font-size: 14px;
+  /* iOS 输入框默认给个内阴影 + 圆角改不动，清掉才和旁边的卡片一致 */
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+}
+.sleep-in::placeholder { color: var(--hd-text-4); font-size: 12.5px; }
+.sleep-in-unit { flex: none; font-size: 11.5px; color: var(--hd-text-3); }
+.sleep-in-row .ghost-btn { flex: none; height: 40px; }
 
 /* ------------------------------------------------------------------ */
 /* 频谱横条（手机播放页，位置=页面底部 / 页面顶部）                     */
