@@ -244,6 +244,7 @@ fn prune_logs(dir: &std::path::Path) {
 /// `Documents/疏音/app.log`（就是那个下载目录）。搬过来之后老文件删掉，
 /// 省得用户以为「日志还堆在下载里」。
 fn migrate_legacy_logs(app: &AppHandle, dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
     let mut olds: Vec<PathBuf> = Vec::new();
     if let Ok(d) = app.path().app_local_data_dir() {
         olds.push(d.join("app.log"));
@@ -253,9 +254,6 @@ fn migrate_legacy_logs(app: &AppHandle, dir: &std::path::Path) {
         olds.push(d.join("疏音").join("app.log"));
     }
     for old in olds {
-        if old == log_file_in(dir) {
-            continue;
-        }
         let Ok(meta) = std::fs::metadata(&old) else { continue };
         if meta.len() == 0 {
             let _ = std::fs::remove_file(&old);
@@ -263,32 +261,37 @@ fn migrate_legacy_logs(app: &AppHandle, dir: &std::path::Path) {
         }
         /* 老文件可能很大：只搬最后一段，够定位问题了 */
         let text = std::fs::read_to_string(&old).unwrap_or_default();
-        if !text.is_empty() {
-            use std::io::Write;
-            if std::fs::create_dir_all(dir).is_ok() {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_file_in(dir))
-                {
-                    let tail: String = {
-                        let skip = text.len().saturating_sub(512 * 1024);
-                        let mut s = &text[skip..];
-                        /* 别从半个字符/半行开始 */
-                        if let Some(i) = s.find('\n') {
-                            s = &s[i + 1..];
-                        }
-                        s.to_string()
-                    };
-                    let _ = f.write_all("---- 旧版日志（搬迁） ----\n".as_bytes());
-                    let _ = f.write_all(tail.as_bytes());
-                    if !tail.ends_with('\n') {
-                        let _ = f.write_all(b"\n");
-                    }
-                }
-            }
+        if text.is_empty() {
+            continue;
         }
-        let _ = std::fs::remove_file(&old);
+        /* 从「最后 512KB」那一行开始搬。**不能直接按字节下标切**：
+           切点落在多字节汉字的中间会 panic（日志里中文一大把）。 */
+        let skip = text.len().saturating_sub(512 * 1024);
+        let start = text
+            .char_indices()
+            .find(|(i, _)| *i >= skip)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let tail = &text[start..];
+        let tail = tail.find('\n').map(|i| &tail[i + 1..]).unwrap_or(tail);
+
+        let ok = (|| -> bool {
+            use std::io::Write;
+            let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_file_in(dir))
+            else {
+                return false;
+            };
+            f.write_all("---- 旧版日志（搬迁） ----\n".as_bytes()).is_ok()
+                && f.write_all(tail.as_bytes()).is_ok()
+                && (tail.ends_with('\n') || f.write_all(b"\n").is_ok())
+        })();
+        /* 写进去了才删老文件：写不进去（目录没权限等）就留着，别丢日志 */
+        if ok {
+            let _ = std::fs::remove_file(&old);
+        }
     }
 }
 
