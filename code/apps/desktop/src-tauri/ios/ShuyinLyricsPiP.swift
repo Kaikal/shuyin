@@ -363,25 +363,45 @@ final class ShuyinPiP: NSObject, AVPictureInPictureControllerDelegate,
                 object: nil, queue: .main,
             ) { [weak self] _ in
                 guard let self, self.wanted else { return }
-                if self.ctrl?.isPictureInPictureActive == true {
-                    /*
-                     * 正在「回 App」的系统收尾（restore）就别再插一脚：
-                     * 系统已经在把窗口放大回去了，我们再 stopPictureInPicture()
-                     * 会变成两个动画抢同一个窗口——黑屏 + 多滑一下就是这么来的。
-                     */
-                    if self.restoring {
-                        NSLog("[shuyin] pip active-stop skipped (restoring)")
+                /*
+                 * **晚 250ms 再决定收不收窗。**
+                 *
+                 * 这里是「回到 App 就把浮窗收掉」的兜底。但点画中画上的
+                 * 「回到 App」时，系统的 `didBecomeActive` 往往**先于**
+                 * `restoreUserInterfaceForPictureInPictureStop` 到达——
+                 * 那一刻 `restoring` 还是 false，于是我们抢先
+                 * `stopPictureInPicture()`，系统随后开始的放大动画就撞上了
+                 * 我们自己发起的收窗：用户看到的还是「黑一下、页面再滑上来」。
+                 * （2026-11-28 第三次反馈。上一版只加了 `restoring` 判断，
+                 * 败在时序上。）
+                 *
+                 * 让这一拍先过去：restore 回调会在这段时间里把 `restoring`
+                 * 立起来，我们就不再插手；真要是普通切回 App（PiP 还在飘、
+                 * 没人点放大），250ms 后再收也完全感知不到。
+                 */
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    guard let self, self.wanted else { return }
+                    if self.ctrl?.isPictureInPictureActive == true {
+                        /*
+                         * 正在「回 App」的系统收尾（restore）就别再插一脚：
+                         * 系统已经在把窗口放大回去了，我们再 stopPictureInPicture()
+                         * 会变成两个动画抢同一个窗口——黑屏 + 多滑一下就是这么来的。
+                         */
+                        if self.restoring {
+                            NSLog("[shuyin] pip active-stop skipped (restoring)")
+                            return
+                        }
+                        self.stoppingForForeground = true
+                        self.ctrl?.stopPictureInPicture()
+                        NSLog("[shuyin] pip stop (back to app)")
                         return
                     }
-                    self.stoppingForForeground = true
-                    self.ctrl?.stopPictureInPicture()
-                    NSLog("[shuyin] pip stop (back to app)")
-                    return
-                }
-                if self.host == nil, self.attachLayer() {
-                    self.setupIfNeeded()
-                    self.paint(force: true)
-                    NSLog("[shuyin] pip re-attach (active)")
+                    /* 开关点得太早（窗口还没建好）时在这里补建内联内容 */
+                    if self.host == nil, self.attachLayer() {
+                        self.setupIfNeeded()
+                        self.paint(force: true)
+                        NSLog("[shuyin] pip re-attach (active)")
+                    }
                 }
             }
         }

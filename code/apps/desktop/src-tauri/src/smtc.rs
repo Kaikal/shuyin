@@ -929,6 +929,26 @@ mod apple {
                 crate::append_log(app, &format!("smtc.cmd unknown {other}"));
             }
         }
+
+        /*
+         * 命令都是**异步落地**的：暂停要先淡出（几百毫秒），resume 要等音频
+         * 线程把 sink 拉起来，取链失败时甚至根本不会变成「在播」。上面那几条
+         * `reapply(true/false, …)` 推的是「我以为结果会是什么」，不是真值——
+         * 一旦命令没成，卡片就停在错的状态，直到下一次状态变化才有人来改。
+         * 600ms 后按 `state_lite()` 再推一次，把这条缝补上。
+         * （250ms 广播线程里的对表也能纠，但那是 3 拍 ≈750ms 且只比「推过的
+         * 值」，遇到卡片被系统乐观改过的情形看不见；这里直接写真值，最稳。）
+         */
+        if matches!(cmd, "play" | "pause" | "playpause") {
+            let h = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                if let Some(p) = h.try_state::<crate::player::Player>() {
+                    let (_, playing, pos, dur) = p.state_lite();
+                    reapply(playing, pos, dur);
+                }
+            });
+        }
     }
 
     /* ---------------- Now Playing 卡片 ---------------- */
